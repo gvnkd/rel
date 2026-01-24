@@ -1,0 +1,20 @@
+[gd_scene load_steps=4 format=3 uid="uid://brvg61qdrrc72"]
+
+[ext_resource type="Script" uid="uid://bmdlpupaqtue5" path="res://plot_grid.gd" id="1_r8nw5"]
+[ext_resource type="Script" uid="uid://bi3nc8u36qr8q" path="res://plot.gd" id="1_ticr0"]
+[ext_resource type="Script" uid="uid://bklp45gnt6msu" path="res://plot_data.gd" id="3_ctcuh"]
+
+[node name="Plot" type="Node2D"]
+script = ExtResource("1_ticr0")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+
+[node name="Grid" type="Node2D" parent="."]
+script = ExtResource("1_r8nw5")
+
+[node name="VLine" type="Sprite2D" parent="Grid"]
+
+[node name="HLine" type="Sprite2D" parent="Grid"]
+
+[node name="Data" type="Node2D" parent="."]
+script = ExtResource("3_ctcuh")

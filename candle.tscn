@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3 uid="uid://c2mfb8qk24yu8"]
+
+[ext_resource type="Script" uid="uid://croas0u47b83" path="res://candle.gd" id="1_tcgl6"]
+
+[node name="Candle" type="Node2D"]
+script = ExtResource("1_tcgl6")
+
+[node name="Shadow" type="Sprite2D" parent="."]
+
+[node name="Body" type="Sprite2D" parent="."]
