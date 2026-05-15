@@ -204,7 +204,8 @@ func _process(delta: float) -> void:
 func buy_or_sell(bid: int, ask: int) -> bool:
 	var bs = randf()
 	var vol = randi_range(1, 20)
-	var pdelta = randi_range(50, 500)
+	# how mach ticks from price
+	var pdelta = randi_range(0, 10)
 	if bs > 0.75: # sell
 		if bid == 0:
 			place_order(ask - pdelta, -vol)
@@ -304,3 +305,11 @@ func process_orders():
 
 	for p in asks_del:
 		asks.erase(p)
+
+func sim_n_ticks(n: int):
+	# 1. place N random orders
+	# 1.1 process order book until no trades
+	# 2. return OHLC as a result of those trades
+	var iters_per_loop = 10
+	for x in range(0, iters_per_loop):
+		pass
