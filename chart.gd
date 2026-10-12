@@ -62,16 +62,17 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton:
 		var button := event as InputEventMouseButton
 		if button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_UP:
-			view.zoom_at(button.position, ZOOM_FACTOR)
+			view.zoom_x_at(button.position, ZOOM_FACTOR)
 			_refresh()
 		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			view.zoom_at(button.position, 1.0 / ZOOM_FACTOR)
+			view.zoom_x_at(button.position, 1.0 / ZOOM_FACTOR)
 			_refresh()
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
 		cross_widget.mouse = motion.position
-		var dragging := motion.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE) != 0
-		if dragging or pan_mode:
+		if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
+			view.scale_by(motion.relative, motion.position)
+		elif motion.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE) != 0 or pan_mode:
 			view.pan_by(motion.relative)
 		_refresh()
 

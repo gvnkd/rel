@@ -42,6 +42,19 @@ func zoom_at(pos: Vector2, factor: float) -> void:
 	base_index = i - (pos.x - plot_rect.position.x) / px_per_index
 	base_price = p + (pos.y - plot_rect.position.y) / px_per_price
 
+func zoom_x_at(pos: Vector2, factor: float) -> void:
+	var i := x_to_index(pos.x)
+	px_per_index = clampf(px_per_index * factor, 1.0, 400.0)
+	base_index = i - (pos.x - plot_rect.position.x) / px_per_index
+
+func scale_by(delta: Vector2, pos: Vector2) -> void:
+	var i := x_to_index(pos.x)
+	var p := y_to_price(pos.y)
+	px_per_index = clampf(px_per_index * pow(1.01, delta.x), 1.0, 400.0)
+	px_per_price = clampf(px_per_price * pow(1.01, -delta.y), 1.0e-6, 1.0e8)
+	base_index = i - (pos.x - plot_rect.position.x) / px_per_index
+	base_price = p + (pos.y - plot_rect.position.y) / px_per_price
+
 func pan_by(delta: Vector2) -> void:
 	base_index -= delta.x / px_per_index
 	base_price += delta.y / px_per_price
