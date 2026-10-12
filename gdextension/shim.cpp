@@ -4,6 +4,8 @@
 #include <godot_cpp/variant/string.hpp>
 
 extern "C" int sim_generate(const char *params, const char *out_path);
+extern "C" double sim_progress(void);
+extern "C" void sim_cancel(void);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -24,6 +26,8 @@ class SimNative : public godot::RefCounted {
 protected:
 	static void _bind_methods() {
 		godot::ClassDB::bind_method(godot::D_METHOD("generate", "params", "out_path"), &SimNative::generate);
+		godot::ClassDB::bind_method(godot::D_METHOD("progress"), &SimNative::progress);
+		godot::ClassDB::bind_method(godot::D_METHOD("cancel"), &SimNative::cancel);
 	}
 
 public:
@@ -31,6 +35,14 @@ public:
 		godot::CharString ps = params.utf8();
 		godot::CharString op = out_path.utf8();
 		return sim_generate(ps.ptr(), op.ptr());
+	}
+
+	double progress() {
+		return sim_progress();
+	}
+
+	void cancel() {
+		sim_cancel();
 	}
 };
 

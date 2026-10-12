@@ -96,6 +96,7 @@ func _build_ui() -> void:
 	gen_btn.text = "Generate"
 	gen_btn.pressed.connect(_on_generate)
 	box.add_child(gen_btn)
+	_gen_btn = gen_btn
 
 	var load_btn := Button.new()
 	load_btn.text = "Load CSV..."
@@ -123,6 +124,40 @@ func _build_ui() -> void:
 	_load_dialog = dialog
 
 var _load_dialog: FileDialog
+var _gen_thread: Thread
+var _gen_btn: Button
+var _gen_name := ""
+var _gen_out_path := ""
+var _gen_start := 0
+var _gen_status_sec := -1
+
+func _process(_delta: float) -> void:
+	if _gen_thread == null:
+		set_process(false)
+		return
+	var elapsed := (Time.get_ticks_msec() - _gen_start) / 1000
+	if _gen_thread.is_alive():
+		if elapsed != _gen_status_sec:
+			_gen_status_sec = elapsed
+			var pct: float = _sim.progress()
+			_update_status("generating %s… %d%% (%ds)" % [_gen_name, int(pct * 100), elapsed])
+		return
+	var err: int = _gen_thread.wait_to_finish()
+	_gen_thread = null
+	set_process(false)
+	_gen_btn.disabled = false
+	_gen_btn.text = "Generate"
+	if err == 3:
+		_update_status("generation cancelled")
+		return
+	if err != 0:
+		_update_status("generation failed (code %d)" % err)
+		return
+	var tl_name := _gen_name
+	timelines.append({ "name": tl_name, "path": _gen_out_path, "visible": true })
+	_refresh_list()
+	_update_status("generated %s (%d timelines)" % [tl_name, timelines.size()])
+	timeline_added.emit(tl_name, _gen_out_path)
 
 func _update_status(msg := "") -> void:
 	if msg.is_empty():
@@ -144,6 +179,10 @@ func _params_string() -> String:
 	return ";".join(parts)
 
 func _on_generate() -> void:
+	if _gen_thread != null:
+		_sim.cancel()
+		_update_status("cancelling %s…" % _gen_name)
+		return
 	if not sim_available:
 		_update_status("cannot generate: SimNative extension missing")
 		return
@@ -152,14 +191,19 @@ func _on_generate() -> void:
 		tl_name = "sim%d" % (timelines.size() + 1)
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(DATA_DIR))
 	var out_path := "%s/%s.csv" % [DATA_DIR, tl_name]
-	var err: int = _sim.generate(_params_string(), ProjectSettings.globalize_path(out_path))
-	if err != 0:
-		_update_status("generation failed (code %d)" % err)
+	_gen_name = tl_name
+	_gen_out_path = out_path
+	_gen_start = Time.get_ticks_msec()
+	_gen_status_sec = -1
+	_gen_thread = Thread.new()
+	var start_err: int = _gen_thread.start(Callable(_sim, "generate").bind(_params_string(), ProjectSettings.globalize_path(out_path)))
+	if start_err != OK:
+		_gen_thread = null
+		_update_status("failed to start generation thread (code %d)" % start_err)
 		return
-	timelines.append({ "name": tl_name, "path": out_path, "visible": true })
-	_refresh_list()
-	_update_status("generated %s (%d timelines)" % [tl_name, timelines.size()])
-	timeline_added.emit(tl_name, out_path)
+	_gen_btn.disabled = true
+	_gen_btn.text = "Cancel"
+	set_process(true)
 
 func _on_load_clicked() -> void:
 	_load_dialog.popup_centered(Vector2i(700, 500))

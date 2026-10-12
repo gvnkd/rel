@@ -9,7 +9,9 @@ library
     exposed-modules:  Sim.Types
                       Sim.Engine
                       Sim.Gen
+                      Sim.GenH
                       Sim.TickGen
+                      Sim.TickGenH
                       Sim.Cli
                       Sim.Csv
     other-modules:    Sim.Internal
@@ -32,9 +34,10 @@ foreign-library simffi
     hs-source-dirs:   ffi
     other-modules:    SimFFI
     build-depends:    base,
+                      directory,
                       rel-sim
     default-language: Haskell2010
-    ghc-options:      -Wall -Wcompat -O2 -fPIC
+    ghc-options:      -Wall -Wcompat -O2 -fPIC -threaded
     if os(linux)
         ghc-options:  -optl-Wl,-z,origin
 

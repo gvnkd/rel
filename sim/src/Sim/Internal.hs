@@ -18,8 +18,12 @@ module Sim.Internal
   , defaultParams
   , RefMode (..)
   , Tick (..)
+  , SimHooks (..)
+  , defaultHooks
+  , SimCancelled (..)
   ) where
 
+import Control.Exception (Exception)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 
@@ -134,3 +138,19 @@ data Tick = Tick
   , tickAsks   :: ![(Price, Vol)]
   }
   deriving (Show)
+
+-- per-candle hooks for driving a UI: progress (candles done, total) and
+-- a cancellation poll, checked once per candle by the hooked runners
+data SimHooks = SimHooks
+  { hookProgress  :: Int -> Int -> IO ()
+  , hookCancelled :: IO Bool
+  }
+
+defaultHooks :: SimHooks
+defaultHooks = SimHooks (\_ _ -> pure ()) (pure False)
+
+-- thrown by the hooked runners when hookCancelled reports True
+data SimCancelled = SimCancelled
+  deriving Show
+
+instance Exception SimCancelled

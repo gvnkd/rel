@@ -16,6 +16,9 @@ module Sim.Types
   , defaultParams
   , RefMode (..)
   , Tick (..)
+  , SimHooks (..)
+  , defaultHooks
+  , SimCancelled (..)
   ) where
 
 import Sim.Internal
