@@ -62,11 +62,12 @@ data Candle = Candle
   , candleHigh  :: !Price
   , candleLow   :: !Price
   , candleClose :: !Price
+  , candleVol   :: !Int
   }
   deriving (Show)
 
 emptyCandle :: Candle
-emptyCandle = Candle (Price 0) (Price 0) (Price 0) (Price 0)
+emptyCandle = Candle (Price 0) (Price 0) (Price 0) (Price 0) 0
 
 isEmptyCandle :: Candle -> Bool
 isEmptyCandle = (== Price 0) . candleOpen

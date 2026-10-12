@@ -8,10 +8,10 @@ import Text.Printf (printf)
 
 csvText :: SimParams -> [Candle] -> String
 csvText params cs =
-  unlines $ "open,high,low,close" : map (candleCsv (spPriceScale params)) cs
+  unlines $ "open,high,low,close,vol" : map (candleCsv (spPriceScale params)) cs
 
 candleCsv :: Int -> Candle -> String
-candleCsv scale c = printf "%.5f,%.5f,%.5f,%.5f" (f o) (f h) (f l) (f cl)
+candleCsv scale c = printf "%.5f,%.5f,%.5f,%.5f,%d" (f o) (f h) (f l) (f cl) (candleVol c)
   where
     f = priceFloat scale
     o  = candleOpen c

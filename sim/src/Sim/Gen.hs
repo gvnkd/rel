@@ -39,9 +39,9 @@ placeRandomOrder sp gs =
       mOrder :: Maybe (Vol -> Order)
       mOrder
         | bs > spSellThresh sp =
-            (\p v -> Order Ask p v) . subtractTicks pd <$> refPrice book Bid Ask
+            Order Ask . subtractTicks pd <$> refPrice book Ask Bid
         | bs < spBuyThresh sp =
-            (\p v -> Order Bid p v) . addTicks pd <$> refPrice book Ask Bid
+            Order Bid . addTicks pd <$> refPrice book Bid Ask
         | otherwise = Nothing
   in case mOrder of
        Just mkOrder -> case mkVol vol of
@@ -66,7 +66,7 @@ runOrders sp n = go n
     go k gs =
       let placed = placeRandomOrder sp gs
           (book', trades) = processOrders (gsBook placed)
-          candle' = foldl' (\c t -> updateCandle (tradePrice t) c) (gsCandle placed) trades
+          candle' = foldl' (\c t -> updateCandle (tradePrice t) (unVol (tradeVol t)) c) (gsCandle placed) trades
       in go (k - 1) placed { gsBook = book', gsCandle = candle' }
 
 -- one candle per spOrdersPerCandle placed orders, seeded book, deterministic

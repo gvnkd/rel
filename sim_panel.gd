@@ -23,10 +23,11 @@ const DATA_DIR := "user://simdata"
 
 var fields := {}
 var timelines: Array[Dictionary] = []
-var timeline_list: ItemList
+var timeline_box: VBoxContainer
 var status_label: Label
 var sim_available := false
 var _sim: Variant
+var _box: VBoxContainer
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -37,6 +38,7 @@ func _ready() -> void:
 
 func _build_ui() -> void:
 	var box := VBoxContainer.new()
+	_box = box
 	box.set_anchors_preset(Control.PRESET_FULL_RECT)
 	box.add_theme_constant_override("separation", 4)
 	add_child(box)
@@ -68,18 +70,17 @@ func _build_ui() -> void:
 	load_btn.pressed.connect(_on_load_clicked)
 	box.add_child(load_btn)
 
-	timeline_list = ItemList.new()
-	timeline_list.custom_minimum_size.y = 140
-	timeline_list.item_selected.connect(_on_item_selected)
-	box.add_child(timeline_list)
-
-	var rm_btn := Button.new()
-	rm_btn.text = "Remove selected"
-	rm_btn.pressed.connect(_on_remove)
-	box.add_child(rm_btn)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size.y = 140
+	box.add_child(scroll)
+	timeline_box = VBoxContainer.new()
+	timeline_box.size_flags_horizontal = SIZE_EXPAND_FILL
+	scroll.add_child(timeline_box)
 
 	status_label = Label.new()
 	box.add_child(status_label)
+
+	custom_minimum_size = box.get_combined_minimum_size()
 
 	var dialog := FileDialog.new()
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
@@ -133,26 +134,35 @@ func _on_file_selected(path: String) -> void:
 	_refresh_list()
 	timeline_added.emit(tl_name, path)
 
-func _on_item_selected(idx: int) -> void:
-	var tl: Dictionary = timelines[idx]
-	tl["visible"] = not tl.get("visible", true)
-	timelines[idx] = tl
-	timeline_list.deselect(idx)
-	timeline_list.set_item_custom_fg_color(idx, Color.WHITE if tl["visible"] else Color(1, 1, 1, 0.35))
-	timeline_toggled.emit(idx, tl["visible"])
+func _refresh_list() -> void:
+	for c in timeline_box.get_children():
+		c.queue_free()
+	for i in timelines.size():
+		var tl: Dictionary = timelines[i]
+		var row := HBoxContainer.new()
+		var check := CheckBox.new()
+		check.button_pressed = tl.get("visible", true)
+		check.toggled.connect(_on_row_toggled.bind(i))
+		row.add_child(check)
+		var label := Label.new()
+		label.text = tl["name"]
+		label.size_flags_horizontal = SIZE_EXPAND_FILL
+		row.add_child(label)
+		var rm := Button.new()
+		rm.text = "×"
+		rm.tooltip_text = "remove timeline"
+		rm.pressed.connect(_on_row_remove.bind(i))
+		row.add_child(rm)
+		timeline_box.add_child(row)
+	custom_minimum_size = _box.get_combined_minimum_size()
 
-func _on_remove() -> void:
-	var selected := timeline_list.get_selected_items()
-	if selected.is_empty():
-		return
-	var idx: int = selected[0]
+func _on_row_toggled(pressed: bool, idx: int) -> void:
+	var tl: Dictionary = timelines[idx]
+	tl["visible"] = pressed
+	timelines[idx] = tl
+	timeline_toggled.emit(idx, pressed)
+
+func _on_row_remove(idx: int) -> void:
 	timelines.remove_at(idx)
 	_refresh_list()
 	timeline_removed.emit(idx)
-
-func _refresh_list() -> void:
-	timeline_list.clear()
-	for i in timelines.size():
-		var tl: Dictionary = timelines[i]
-		timeline_list.add_item(tl["name"])
-		timeline_list.set_item_custom_fg_color(i, Color.WHITE if tl.get("visible", true) else Color(1, 1, 1, 0.35))

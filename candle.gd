@@ -5,6 +5,7 @@ var open: float = 0.0
 var high: float = 0.0
 var low: float = 0.0
 var close: float = 0.0
+var vol: int = 0
 
 func is_empty() -> bool:
 	return open == 0.0

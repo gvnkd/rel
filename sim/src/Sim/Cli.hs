@@ -19,6 +19,12 @@ applyArgs = go defaultParams
       in case (reads lo, reads (drop 1 rest')) of
         ([(l, "")], [(h, "")]) -> go p { spVolLo = l, spVolHi = h } rest
         _                      -> Left ("invalid --vol value (expected lo,hi): " ++ v)
+    go p ("--buy-thresh" : v : rest) = case reads v of
+      [(x, "")] -> go p { spBuyThresh = x } rest
+      _         -> Left ("invalid --buy-thresh value: " ++ v)
+    go p ("--sell-thresh" : v : rest) = case reads v of
+      [(x, "")] -> go p { spSellThresh = x } rest
+      _         -> Left ("invalid --sell-thresh value: " ++ v)
     go p (name : v : rest)
       | Just set <- lookup name setters = case reads v of
           [(x, "")] -> go (set x p) rest
@@ -53,5 +59,5 @@ usage = unlines
   , "  --start-ask P          initial ask price in ticks (default 102195)"
   , "  --start-vol V          initial book volume (default 200)"
   , "  --price-scale N        ticks per price unit (default 100000)"
-  , "output: CSV on stdout (open,high,low,close)"
+  , "output: CSV on stdout (open,high,low,close,vol)"
   ]

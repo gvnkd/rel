@@ -4,9 +4,9 @@ Order-book market sim. Redot (Godot fork) 26.2 = renderer + UI only; **Haskell (
 
 ## Architecture
 
-- `sim/` — Haskell package `rel-sim`: `Sim.Engine` (order book: `Side`/`Order`/`Book`/`Trade`, volumes positive by construction via `mkVol`), `Sim.Gen` (seeded splitmix generator), `Sim.Cli`/`Sim.Csv`, `SimFFI` (foreign-library, C ABI `sim_generate`). QuickCheck suite runs in the nix build (buildPhase).
+- `sim/` — Haskell package `rel-sim`: `Sim.Engine` (order book: `Side`/`Order`/`Book`/`Trade`, volumes positive by construction via `mkVol`), `Sim.Gen` (seeded splitmix generator; `refPrice own other` = opposite-side-best-first — callers pass own side first), `Sim.Cli`/`Sim.Csv` (CSV: open,high,low,close,vol — vol = sum of trade volumes), `SimFFI` (foreign-library, C ABI `sim_generate`). QuickCheck suite runs in the nix build (buildPhase).
 - `gdextension/shim.cpp` — godot-cpp 4.5 shim exposing `SimNative.generate(params, out_path)` to GDScript; `hs_init`/`hs_exit` in ELF constructors.
-- `sim_panel.gd` — params form + time-line list (click = show/hide); Generate writes `user://simdata/<name>.csv`.
+- `sim_panel.gd` — params form + timeline rows (CheckBox show/hide + per-row × remove, in a ScrollContainer) inside `tool_window.gd` (`SimWindow` in chart.tscn): drag by title bar (press via bar `gui_input`, motion via window `_input` — no bubbling), ×/F1 show/hide; Generate writes `user://simdata/<name>.csv` via SimNative. `chart.gd` skips pan/zoom when the pointer is over SimWindow or while it's dragging.
 - `chart.gd` / `chart.tscn` — chart scene: root Control owns `ChartView` (shared index↔x / price↔y transform, pan/zoom, nice grid steps) + `PlotData` (series list, playback head). Widgets (full-rect Controls, all draw in screen space from ChartView, no Camera2D/node scaling): `grid_widget.gd` (grid + axis labels in margins), `series_widget.gd` (modes candles/bars/line/dots, key `M`), `indicator_widget.gd` (SMA, key `I`), `order_book_widget.gd` (bids/asks ladder via `set_ladder`, synthetic placeholder data from last candle until sim exports book), `cursor_widget.gd` (OHLC at head), `cross_widget.gd` (crosshair + axis tags, follows mouse). Keys: space/=`-` playback, wheel zoom at cursor, drag pan.
 - `nix/` — ALL nix code lives here (`redot.nix`, `sim.nix`, `godot-cpp.nix`, `gdextension.nix`, `patches/`). Root has only `flake.nix`.
 - Deleted and gone: GDScript order-book engine, `tests.gd`, order-book UI. Do not reintroduce logic into GDScript.
@@ -23,6 +23,7 @@ Order-book market sim. Redot (Godot fork) 26.2 = renderer + UI only; **Haskell (
 ## Nix gotchas (all cost a build cycle)
 
 - **Nix builds from the git tree.** Untracked/intent-to-add files are invisible → `can't find source for ...`. Always `git add` before `nix build` / `nix flake check`. `flake.nix` itself must be tracked to evaluate.
+- `nix build .#sim-extension` retargets the `./result` symlink away from redot — re-run `nix build .#redot` (cached) or use the store path directly.
 - Redot editor scans **every `.gdextension` under `res://`** — never keep template `.gdextension` files in source dirs (it creates `extension_list.cfg` entries). Template lives in `nix/gdextension.nix`.
 - Haskell foreign-library on nixpkgs: needs `-fPIC` on the **library stanza**, plus `splitmix` override with `--ghc-options=-fPIC` (`nix/sim.nix`). `options: standalone` does NOT work (nix GHC's static RTS is non-PIC) — link RTS dynamically and fix rpaths with `autoPatchelfHook` in the consumer.
 - GHC RTS does not self-init when dlopen'ed — `hs_init` via `__attribute__((constructor))` in the shim, else `newBoundTask: RTS is not initialised`.

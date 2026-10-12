@@ -1,7 +1,8 @@
-[gd_scene load_steps=9 format=3 uid="uid://cstjrpfbx0k33"]
+[gd_scene load_steps=10 format=3 uid="uid://cstjrpfbx0k33"]
 
 [ext_resource type="Script" uid="uid://7hei3gpwt2v2" path="res://chart.gd" id="1_0bwlf"]
 [ext_resource type="Script" path="res://sim_panel.gd" id="2_sim"]
+[ext_resource type="Script" path="res://tool_window.gd" id="2_win"]
 [ext_resource type="Script" path="res://grid_widget.gd" id="4_grid"]
 [ext_resource type="Script" path="res://series_widget.gd" id="5_series"]
 [ext_resource type="Script" path="res://indicator_widget.gd" id="6_ind"]
@@ -73,12 +74,39 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("9_cursor")
 
-[node name="SimPanel" type="Control" parent="."]
-layout_mode = 3
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_right = -1380.0
-grow_horizontal = 2
-grow_vertical = 2
+[node name="SimWindow" type="PanelContainer" parent="."]
+layout_mode = 0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = 320.0
+offset_bottom = 580.0
+script = ExtResource("2_win")
+title = "Simulation"
+
+[node name="Box" type="VBoxContainer" parent="SimWindow"]
+layout_mode = 2
+
+[node name="Bar" type="HBoxContainer" parent="SimWindow/Box"]
+custom_minimum_size = Vector2(0, 24)
+layout_mode = 2
+
+[node name="Title" type="Label" parent="SimWindow/Box/Bar"]
+layout_mode = 2
+mouse_filter = 1
+text = "Simulation"
+
+[node name="Spacer" type="Control" parent="SimWindow/Box/Bar"]
+layout_mode = 2
+mouse_filter = 1
+size_flags_horizontal = 3
+
+[node name="Close" type="Button" parent="SimWindow/Box/Bar"]
+layout_mode = 2
+focus_mode = 0
+text = "×"
+flat = true
+
+[node name="SimPanel" type="Control" parent="SimWindow/Box"]
+layout_mode = 2
+size_flags_vertical = 3
 script = ExtResource("2_sim")

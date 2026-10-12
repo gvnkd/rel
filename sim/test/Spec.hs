@@ -60,17 +60,17 @@ prop_trade_volume_conserved (Flow orders) =
 prop_candle_invariants :: [Int] -> Property
 prop_candle_invariants ps0 =
   let ps = map Price ps0
-      c = foldl' (flip updateCandle) emptyCandle ps
+      c = foldl' (\c p -> updateCandle p 1 c) emptyCandle ps
       mFirst = listToMaybe ps
       mLast = listToMaybe (reverse ps)
   in case (mFirst, mLast) of
-       (Just o, Just cl) -> property $
-            candleLow c <= min (candleOpen c) (candleClose c)
-         && max (candleOpen c) (candleClose c) <= candleHigh c
-         && candleOpen c == o
-         && candleClose c == cl
-       _ -> property True
-
+        (Just o, Just cl) -> property $
+             candleLow c <= min (candleOpen c) (candleClose c)
+          && max (candleOpen c) (candleClose c) <= candleHigh c
+          && candleOpen c == o
+          && candleClose c == cl
+          && candleVol c == length ps
+        _ -> property True
 prop_sim_produces_valid_candles :: Word64 -> Property
 prop_sim_produces_valid_candles seed =
   let cs = runSim defaultParams { spSeed = seed, spCandles = 50, spOrdersPerCandle = 100 }

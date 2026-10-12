@@ -30,7 +30,8 @@ const PALETTE: Array[Color] = [
 @onready var book_widget: OrderBookWidget = $Book
 @onready var cross_widget: CrossWidget = $Cross
 @onready var cursor_widget: CursorWidget = $Cursor
-@onready var sim_panel: SimPanel = $SimPanel
+@onready var sim_window: ToolWindow = $SimWindow
+@onready var sim_panel: SimPanel = $SimWindow/Box/SimPanel
 
 func _ready() -> void:
 	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget]:
@@ -38,6 +39,7 @@ func _ready() -> void:
 		w.data = data
 	cursor_widget.mode_text = SeriesWidget.MODE_NAMES[series_widget.mode]
 	cursor_widget.indicators_text = "on" if indicator_widget.enabled else "off"
+	cursor_widget.cross = cross_widget
 	view.layout(size)
 	sim_panel.timeline_added.connect(_on_timeline_added)
 	sim_panel.timeline_removed.connect(_on_timeline_removed)
@@ -61,20 +63,25 @@ func _input(event: InputEvent) -> void:
 		pan_mode = false
 	elif event is InputEventMouseButton:
 		var button := event as InputEventMouseButton
-		if button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_UP:
-			view.zoom_x_at(button.position, ZOOM_FACTOR)
-			_refresh()
-		elif button.pressed and button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			view.zoom_x_at(button.position, 1.0 / ZOOM_FACTOR)
-			_refresh()
+		if button.pressed and not _over_ui(button.position):
+			if button.button_index == MOUSE_BUTTON_WHEEL_UP:
+				view.zoom_x_at(button.position, ZOOM_FACTOR)
+				_refresh()
+			elif button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				view.zoom_x_at(button.position, 1.0 / ZOOM_FACTOR)
+				_refresh()
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
 		cross_widget.mouse = motion.position
-		if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
-			view.scale_by(motion.relative, motion.position)
-		elif motion.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE) != 0 or pan_mode:
-			view.pan_by(motion.relative)
+		if not sim_window.is_dragging() and not _over_ui(motion.position):
+			if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
+				view.scale_by(motion.relative, motion.position)
+			elif motion.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE) != 0 or pan_mode:
+				view.pan_by(motion.relative)
 		_refresh()
+
+func _over_ui(pos: Vector2) -> bool:
+	return sim_window.visible and sim_window.get_global_rect().has_point(pos)
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
@@ -88,6 +95,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		indicator_widget.enabled = not indicator_widget.enabled
 		cursor_widget.indicators_text = "on" if indicator_widget.enabled else "off"
 		_refresh()
+	elif key.keycode == KEY_F1:
+		sim_window.toggle()
 
 func _process(delta: float) -> void:
 	if not playing or paused:
@@ -195,5 +204,7 @@ func _load_candles(path: String) -> Array[Candle]:
 		c.high = parts[1].to_float()
 		c.low = parts[2].to_float()
 		c.close = parts[3].to_float()
+		if parts.size() >= 5:
+			c.vol = parts[4].to_int()
 		loaded.append(c)
 	return loaded

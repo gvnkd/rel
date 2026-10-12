@@ -42,10 +42,11 @@ processOrders = go []
       | bv == v   = Map.delete p levels
       | otherwise = Map.insert p (Vol (unVol bv - unVol v)) levels
 
--- first trade opens the candle, later trades extend h/l and set close
-updateCandle :: Price -> Candle -> Candle
-updateCandle p c
-  | isEmptyCandle c  = Candle p p p p
-  | p > candleHigh c = c { candleHigh = p, candleClose = p }
-  | p < candleLow c  = c { candleLow = p, candleClose = p }
-  | otherwise        = c { candleClose = p }
+-- first trade opens the candle, later trades extend h/l and set close;
+-- volume accumulates traded units
+updateCandle :: Price -> Int -> Candle -> Candle
+updateCandle p v c
+  | isEmptyCandle c  = Candle p p p p v
+  | p > candleHigh c = c { candleHigh = p, candleClose = p, candleVol = candleVol c + v }
+  | p < candleLow c  = c { candleLow = p, candleClose = p, candleVol = candleVol c + v }
+  | otherwise        = c { candleClose = p, candleVol = candleVol c + v }
