@@ -27,7 +27,7 @@ func _draw() -> void:
 	draw_line(Vector2(r.position.x, mouse.y), Vector2(r.end.x, mouse.y), CROSS_COL)
 	var font := ThemeDB.fallback_font
 	var y := clampf(mouse.y, r.position.y + 9.0, r.end.y - 9.0)
-	_tag(font, Rect2(2.0, y - 9.0, ChartView.MARGIN_LEFT - 6.0, 18.0), ChartView.fmt_price(view.y_to_price(mouse.y)), HORIZONTAL_ALIGNMENT_RIGHT)
+	_tag(font, Rect2(2.0, y - 9.0, ChartView.MARGIN_LEFT - 6.0, 18.0), view.fmt_price(view.y_to_price(mouse.y)), HORIZONTAL_ALIGNMENT_RIGHT)
 	var lx := clampf(x, r.position.x + 44.0, r.end.x - 44.0)
 	_tag(font, Rect2(lx - 44.0, r.end.y + 4.0, 88.0, 18.0), str(i), HORIZONTAL_ALIGNMENT_CENTER)
 

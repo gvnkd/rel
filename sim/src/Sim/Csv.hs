@@ -3,6 +3,7 @@ module Sim.Csv
   , candleCsv
   , ticksCsv
   , ticksPath
+  , metaText
   ) where
 
 import Data.List (intercalate, zipWith4)
@@ -54,3 +55,14 @@ ticksPath path = case break (== '.') (reverse path) of
 
 priceFloat :: Int -> Price -> Double
 priceFloat scale (Price p) = fromIntegral p / fromIntegral scale
+
+-- sidecar metadata for the UI: how many decimals generated prices carry
+metaText :: SimParams -> String
+metaText params = printf "decimals=%d\n" (decimalsOf (spPriceScale params))
+
+decimalsOf :: Int -> Int
+decimalsOf = go 0
+  where
+    go n s
+      | s > 1 && s `mod` 10 == 0 = go (n + 1) (s `div` 10)
+      | otherwise                = n

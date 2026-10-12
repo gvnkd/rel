@@ -14,7 +14,7 @@ func _ready() -> void:
 	mouse_filter = MOUSE_FILTER_IGNORE
 
 func cycle_mode() -> void:
-	mode = (mode + 1) % MODE_COUNT
+	mode = ((mode + 1) % MODE_COUNT) as Mode
 
 func _draw() -> void:
 	if view == null or data == null:

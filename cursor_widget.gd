@@ -31,8 +31,8 @@ func _draw() -> void:
 			i = clampi(data.head, 0, n - 1)
 		var c: Candle = s.candles[i]
 		var txt := "%s  O %s  H %s  L %s  C %s" % [s.name,
-			ChartView.fmt_price(c.open), ChartView.fmt_price(c.high),
-			ChartView.fmt_price(c.low), ChartView.fmt_price(c.close)]
+			view.fmt_price(c.open), view.fmt_price(c.high),
+			view.fmt_price(c.low), view.fmt_price(c.close)]
 		lines.append([txt, s.col_pos])
 	var extra: Array[String] = []
 	if not mode_text.is_empty():

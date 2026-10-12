@@ -38,6 +38,6 @@ func _draw() -> void:
 		var p := n * p_step
 		var y := view.price_to_y(p)
 		draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y), GRID_COL)
-		draw_string(font, Vector2(2.0, y + 4.0), ChartView.fmt_price(p), HORIZONTAL_ALIGNMENT_RIGHT, ChartView.MARGIN_LEFT - 6.0, FONT_SIZE, LABEL_COL)
+		draw_string(font, Vector2(2.0, y + 4.0), view.fmt_price(p), HORIZONTAL_ALIGNMENT_RIGHT, ChartView.MARGIN_LEFT - 6.0, FONT_SIZE, LABEL_COL)
 		n += 1
 	draw_rect(r, BORDER_COL, false)

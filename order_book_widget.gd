@@ -70,9 +70,9 @@ func _draw() -> void:
 func _row(font: Font, lvl: Vector2, bar_x: float, bar_w: float, y: float, max_vol: float, col: Color, bar_col: Color) -> void:
 	var bw := bar_w * lvl.y / max_vol
 	draw_rect(Rect2(bar_x + bar_w - bw, y + 2.0, bw, ROW_H - 5.0), bar_col)
-	draw_string(font, Vector2(bar_x - 70.0, y + 12.0), ChartView.fmt_price(lvl.x), HORIZONTAL_ALIGNMENT_LEFT, 68.0, 12, col)
+	draw_string(font, Vector2(bar_x - 70.0, y + 12.0), view.fmt_price(lvl.x), HORIZONTAL_ALIGNMENT_LEFT, 68.0, 12, col)
 	draw_string(font, Vector2(bar_x, y + 12.0), str(int(lvl.y)), HORIZONTAL_ALIGNMENT_RIGHT, bar_w - 2.0, 12, COL_TEXT)
 
 func _mid_row(font: Font, x: float, w: float, y: float) -> void:
 	draw_rect(Rect2(x, y + 1.0, w, ROW_H - 3.0), Color(0.9, 0.9, 0.35, 0.15))
-	draw_string(font, Vector2(x, y + 12.0), ChartView.fmt_price(mid), HORIZONTAL_ALIGNMENT_LEFT, 70.0, 12, Color(0.9, 0.9, 0.35))
+	draw_string(font, Vector2(x, y + 12.0), view.fmt_price(mid), HORIZONTAL_ALIGNMENT_LEFT, 70.0, 12, Color(0.9, 0.9, 0.35))

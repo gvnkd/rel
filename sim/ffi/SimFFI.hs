@@ -4,7 +4,7 @@ import Control.Exception (SomeException, try)
 import Foreign.C.String (CString, peekCString)
 import Foreign.C.Types (CInt (..))
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvText, ticksCsv, ticksPath)
+import Sim.Csv (csvText, metaText, ticksCsv, ticksPath)
 import Sim.Gen (runSim)
 import Sim.TickGen (runSimTicks)
 import Sim.Types (SimMode (..), SimParams (..))
@@ -27,12 +27,14 @@ simGenerate paramsPtr outPtr = do
         Right _ -> 0
 
 writeCsv :: FilePath -> SimParams -> IO ()
-writeCsv path p = case spMode p of
-  ModeCandles -> write path (csvText p (runSim p))
-  _           -> do
-    let (cs, ts) = runSimTicks p
-    write path (csvText p cs)
-    write (ticksPath path) (ticksCsv p ts)
+writeCsv path p = do
+  write (path ++ ".meta") (metaText p)
+  case spMode p of
+    ModeCandles -> write path (csvText p (runSim p))
+    _           -> do
+      let (cs, ts) = runSimTicks p
+      write path (csvText p cs)
+      write (ticksPath path) (ticksCsv p ts)
   where
     write fp s = withFile fp WriteMode $ \h -> hPutStr h s
 

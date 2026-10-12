@@ -14,6 +14,10 @@ var base_index := 0.0
 var base_price := 0.0
 var follow := true
 
+# fixed decimals for price labels, -1 = unknown (foreign CSVs fall back
+# to the magnitude-based heuristic in fmt_price)
+var decimals := -1
+
 func layout(size: Vector2) -> void:
 	plot_rect = Rect2(MARGIN_LEFT, 0.0, maxf(size.x - MARGIN_LEFT - book_width, 0.0), maxf(size.y - MARGIN_BOTTOM, 0.0))
 
@@ -83,7 +87,9 @@ static func nice_step(raw: float) -> float:
 		return 5.0 * mag
 	return 10.0 * mag
 
-static func fmt_price(p: float) -> String:
+func fmt_price(p: float) -> String:
+	if decimals >= 0:
+		return ("%." + str(decimals) + "f") % p
 	if absf(p) >= 1000.0:
 		return "%.0f" % p
 	if absf(p) >= 1.0:

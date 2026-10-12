@@ -139,6 +139,7 @@ func add_timeline(tl_name: String, path: String) -> int:
 	s.col_neg = col.darkened(0.35)
 	data.add_series(s)
 	if data.series.size() == 1:
+		_read_meta(path)
 		_fit_view(s)
 	view.follow = true
 	head = 0
@@ -163,6 +164,16 @@ func set_timeline_visible(idx: int, vis: bool) -> void:
 	data.series[idx].visible = vis
 	_update_book()
 	_refresh()
+
+func _read_meta(path: String) -> void:
+	view.decimals = -1
+	var f := FileAccess.open(path + ".meta", FileAccess.READ)
+	if f == null:
+		return
+	while not f.eof_reached():
+		var line := f.get_line().strip_edges()
+		if line.begins_with("decimals="):
+			view.decimals = line.get_slice("=", 1).to_int()
 
 func _fit_view(s) -> void:
 	if s.candles.is_empty():
