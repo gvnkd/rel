@@ -16,6 +16,7 @@ module Sim.Internal
   , SimMode (..)
   , SimParams (..)
   , defaultParams
+  , RefMode (..)
   , Tick (..)
   ) where
 
@@ -77,6 +78,11 @@ isEmptyCandle = (== Price 0) . candleOpen
 data SimMode = ModeCandles | ModeTickTrades | ModeTickSteps
   deriving (Eq, Show)
 
+-- where an order anchors its price: the opposite side's best (classic
+-- behavior), or the bid/ask mid
+data RefMode = RefOppositeBest | RefMid
+  deriving (Eq, Show)
+
 data SimParams = SimParams
   { spSeed            :: !Word64
   , spCandles         :: !Int
@@ -92,6 +98,8 @@ data SimParams = SimParams
   , spPriceScale      :: !Int
   , spMode            :: !SimMode
   , spBookDepth       :: !Int
+  , spRefMode         :: !RefMode
+  , spClampRest       :: !Bool
   }
   deriving (Show)
 
@@ -111,6 +119,8 @@ defaultParams = SimParams
   , spPriceScale      = 100000
   , spMode            = ModeCandles
   , spBookDepth       = 50
+  , spRefMode         = RefOppositeBest
+  , spClampRest       = False
   }
 
 -- one row of the ticks export: a trade (tickVol > 0) or a book-only

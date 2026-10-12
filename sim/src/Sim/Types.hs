@@ -14,6 +14,7 @@ module Sim.Types
   , SimMode (..)
   , SimParams (..)
   , defaultParams
+  , RefMode (..)
   , Tick (..)
   ) where
 

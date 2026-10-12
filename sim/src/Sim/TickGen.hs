@@ -38,12 +38,12 @@ runSimTicks sp = go (spCandles sp) 0 (initState sp) [] []
 -- run one candle batch; ticks are returned most-recent-first, the head
 -- being the end-of-candle marker
 runBatch :: SimParams -> Int -> GenState -> (GenState, [Tick])
-runBatch sp ci gs0 = finish (go (spOrdersPerCandle sp) gs0 [])
+runBatch sp ci gs0 = finish (go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 [])
   where
-    go 0 gs acc = (gs, acc)
-    go k gs acc =
-      let (gs', ticks) = runStep sp ci gs
-      in go (k - 1) gs' (reverse ticks ++ acc)
+    go _ 0 gs acc = (gs, acc)
+    go pf k gs acc =
+      let (gs', ticks) = runStep pf sp ci gs
+      in go pf (k - 1) gs' (reverse ticks ++ acc)
     finish (gs, acc) =
       let book = gsBook gs
           marker = Tick ci (Price 0) 0 (snapBids book) (snapAsks book)
@@ -54,21 +54,24 @@ runBatch sp ci gs0 = finish (go (spOrdersPerCandle sp) gs0 [])
 -- one order flow step as tick rows: a row per trade with the book right
 -- after that trade; when nothing traded, a single book-only row for the
 -- placed order in ModeTickSteps, no row in ModeTickTrades
-runStep :: SimParams -> Int -> GenState -> (GenState, [Tick])
-runStep sp ci gs =
-  let (mOrder, gs') = rollOrder sp gs
+runStep :: PriceFun -> SimParams -> Int -> GenState -> (GenState, [Tick])
+runStep pf sp ci gs =
+  let (mOrder, gs') = rollOrder pf sp gs
   in case mOrder of
        Nothing -> (gs', [])
        Just order ->
-         let book1 = placeOrder order (gsBook gs')
-             trail = matchTrail book1
-             book' = case trail of
-               []      -> book1
-               matches -> fst (last matches)
-             trades = map snd trail
-             c' = foldl' (\c t -> updateCandle (tradePrice t) (unVol (tradeVol t)) c) (gsCandle gs') trades
-             gs'' = gs' { gsBook = book', gsCandle = c' }
-             tradeTicks = [ Tick ci (tradePrice t) (unVol (tradeVol t)) (snapBids b) (snapAsks b)
+          let book1 = placeOrder order (gsBook gs')
+              trail = matchTrail book1
+              book' = case trail of
+                []      -> book1
+                matches -> fst (last matches)
+              trades = map snd trail
+              c' = foldl' (\c t -> updateCandle (tradePrice t) (unVol (tradeVol t)) c) (gsCandle gs') trades
+              anchor' = case trades of
+                []      -> gsAnchor gs'
+                _       -> tradePrice (last trades)
+              gs'' = gs' { gsBook = book', gsCandle = c', gsAnchor = anchor' }
+              tradeTicks = [ Tick ci (tradePrice t) (unVol (tradeVol t)) (snapBids b) (snapAsks b)
                           | (b, t) <- trail ]
          in case trades of
               [] | spMode sp == ModeTickSteps ->
@@ -89,8 +92,49 @@ matchTrail = go []
 
 -- --- duplicated from Sim.Gen (see module header) -------------------------
 
-rollOrder :: SimParams -> GenState -> (Maybe Order, GenState)
-rollOrder sp gs =
+type PriceFun = Book -> Side -> Int -> Price -> Maybe Price
+
+mkPriceFun :: SimParams -> PriceFun
+mkPriceFun sp = case (spRefMode sp, spClampRest sp) of
+  (RefOppositeBest, False) -> \book side pd _ ->
+    move side pd <$> oppositeRef book side
+  (RefOppositeBest, True) -> \book side pd _ ->
+    clampOwn book side . move side pd <$> oppositeRef book side
+  (RefMid, False) -> \book side pd anchor ->
+    move side pd <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
+  (RefMid, True) -> \book side pd anchor ->
+    clampOwn book side . move side pd
+      <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
+  where
+    r = spTickRange sp
+
+    clampOwn book side (Price p) = case ownBest of
+      Nothing -> Price p
+      Just t  -> case side of
+        Bid -> Price (min p (unPrice t + r))
+        Ask -> Price (max p (unPrice t - r))
+      where
+        ownBest = case side of
+          Bid -> fst <$> bestBid book
+          Ask -> fst <$> bestAsk book
+
+oppositeRef :: Book -> Side -> Maybe Price
+oppositeRef book side = case side of
+  Bid -> (fst <$> bestAsk book) <|> (fst <$> bestBid book)
+  Ask -> (fst <$> bestBid book) <|> (fst <$> bestAsk book)
+
+midOf' :: Book -> Maybe Price
+midOf' book = case (bestBid book, bestAsk book) of
+  (Just (bp, _), Just (ap, _)) ->
+    Just (Price ((unPrice bp + unPrice ap) `div` 2))
+  _ -> Nothing
+
+move :: Side -> Int -> Price -> Price
+move Bid = addTicks
+move Ask = subtractTicks
+
+rollOrder :: PriceFun -> SimParams -> GenState -> (Maybe Order, GenState)
+rollOrder pf sp gs =
   let (bs, gs1)  = rollProb gs
       (vol, gs2) = rollInt (spVolLo sp, spVolHi sp) gs1
       (pd, gs3)  = rollInt (0, spTickRange sp) gs2
@@ -98,19 +142,11 @@ rollOrder sp gs =
       mOrder :: Maybe (Vol -> Order)
       mOrder
         | bs > spSellThresh sp =
-            Order Ask . subtractTicks pd <$> refPrice book Ask Bid
+            Order Ask <$> pf book Ask pd (gsAnchor gs3)
         | bs < spBuyThresh sp =
-            Order Bid . addTicks pd <$> refPrice book Bid Ask
+            Order Bid <$> pf book Bid pd (gsAnchor gs3)
         | otherwise = Nothing
   in (mOrder <*> mkVol vol, gs3)
-
-refPrice :: Book -> Side -> Side -> Maybe Price
-refPrice book own other =
-  (fst <$> bestOf book other) <|> (fst <$> bestOf book own)
-
-bestOf :: Book -> Side -> Maybe (Price, Vol)
-bestOf book Bid = bestBid book
-bestOf book Ask = bestAsk book
 
 rollInt :: (Int, Int) -> GenState -> (Int, GenState)
 rollInt (lo, hi) gs =

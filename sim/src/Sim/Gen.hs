@@ -16,6 +16,7 @@ data GenState = GenState
   { gsRng    :: !SMGen
   , gsBook   :: !Book
   , gsCandle :: !Candle
+  , gsAnchor :: !Price
   }
 
 initState :: SimParams -> GenState
@@ -23,6 +24,7 @@ initState sp = GenState
   { gsRng    = mkSMGen (spSeed sp)
   , gsBook   = seedBook
   , gsCandle = emptyCandle
+  , gsAnchor = Price ((unPrice (spStartBid sp) + unPrice (spStartAsk sp)) `div` 2)
   }
   where
     seedBook =
@@ -30,8 +32,8 @@ initState sp = GenState
         (placeOrder (Order Bid (spStartBid sp) (spStartVol sp)) emptyBook)
 
 -- one order flow step: a sell hits below the best bid, a buy lifts above the best ask
-placeRandomOrder :: SimParams -> GenState -> GenState
-placeRandomOrder sp gs =
+placeRandomOrder :: PriceFun -> SimParams -> GenState -> GenState
+placeRandomOrder pf sp gs =
   let (bs, gs1)  = rollProb gs
       (vol, gs2) = rollInt (spVolLo sp, spVolHi sp) gs1
       (pd, gs3)  = rollInt (0, spTickRange sp) gs2
@@ -39,9 +41,9 @@ placeRandomOrder sp gs =
       mOrder :: Maybe (Vol -> Order)
       mOrder
         | bs > spSellThresh sp =
-            Order Ask . subtractTicks pd <$> refPrice book Ask Bid
+            Order Ask <$> pf book Ask pd (gsAnchor gs3)
         | bs < spBuyThresh sp =
-            Order Bid . addTicks pd <$> refPrice book Bid Ask
+            Order Bid <$> pf book Bid pd (gsAnchor gs3)
         | otherwise = Nothing
   in case mOrder of
        Just mkOrder -> case mkVol vol of
@@ -49,25 +51,64 @@ placeRandomOrder sp gs =
          Nothing -> gs3
        Nothing -> gs3
 
--- the reference price for an order on `own` side: the opposite side's best,
--- falling back to our own side's best
-refPrice :: Book -> Side -> Side -> Maybe Price
-refPrice book own other =
-  (fst <$> bestOf book other) <|> (fst <$> bestOf book own)
+-- full price for an order on `side` given the book and the tick offset;
+-- resolved once per run by mkPriceFun so the hot loop sees the mode
+-- constants inlined
+type PriceFun = Book -> Side -> Int -> Price -> Maybe Price
 
-bestOf :: Book -> Side -> Maybe (Price, Vol)
-bestOf book Bid = bestBid book
-bestOf book Ask = bestAsk book
+mkPriceFun :: SimParams -> PriceFun
+mkPriceFun sp = case (spRefMode sp, spClampRest sp) of
+  (RefOppositeBest, False) -> \book side pd _ ->
+    move side pd <$> oppositeRef book side
+  (RefOppositeBest, True) -> \book side pd _ ->
+    clampOwn book side . move side pd <$> oppositeRef book side
+  (RefMid, False) -> \book side pd anchor ->
+    move side pd <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
+  (RefMid, True) -> \book side pd anchor ->
+    clampOwn book side . move side pd
+      <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
+  where
+    r = spTickRange sp
+
+    -- with clamping on, the price may not rest further than tick-range
+    -- beyond our side's best
+    clampOwn book side (Price p) = case ownBest of
+      Nothing -> Price p
+      Just t  -> case side of
+        Bid -> Price (min p (unPrice t + r))
+        Ask -> Price (max p (unPrice t - r))
+      where
+        ownBest = case side of
+          Bid -> fst <$> bestBid book
+          Ask -> fst <$> bestAsk book
+
+oppositeRef :: Book -> Side -> Maybe Price
+oppositeRef book side = case side of
+  Bid -> (fst <$> bestAsk book) <|> (fst <$> bestBid book)
+  Ask -> (fst <$> bestBid book) <|> (fst <$> bestAsk book)
+
+midOf' :: Book -> Maybe Price
+midOf' book = case (bestBid book, bestAsk book) of
+  (Just (bp, _), Just (ap, _)) ->
+    Just (Price ((unPrice bp + unPrice ap) `div` 2))
+  _ -> Nothing
+
+move :: Side -> Int -> Price -> Price
+move Bid = addTicks
+move Ask = subtractTicks
 
 runOrders :: SimParams -> Int -> GenState -> GenState
-runOrders sp n = go n
+runOrders sp n gs = go (mkPriceFun sp) n gs
   where
-    go 0 gs = gs
-    go k gs =
-      let placed = placeRandomOrder sp gs
+    go _ 0 gs' = gs'
+    go pf k gs' =
+      let placed = placeRandomOrder pf sp gs'
           (book', trades) = processOrders (gsBook placed)
           candle' = foldl' (\c t -> updateCandle (tradePrice t) (unVol (tradeVol t)) c) (gsCandle placed) trades
-      in go (k - 1) placed { gsBook = book', gsCandle = candle' }
+          anchor' = case trades of
+            []      -> gsAnchor placed
+            _       -> tradePrice (last trades)
+      in go pf (k - 1) placed { gsBook = book', gsCandle = candle', gsAnchor = anchor' }
 
 -- one candle per spOrdersPerCandle placed orders, seeded book, deterministic
 runSim :: SimParams -> [Candle]

@@ -22,6 +22,8 @@ const PARAM_FIELDS := [
 
 const MODES := ["candles", "tick-trades", "tick-steps"]
 
+const PRICE_REFS := ["opposite", "mid"]
+
 const DATA_DIR := "user://simdata"
 
 var fields := {}
@@ -32,6 +34,8 @@ var sim_available := false
 var _sim: Variant
 var _box: VBoxContainer
 var mode_option: OptionButton
+var ref_option: OptionButton
+var clamp_check: CheckBox
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -72,6 +76,21 @@ func _build_ui() -> void:
 		mode_option.add_item(m)
 	mode_option.custom_minimum_size.x = 90
 	grid.add_child(mode_option)
+
+	var ref_label := Label.new()
+	ref_label.text = "price ref"
+	grid.add_child(ref_label)
+	ref_option = OptionButton.new()
+	for r: String in PRICE_REFS:
+		ref_option.add_item(r)
+	ref_option.custom_minimum_size.x = 90
+	grid.add_child(ref_option)
+
+	var clamp_label := Label.new()
+	clamp_label.text = "clamp rest"
+	grid.add_child(clamp_label)
+	clamp_check = CheckBox.new()
+	grid.add_child(clamp_check)
 
 	var gen_btn := Button.new()
 	gen_btn.text = "Generate"
@@ -120,6 +139,8 @@ func _params_string() -> String:
 		parts.append("%s=%s" % [key, fields[key].text.strip_edges()])
 	var mode: String = MODES[mode_option.selected]
 	parts.append("mode=%s" % mode)
+	parts.append("price-ref=%s" % PRICE_REFS[ref_option.selected])
+	parts.append("clamp-rest=%s" % ("on" if clamp_check.button_pressed else "off"))
 	return ";".join(parts)
 
 func _on_generate() -> void:

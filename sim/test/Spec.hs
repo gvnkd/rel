@@ -78,9 +78,41 @@ prop_sim_produces_valid_candles seed =
   let cs = runSim defaultParams { spSeed = seed, spCandles = 50, spOrdersPerCandle = 100 }
   in not (null cs) ==> all validCandle cs
 
-prop_ticks_candles_match_runSim :: Word64 -> SimMode -> Property
-prop_ticks_candles_match_runSim seed mode =
-  let sp = defaultParams { spSeed = seed, spCandles = 30, spOrdersPerCandle = 50, spMode = mode }
+prop_sim_valid_with_options :: Word64 -> RefMode -> Bool -> Property
+prop_sim_valid_with_options seed ref clamp =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 50
+        , spOrdersPerCandle = 100
+        , spRefMode = ref
+        , spClampRest = clamp
+        }
+      cs = runSim sp
+  in not (null cs) ==> all validCandle cs
+
+-- the book must never stay empty: a run with plenty of orders per candle
+-- always produces candles
+prop_sim_no_dead_market :: Word64 -> RefMode -> Bool -> Property
+prop_sim_no_dead_market seed ref clamp =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 20
+        , spOrdersPerCandle = 200
+        , spRefMode = ref
+        , spClampRest = clamp
+        }
+  in property (length (runSim sp) == 20)
+
+prop_ticks_candles_match_runSim :: Word64 -> SimMode -> RefMode -> Bool -> Property
+prop_ticks_candles_match_runSim seed mode ref clamp =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 30
+        , spOrdersPerCandle = 50
+        , spMode = mode
+        , spRefMode = ref
+        , spClampRest = clamp
+        }
       (cs, _ts) = runSimTicks sp
   in property $ cs == runSim sp
 
@@ -108,6 +140,9 @@ sortedLevels t =
 instance Arbitrary SimMode where
   arbitrary = elements [ModeCandles, ModeTickTrades, ModeTickSteps]
 
+instance Arbitrary RefMode where
+  arbitrary = elements [RefOppositeBest, RefMid]
+
 validCandle :: Candle -> Bool
 validCandle c =
   not (isEmptyCandle c)
@@ -122,6 +157,8 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_trade_volume_conserved
   , property prop_candle_invariants
   , property prop_sim_produces_valid_candles
+  , property prop_sim_valid_with_options
+  , property prop_sim_no_dead_market
   , property prop_ticks_candles_match_runSim
   , property prop_ticks_book_snapshots
   ]
