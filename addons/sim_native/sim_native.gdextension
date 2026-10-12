@@ -1,0 +1,10 @@
+[configuration]
+
+entry_symbol = "sim_native_init"
+compatibility_minimum = "4.5"
+reloadable = true
+
+[libraries]
+
+linux.debug.x86_64 = "bin/libsimnative.linuxbsd.editor.x86_64.so"
+linux.release.x86_64 = "bin/libsimnative.linuxbsd.editor.x86_64.so"
