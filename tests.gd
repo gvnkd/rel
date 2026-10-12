@@ -1,160 +1,117 @@
 extends SceneTree
 
-var tick_size: float = 0.0025
-var min_spread: float = 0.50
+const TICK_SIZE := 0.0025
 
-var timestamp: int = 0
-var time_delta: int = 10
+var failures := 0
+var ticks: Array = []
 
-var ticks: Array[Array] = [[-1, 1.15, 1]]
+func check(cond: bool, name: String) -> void:
+	if cond:
+		print("PASS: ", name)
+	else:
+		failures += 1
+		printerr("FAIL: ", name)
 
+func new_book() -> OrderBookEngine:
+	var ob := OrderBookEngine.new()
+	ob.traded.connect(func(price, vol): ticks.append([price, vol]))
+	return ob
 
-var order_book = {
-	"bids": {
-		1.10: 100,
-		#1.25: 100,
-		#1.50: 100,
-	},
-	"asks": {
-		1.20: 100,
-		#1.25: 20,
-		#1.50: 30,
-		#1.75: 40,
-		#2.00: 50,
-	},
-}
+func test_no_cross_no_trade() -> void:
+	ticks.clear()
+	var ob := new_book()
+	ob.place_order(1.10, 100)
+	ob.place_order(1.20, -100)
+	ob.process_orders()
+	check(ticks.is_empty(), "no trade when bid < ask")
+	check(ob.bids == {1.10: 100} and ob.asks == {1.20: 100}, "book untouched")
 
-func get_bids() -> Array:
-	var bid_prices = order_book.bids.keys()
-	bid_prices.sort()
-	bid_prices.reverse()
-	return bid_prices
+func test_full_match() -> void:
+	ticks.clear()
+	var ob := new_book()
+	ob.place_order(1.20, 100)
+	ob.place_order(1.20, -100)
+	ob.process_orders()
+	check(ticks == [[1.20, 100]], "full match trades at ask price")
+	check(ob.bids.is_empty() and ob.asks.is_empty(), "full match clears both sides")
 
-func get_asks() -> Array:
-	var ask_prices = order_book.asks.keys()
-	ask_prices.sort()
-	return ask_prices
-	
-func process_orders() -> void:
-	var _bids = get_bids()
-	var _asks = get_asks()
-	print_debug("BIDs: ", _bids)
-	print_debug("ASKs: ", _asks)
+func test_partial_bid_consumed() -> void:
+	ticks.clear()
+	var ob := new_book()
+	ob.place_order(1.30, 50)
+	ob.place_order(1.25, -100)
+	ob.process_orders()
+	check(ticks == [[1.25, 50]], "partial fill trades min volume")
+	check(ob.bids.is_empty() and ob.asks == {1.25: 50}, "ask remainder stays on book")
 
-	if _bids.is_empty() or _asks.is_empty():
-		print_debug("BIDs or ASKs prices is empty")
-		return
+func test_multi_level_sweep() -> void:
+	ticks.clear()
+	var ob := new_book()
+	ob.place_order(1.30, 10)
+	ob.place_order(1.20, 10)
+	ob.place_order(1.15, -15)
+	ob.process_orders()
+	check(ticks == [[1.15, 10], [1.15, 5]], "sweep consumes both bid levels")
+	check(ob.bids == {1.20: 5} and ob.asks.is_empty(), "bid remainder stays on book")
 
-	if _bids[0] < _asks[0]:
-		print_debug("_bids[0] < _asks[0] No more matching orders")
-		return
+func test_sell_order_side() -> void:
+	ticks.clear()
+	var ob := new_book()
+	ob.place_order(1.20, -30)
+	check(ob.asks == {1.20: 30} and ob.bids.is_empty(), "negative vol lands in asks")
+	ob.place_order(1.20, -10)
+	check(ob.asks == {1.20: 40}, "sell adds to existing ask level")
 
-	var stop: bool = false
-	var del_as: Array = []
-	var del_bs: Array = []
-	
-	for bp in _bids:
-		if stop:
-			break
+func test_zero_vol_ignored() -> void:
+	var ob := new_book()
+	ob.place_order(1.20, 0)
+	check(ob.bids.is_empty() and ob.asks.is_empty(), "zero vol is a no-op")
 
-		var bv = order_book.bids[bp]
-		if bv == 0:
-			print_debug("BVol is zero. Skipping this order")
-		elif bv < 0:
-			print_debug("BVol is negative. This is WRONG")
-			break
+func test_random_sim_invariants() -> void:
+	ticks.clear()
+	var ob := new_book()
+	ob.place_order(1.10, 100)
+	ob.place_order(1.20, -100)
+	ob.process_orders()
+	var last_price := 1.15
+	if not ticks.is_empty():
+		last_price = ticks[-1][0]
+	for n in 1000:
+		for x in 20:
+			_buy_or_sell(ob, last_price)
+		ob.process_orders()
+		if not ticks.is_empty():
+			last_price = ticks[-1][0]
+	var vols_ok := true
+	for v in ob.bids.values() + ob.asks.values():
+		vols_ok = vols_ok and v > 0
+	check(vols_ok, "no non-positive volumes after sim")
+	var spread_ok: bool = ob.bids.is_empty() or ob.asks.is_empty() or ob.best_bid() < ob.best_ask()
+	check(spread_ok, "no crossed book after sim")
+	check(ticks.size() > 0, "sim produced trades")
 
-		print_debug("BID price: ", bp, " vol: ", bv)
-		for ap in _asks:
-			var av = order_book.asks[ap]
-			if av == 0:
-				print_debug("Skip empty volume for: ", ap)
-				continue
-			elif av <= 0:
-				print_debug("Negative volume MUST not exists")
-				return
-
-			if bp < ap:
-				print_debug("No more price for: ", bp)
-				stop = true
-				break
-
-			if bv > av:
-				print_debug("Buy ", av, " volume by ", ap)
-				add_tick(float(ap), int(av))
-				bv -= av
-				order_book.asks[ap] -= av
-				del_as.append(ap)
-				order_book.bids[bp] = bv
-			elif bv <= av:
-				print_debug("Buy ", bv, " volume by ", ap)
-				add_tick(float(ap), int(bv))
-				order_book.asks[ap] -= bv
-				order_book.bids[bp] -= av
-				del_bs.append(bp)
-				if bv == av:
-					del_as.append(ap)
-
-				break
-				
-			print_debug("ASK price: ", ap, " vol: ", av)
-
-	for a in del_as:
-		order_book.asks.erase(a)
-
-	for b in del_bs:
-		order_book.bids.erase(b)
-		
-	print("Order book: ", order_book)
-	print("Ticks: ", ticks)
-
-func add_tick(price: float, vol: int) -> void:
-	print_debug(timestamp, " => New tick: ", price, " vol: ", vol)
-	ticks.append([timestamp, price, vol])
-	timestamp += 1
-
-func place_order(price: float, vol: int) -> void:
-	if vol > 0: # buy order
-		if price in order_book.bids.keys():
-			order_book.bids[price] += vol
-		else:
-			order_book.bids[price] = vol
-	if vol < 0: # sell order
-		if price in order_book.asks.keys():
-			order_book.asks[price] += -vol
-		else:
-			order_book.asks[price] = -vol
-
-func buy_or_sell(last_price: float) -> bool:
-	var bs = randf() # buy or sell dice
-	var vol = randi_range(1, 20)
-	# how mach ticks from price
-	var rand_ticks = randi_range(0, 10)
-	var pdelta: float = tick_size * float(rand_ticks)
-	if bs > 0.75: # sell
-		var p: float = last_price - pdelta
-		print_debug("Sell ", vol, " by ", p, " Last: ", last_price, " PDelta: ", pdelta)
-		place_order(p, -vol)
+func _buy_or_sell(ob: OrderBookEngine, last_price: float) -> bool:
+	var bs := randf()
+	var vol := randi_range(1, 20)
+	var pdelta := TICK_SIZE * float(randi_range(0, 10))
+	if bs > 0.75:
+		ob.place_order(last_price - pdelta, -vol)
 		return true
-	if bs <= 0.25: # buy
-		var p: float = last_price + pdelta
-		print_debug("Buy ", vol, " by ", p, " Last: ", last_price, " PDelta: ", pdelta)
-		place_order(p, vol)
+	if bs <= 0.25:
+		ob.place_order(last_price + pdelta, vol)
 		return true
-	
 	return false
 
 func _init() -> void:
-	print("Ready")
-	print(order_book)
-	process_orders()
-	var last_price = ticks[-1][1]
-	print("========= Last price: ", last_price)
-	#var get_new_order = false
-	for n in range(0,1000):
-		for x in range(0,20):
-			buy_or_sell(last_price)
-		process_orders()
-
-	print(ticks)
-	quit()
+	test_no_cross_no_trade()
+	test_full_match()
+	test_partial_bid_consumed()
+	test_multi_level_sweep()
+	test_sell_order_side()
+	test_zero_vol_ignored()
+	test_random_sim_invariants()
+	if failures == 0:
+		print("ALL TESTS PASSED")
+	else:
+		printerr(failures, " TEST(S) FAILED")
+	quit(failures)

@@ -12,9 +12,5 @@ script = ExtResource("1_ticr0")
 [node name="Grid" type="Node2D" parent="."]
 script = ExtResource("1_r8nw5")
 
-[node name="VLine" type="Sprite2D" parent="Grid"]
-
-[node name="HLine" type="Sprite2D" parent="Grid"]
-
 [node name="Data" type="Node2D" parent="."]
 script = ExtResource("3_ctcuh")

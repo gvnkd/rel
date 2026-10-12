@@ -1,315 +1,145 @@
 extends Node2D
 
-# price: volume
-var bids = {
-	102190: 200,
-	#102180: 200,
-	#102170: 200,
-	#102160: 200,
-	#102150: 200,
-}
+const PRECISION := 5
+const MULT := 10 ** PRECISION
+const PRICE_FMT := "%0.5f : %d\n"
+const OB_DEPTH := 50
+const CANDLE_PERIOD_S := 60.0
+const ORDER_INTERVAL_S := 0.05
+const ORDERS_PER_TICK := 4
 
-var asks = {
-	102195: 200,
-	#102210: 200,
-	#102220: 200,
-	#102230: 200,
-	#102240: 200,
-}
-var precision = 5
-var mult = 10 ** precision
+const PRICE_SCALE := 0.005
+const CANDLE_CX := 600.0
+const CANDLE_CY := 600.0
+const CANDLE_W := 20.0
+const SHADOW_W := 4.0
+const CANDLE_SPACING := 22.0
 
-var ob_scale: float = 100.0
+var ob := OrderBookEngine.new()
+var current := Candle.new()
+var completed: Array[Candle] = []
+
 var ob_x: int = 140
 var ob_y: int = 250
 var ob_w: int = 400
 var ob_h: int = 500
-var ob_depth: int = 50
 var ob_spacing: int = 8
 
-var t: float = 0.0
-var time: float = 0.0
+var paused := true
+var time := 0.0
+var t := 0.0
 
-var candle = [102195, 102295, 102095, 102155]
-var candles = []
+@onready var order_book_ui: OrderBookPanel = $OrderBook
+@onready var plot_data: Node2D = $Plot/Data
 
-var paused = true
+func _ready() -> void:
+	ob.traded.connect(_on_traded)
+	plot_data.candles = completed
+	ob.place_order(102190, 200)
+	ob.place_order(102195, -200)
+	_update_labels()
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause"):
-		paused = !paused
-
-func get_bids():
-	var bs = bids.keys()
-	bs.sort()
-	bs.reverse()
-	#print("bids: ", bs)
-	return bs
-
-func get_asks():
-	var a = asks.keys()
-	a.sort()
-	#print("asks: ", a)
-	return a
-
-func draw_candle():
-	var scale = 0.005
-	var cx = 600
-	var w = 20
-	var sw = 4
-	var cy = 600
-	var ndx = 0
-	var x_spacing = 22
-	for can in candles:
-		var o = float(can[0]) * scale
-		var h = float(can[1]) * scale
-		var l = float(can[2]) * scale
-		var c = float(can[3]) * scale
-		var body = o - c
-		var body_col = Color.BURLYWOOD
-		
-		#$OrderBook.set_ohlc(o, h, l, c)
-		#print(o, " ", h, " ", l, " ", c)
-		draw_rect(Rect2(cx+x_spacing*ndx,cy-o,w,abs(body)), body_col)
-		draw_rect(Rect2(cx+w/2-sw/2+x_spacing*ndx,cy-o-h,sw,h-l), Color.TOMATO)
-		ndx += 1
-
-func _draw():
-	var bks = get_bids()
-	var ask = get_asks()
-	# draw ob center line
-	var obc_x = ob_x + ob_w/2
-	var obc_y = ob_y + ob_h/2
-	var p0 = Vector2(ob_x, obc_y)
-	var p1 = Vector2(ob_x+ob_w, obc_y)
-	draw_line(p0,p1,Color.GRAY,1.0)
-
-	var ndx: int = 1	
-	var max_vol: int = 1
-	var vol_scale: float = 1.0
-	# calc vol_scale
-	var bid_text = ""
-	for k in bks.slice(0, ob_depth, 1):
-		var v = bids[k]
-		bid_text += "%0.5f: %d\n" % [float(k)/mult, bids[k]]
-		if v > max_vol:
-			max_vol = v
-			vol_scale = float(ob_w) / float(max_vol)
-
-	#bks_slice.reverse()
-	#for k in bks_slice:
-
-	$OrderBook.set_bid_label(bid_text)
-	
-	var ask_text = ""
-	var ask_slice = ask.slice(0, ob_depth, 1)
-	for k in ask_slice:
-		var v = asks[k]
-		if v > max_vol:
-			max_vol = v
-			vol_scale = float(ob_w) / float(max_vol)
-
-	ask_slice.reverse()
-	for k in ask_slice:
-		ask_text += "%0.5f : %d\n" % [float(k)/mult, asks[k]]
-
-	$OrderBook.set_ask_label(ask_text)
-
-	# draw bids
-	for k in bks.slice(0, ob_depth, 1):
-		var v = bids[k]
-		p0 = Vector2(ob_x, obc_y + ob_spacing * ndx)
-		p1 = Vector2(ob_x + v*vol_scale, obc_y + ob_spacing * ndx)
-		draw_line(p0, p1, Color.GREEN_YELLOW, 3.0)
-		ndx += 1
-
-	# draw asck
-	ndx = 1
-	for k in ask.slice(0, ob_depth, 1):
-		var v = asks[k]
-		p0 = Vector2(ob_x, obc_y - ob_spacing * ndx)
-		p1 = Vector2(ob_x + v*vol_scale, obc_y - ob_spacing * ndx)
-		draw_line(p0, p1, Color.LIGHT_BLUE, 3.0)
-		ndx += 1
-
-	draw_candle()
+		paused = not paused
 
 func _process(delta: float) -> void:
 	if paused:
 		return
-
 	time += delta
 	t += delta
-	process_orders()
-	
-	if candles.is_empty():
-		candles.append(candle)
-	
-	if time > 60.0:
-		var c = [0, 0, 0, 0]
-		c = candle.duplicate(true)
-		var open = c[3]
-		#c[0] = candle[0]
-		#c[1] = candle[1]
-		#c[2] = candle[2]
-		#c[3] = candle[3]
-		c[0] = float(c[0]) / 100000
-		c[1] = float(c[1]) / 100000
-		c[2] = float(c[2]) / 100000
-		c[3] = float(c[3]) / 100000
-		$Plot/Data.candles.append(c)
-		$Plot.queue_redraw()
-		#candles.append(c)
-		candle[0] = open
-		candle[1] = open
-		candle[2] = open
+
+	if time >= CANDLE_PERIOD_S:
+		_roll_candle()
+
+	if t >= ORDER_INTERVAL_S:
+		t = 0.0
+		var changed := false
+		for i in ORDERS_PER_TICK:
+			changed = _buy_or_sell() or changed
+		if changed:
+			ob.process_orders()
+			_update_labels()
+			queue_redraw()
+
+func _draw() -> void:
+	var bid_ps := ob.bid_prices()
+	var ask_ps := ob.ask_prices()
+
+	var max_vol := 1
+	for p in bid_ps:
+		max_vol = maxi(max_vol, ob.bids[p])
+	for p in ask_ps:
+		max_vol = maxi(max_vol, ob.asks[p])
+	var vol_scale := float(ob_w) / float(max_vol)
+
+	var center := Vector2(ob_x, ob_y + ob_h / 2)
+	draw_line(Vector2(ob_x, center.y), Vector2(ob_x + ob_w, center.y), Color.GRAY)
+
+	for i in mini(bid_ps.size(), OB_DEPTH):
+		var p: Variant = bid_ps[i]
+		var y := center.y + ob_spacing * (i + 1)
+		draw_line(Vector2(ob_x, y), Vector2(ob_x + ob.bids[p] * vol_scale, y), Color.GREEN_YELLOW, 3.0)
+
+	for i in mini(ask_ps.size(), OB_DEPTH):
+		var p: Variant = ask_ps[i]
+		var y := center.y - ob_spacing * (i + 1)
+		draw_line(Vector2(ob_x, y), Vector2(ob_x + ob.asks[p] * vol_scale, y), Color.LIGHT_BLUE, 3.0)
+
+	_draw_candles()
+
+func _draw_candles() -> void:
+	for i in completed.size():
+		var c := completed[i]
+		var x := CANDLE_CX + CANDLE_SPACING * i
+		var o := c.open * PRICE_SCALE
+		var h := c.high * PRICE_SCALE
+		var l := c.low * PRICE_SCALE
+		var cl := c.close * PRICE_SCALE
+		draw_rect(Rect2(x, CANDLE_CY - maxf(o, cl), CANDLE_W, absf(o - cl)), Color.BURLYWOOD)
+		draw_rect(Rect2(x + CANDLE_W / 2 - SHADOW_W / 2, CANDLE_CY - h, SHADOW_W, h - l), Color.TOMATO)
+
+func _update_labels() -> void:
+	var bid_text := ""
+	for p in ob.bid_prices().slice(0, OB_DEPTH):
+		bid_text += PRICE_FMT % [float(p) / MULT, ob.bids[p]]
+	order_book_ui.set_bid_label(bid_text)
+
+	var ask_text := ""
+	var ask_slice := ob.ask_prices().slice(0, OB_DEPTH)
+	ask_slice.reverse()
+	for p in ask_slice:
+		ask_text += PRICE_FMT % [float(p) / MULT, ob.asks[p]]
+	order_book_ui.set_ask_label(ask_text)
+
+	order_book_ui.set_ohlc(current.open, current.high, current.low, current.close)
+
+func _roll_candle() -> void:
+	if current.is_empty():
 		time = 0.0
-		
-	if (t > 0.05):
-		for x in range(1,5):
-			var bid = 0
-			var ask = 0
-			if !bids.is_empty():
-				var bid_prices = get_bids()
-				bid = bid_prices[0]
-			if !asks.is_empty():
-				var ask_prices = get_asks()
-				ask = ask_prices[0]
-
-			if buy_or_sell(bid, ask):
-				queue_redraw()
-				t = 0
-	
-		#var p = randi_range(11 * mult, 13 * mult)
-		#var v = randi_range(20, 500)
-		#if p in asks.keys():
-			#asks[p] += v
-		#else:
-			#asks[p] = v
-#
-		#p = randi_range(11 * mult, 13 * mult)
-		#v = randi_range(20, 500)
-		#if p in bids.keys():
-			#bids[p] += v
-		#else:
-			#bids[p] = v
-#
-		#t = 0.0
-
-# accepts current bid and ask prices
-# and returns a volume of order
-# when volume is negative value then place a sell order
-# when volume is positive value then place a buy order
-# when volume is zero then no order should be placed
-func buy_or_sell(bid: int, ask: int) -> bool:
-	var bs = randf()
-	var vol = randi_range(1, 20)
-	# how mach ticks from price
-	var pdelta = randi_range(0, 10)
-	if bs > 0.75: # sell
-		if bid == 0:
-			place_order(ask - pdelta, -vol)
-			return true
-		place_order(bid - pdelta, -vol)
-		return true
-	if bs < 0.25: # buy
-		if ask == 0:
-			place_order(bid + pdelta, vol)
-			return true
-		place_order(ask + pdelta, vol)
-		return true
-	
-	return false
-
-func place_order(price: int, vol: int) -> void:
-	if vol > 0: # buy order
-		if price in bids.keys():
-			bids[price] += vol
-		else:
-			bids[price] = vol
-	if vol < 0: # sell order
-		if price in asks.keys():
-			asks[price] += -vol
-		else:
-			asks[price] = -vol
-
-func update_candle(p: int):
-	var o = candle[0]
-	var h = candle[1]
-	var l = candle[2]
-	var c = candle[3]
-	if o == 0:
-		candle[0] = p
-
-	if l > p or l == 0:
-		#print("Updating Low: ", p)
-		candle[2] = p
-	if h < p or h == 0:
-		candle[1] = p
-		#print("Updating High: ", p)
-
-	candle[3] = p
-
-func process_orders():
-	var bid_prices = get_bids()
-	var ask_prices = get_asks()
-
-	if bids.is_empty() or asks.is_empty():
 		return
+	completed.append(current)
+	var prev := current
+	current = Candle.new()
+	current.open = prev.close
+	current.high = prev.close
+	current.low = prev.close
+	plot_data.queue_redraw()
+	time = 0.0
 
-	#process bid orders
-	var bids_del = []
-	var asks_del = []
+func _on_traded(price: Variant, _vol: int) -> void:
+	current.update(float(price) / MULT)
 
-	var b = bid_prices[0]	
-	var a = ask_prices[0]
-	if b >= a:
-		update_candle(b)
-		var b_vol = bids[b]
-		var a_vol = asks[a]
-		if b_vol == a_vol:
-			bids_del.append(b)
-			asks_del.append(a)
-		if b_vol > a_vol:
-			asks_del.append(a)
-			bids[b] = b_vol - a_vol
-		else:
-			bids_del.append(b)
-			asks[a] = a_vol - b_vol
-
-	#for p_bid in bid_prices:
-		#var bid_vol = bids[p_bid]
-		#for p_ask in ask_prices:
-			#if p_bid >= p_ask:
-				#var ask_vol = asks[p_ask]
-				#if ask_vol > bid_vol:
-					#asks[p_ask] -= bid_vol
-					#bids[p_bid] = 0
-					#bids_del.append(p_bid)
-					## order complete
-				#else:
-					#bids[p_bid] -= ask_vol
-					#asks[p_ask] = 0
-					#asks_del.append(p_ask)
-					#bid_vol -= ask_vol
-					#if bid_vol <= 0:
-						#bids_del.append(p_bid)
-					## reduce bid vol and check next ask order
-#
-				#update_candle(p_bid)
-			#else:
-				#break
-
-	for p in bids_del:
-		bids.erase(p)
-
-	for p in asks_del:
-		asks.erase(p)
-
-func sim_n_ticks(n: int):
-	# 1. place N random orders
-	# 1.1 process order book until no trades
-	# 2. return OHLC as a result of those trades
-	var iters_per_loop = 10
-	for x in range(0, iters_per_loop):
-		pass
+func _buy_or_sell() -> bool:
+	var bs := randf()
+	var vol := randi_range(1, 20)
+	var pdelta := randi_range(0, 10)
+	var bid: Variant = ob.best_bid()
+	var ask: Variant = ob.best_ask()
+	if bs > 0.75:
+		ob.place_order(bid - pdelta if bid != null else ask - pdelta, -vol)
+		return true
+	if bs < 0.25:
+		ob.place_order(ask + pdelta if ask != null else bid + pdelta, vol)
+		return true
+	return false
