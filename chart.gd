@@ -8,13 +8,6 @@ const CANDLE_PERIOD_S := 60.0
 const ORDER_INTERVAL_S := 0.05
 const ORDERS_PER_TICK := 4
 
-const PRICE_SCALE := 0.005
-const CANDLE_CX := 600.0
-const CANDLE_CY := 600.0
-const CANDLE_W := 20.0
-const SHADOW_W := 4.0
-const CANDLE_SPACING := 22.0
-
 var ob := OrderBookEngine.new()
 var current := Candle.new()
 var completed: Array[Candle] = []
@@ -35,6 +28,7 @@ var t := 0.0
 func _ready() -> void:
 	ob.traded.connect(_on_traded)
 	plot_data.candles = completed
+	plot_data.current = current
 	ob.place_order(102190, 200)
 	ob.place_order(102195, -200)
 	_update_labels()
@@ -86,19 +80,6 @@ func _draw() -> void:
 		var y := center.y - ob_spacing * (i + 1)
 		draw_line(Vector2(ob_x, y), Vector2(ob_x + ob.asks[p] * vol_scale, y), Color.LIGHT_BLUE, 3.0)
 
-	_draw_candles()
-
-func _draw_candles() -> void:
-	for i in completed.size():
-		var c := completed[i]
-		var x := CANDLE_CX + CANDLE_SPACING * i
-		var o := c.open * PRICE_SCALE
-		var h := c.high * PRICE_SCALE
-		var l := c.low * PRICE_SCALE
-		var cl := c.close * PRICE_SCALE
-		draw_rect(Rect2(x, CANDLE_CY - maxf(o, cl), CANDLE_W, absf(o - cl)), Color.BURLYWOOD)
-		draw_rect(Rect2(x + CANDLE_W / 2 - SHADOW_W / 2, CANDLE_CY - h, SHADOW_W, h - l), Color.TOMATO)
-
 func _update_labels() -> void:
 	var bid_text := ""
 	for p in ob.bid_prices().slice(0, OB_DEPTH):
@@ -124,11 +105,13 @@ func _roll_candle() -> void:
 	current.open = prev.close
 	current.high = prev.close
 	current.low = prev.close
+	plot_data.current = current
 	plot_data.queue_redraw()
 	time = 0.0
 
 func _on_traded(price: Variant, _vol: int) -> void:
 	current.update(float(price) / MULT)
+	plot_data.queue_redraw()
 
 func _buy_or_sell() -> bool:
 	var bs := randf()

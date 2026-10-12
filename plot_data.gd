@@ -4,6 +4,7 @@ const BODY_W := 20.0
 const SHADOW_W := 2.0
 
 var candles: Array[Candle] = []
+var current: Candle
 
 var scale_factor := 100.0
 var step_x := 22.0
@@ -16,8 +17,13 @@ func _ready() -> void:
 
 func _draw() -> void:
 	for i in candles.size():
-		_draw_shadow(candles[i], i)
-		_draw_body(candles[i], i)
+		_draw_candle(candles[i], i)
+	if current != null and not current.is_empty():
+		_draw_candle(current, candles.size())
+
+func _draw_candle(c: Candle, ndx: int) -> void:
+	_draw_shadow(c, ndx)
+	_draw_body(c, ndx)
 
 func _draw_body(c: Candle, ndx: int) -> void:
 	var x := step_x * ndx

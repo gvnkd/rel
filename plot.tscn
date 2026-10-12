@@ -13,4 +13,5 @@ script = ExtResource("1_ticr0")
 script = ExtResource("1_r8nw5")
 
 [node name="Data" type="Node2D" parent="."]
+position = Vector2(560, 550)
 script = ExtResource("3_ctcuh")
