@@ -25,9 +25,7 @@ func _draw() -> void:
 	for s in data.series:
 		if not s.visible or s.candles.is_empty():
 			continue
-		var total := s.candles.size()
-		var end := total if data.head < 0 else mini(data.head + 1, total)
-		var last := mini(i1, end - 1)
+		var last := mini(i1, s.candles.size() - 1)
 		if last < i0:
 			continue
 		match mode:

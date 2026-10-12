@@ -76,8 +76,10 @@ func _input(event: InputEvent) -> void:
 		if not sim_window.is_dragging() and not _over_ui(motion.position):
 			if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
 				view.scale_by(motion.relative, motion.position)
+				view.follow = false
 			elif motion.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE) != 0 or pan_mode:
 				view.pan_by(motion.relative)
+				view.follow = false
 		_refresh()
 
 func _over_ui(pos: Vector2) -> bool:
@@ -108,6 +110,8 @@ func _process(delta: float) -> void:
 	t_acc -= n
 	head = mini(head + n, data.max_len())
 	data.head = head
+	if view.follow:
+		view.follow_tail(head)
 	_refresh()
 	if head >= data.max_len():
 		playing = false
@@ -129,6 +133,7 @@ func add_timeline(tl_name: String, path: String) -> int:
 	data.add_series(s)
 	if data.series.size() == 1:
 		_fit_view(s)
+	view.follow = true
 	head = 0
 	data.head = head
 	playing = true

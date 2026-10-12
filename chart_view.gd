@@ -12,6 +12,7 @@ var px_per_index := 22.0
 var px_per_price := 100000.0
 var base_index := 0.0
 var base_price := 0.0
+var follow := true
 
 func layout(size: Vector2) -> void:
 	plot_rect = Rect2(MARGIN_LEFT, 0.0, maxf(size.x - MARGIN_LEFT - book_width, 0.0), maxf(size.y - MARGIN_BOTTOM, 0.0))
@@ -58,6 +59,9 @@ func scale_by(delta: Vector2, pos: Vector2) -> void:
 func pan_by(delta: Vector2) -> void:
 	base_index -= delta.x / px_per_index
 	base_price += delta.y / px_per_price
+
+func follow_tail(index: float) -> void:
+	base_index = index + 1.0 - plot_rect.size.x / px_per_index
 
 func fit_prices(lo: float, hi: float) -> void:
 	var span := maxf(hi - lo, 1.0e-9)
