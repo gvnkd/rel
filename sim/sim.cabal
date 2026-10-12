@@ -9,6 +9,7 @@ library
     exposed-modules:  Sim.Types
                       Sim.Engine
                       Sim.Gen
+    other-modules:    Sim.Internal
     build-depends:    base >=4 && <5,
                       containers,
                       splitmix

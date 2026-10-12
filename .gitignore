@@ -8,3 +8,4 @@ result
 
 # generated data
 /candles*.csv
+*.swp

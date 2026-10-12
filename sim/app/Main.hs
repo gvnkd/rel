@@ -1,7 +1,8 @@
 module Main (main) where
 
 import Sim.Gen (runSim)
-import Sim.Types (Candle (..), Price (..), SimParams (..), Vol (..), defaultParams)
+import Sim.Types (Candle (..), Price (..), SimParams (..), defaultParams, mkVol, unVol)
+import Data.Maybe (fromMaybe)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
@@ -35,7 +36,7 @@ setters =
   , ("--tick-range",        \x s -> s { spTickRange = x })
   , ("--start-bid",         \x s -> s { spStartBid = Price x })
   , ("--start-ask",         \x s -> s { spStartAsk = Price x })
-  , ("--start-vol",         \x s -> s { spStartVol = Vol x })
+  , ("--start-vol",         \x s -> s { spStartVol = fromMaybe (spStartVol s) (mkVol x) })
   , ("--price-scale",       \x s -> s { spPriceScale = x })
   ]
 
