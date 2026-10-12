@@ -4,6 +4,7 @@ module Sim.Engine
   ( placeOrder
   , bestBid
   , bestAsk
+  , matchStep
   , processOrders
   , updateCandle
   ) where
@@ -25,6 +26,22 @@ bestBid = Map.lookupMax . bookBids
 
 bestAsk :: Book -> Maybe (Price, Vol)
 bestAsk = Map.lookupMin . bookAsks
+
+-- a single match at the top of the book, priced at the ask; Nothing when
+-- the book is uncrossed or a side is empty
+matchStep :: Book -> Maybe (Book, Trade)
+matchStep book = case (bestBid book, bestAsk book) of
+  (Just (bp, bv), Just (ap, av))
+    | bp >= ap ->
+        let v = min bv av
+            bids' = consumeLevel bp bv v (bookBids book)
+            asks' = consumeLevel ap av v (bookAsks book)
+        in Just (book { bookBids = bids', bookAsks = asks' }, Trade ap v)
+  _ -> Nothing
+  where
+    consumeLevel p bv v levels
+      | bv == v   = Map.delete p levels
+      | otherwise = Map.insert p (Vol (unVol bv - unVol v)) levels
 
 -- repeatedly match top of book; trades are priced at the ask
 processOrders :: Book -> (Book, [Trade])

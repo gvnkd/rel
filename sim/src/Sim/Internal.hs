@@ -13,8 +13,10 @@ module Sim.Internal
   , Candle (..)
   , emptyCandle
   , isEmptyCandle
+  , SimMode (..)
   , SimParams (..)
   , defaultParams
+  , Tick (..)
   ) where
 
 import Data.Word (Word64)
@@ -64,13 +66,16 @@ data Candle = Candle
   , candleClose :: !Price
   , candleVol   :: !Int
   }
-  deriving (Show)
+  deriving (Eq, Show)
 
 emptyCandle :: Candle
 emptyCandle = Candle (Price 0) (Price 0) (Price 0) (Price 0) 0
 
 isEmptyCandle :: Candle -> Bool
 isEmptyCandle = (== Price 0) . candleOpen
+
+data SimMode = ModeCandles | ModeTickTrades | ModeTickSteps
+  deriving (Eq, Show)
 
 data SimParams = SimParams
   { spSeed            :: !Word64
@@ -85,6 +90,8 @@ data SimParams = SimParams
   , spBuyThresh       :: !Double
   , spSellThresh      :: !Double
   , spPriceScale      :: !Int
+  , spMode            :: !SimMode
+  , spBookDepth       :: !Int
   }
   deriving (Show)
 
@@ -102,4 +109,18 @@ defaultParams = SimParams
   , spBuyThresh       = 0.25
   , spSellThresh      = 0.75
   , spPriceScale      = 100000
+  , spMode            = ModeCandles
+  , spBookDepth       = 50
   }
+
+-- one row of the ticks export: a trade (tickVol > 0) or a book-only
+-- update (tickVol == 0), plus the top of the book right after the event;
+-- levels are (price, vol) pairs, bids descending, asks ascending
+data Tick = Tick
+  { tickCandle :: !Int
+  , tickPrice  :: !Price
+  , tickVol    :: !Int
+  , tickBids   :: ![(Price, Vol)]
+  , tickAsks   :: ![(Price, Vol)]
+  }
+  deriving (Show)

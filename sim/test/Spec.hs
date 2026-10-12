@@ -1,11 +1,13 @@
 module Main (main) where
 
+import Data.List (sort)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
 import Sim.Gen
+import Sim.TickGen (runSimTicks)
 import Sim.Types
 import Test.QuickCheck
 
@@ -59,7 +61,7 @@ prop_trade_volume_conserved (Flow orders) =
 
 prop_candle_invariants :: [Int] -> Property
 prop_candle_invariants ps0 =
-  let ps = map Price ps0
+  let ps = map Price (filter (/= 0) ps0)
       c = foldl' (\c p -> updateCandle p 1 c) emptyCandle ps
       mFirst = listToMaybe ps
       mLast = listToMaybe (reverse ps)
@@ -76,6 +78,36 @@ prop_sim_produces_valid_candles seed =
   let cs = runSim defaultParams { spSeed = seed, spCandles = 50, spOrdersPerCandle = 100 }
   in not (null cs) ==> all validCandle cs
 
+prop_ticks_candles_match_runSim :: Word64 -> SimMode -> Property
+prop_ticks_candles_match_runSim seed mode =
+  let sp = defaultParams { spSeed = seed, spCandles = 30, spOrdersPerCandle = 50, spMode = mode }
+      (cs, _ts) = runSimTicks sp
+  in property $ cs == runSim sp
+
+prop_ticks_book_snapshots :: Word64 -> SimMode -> Property
+prop_ticks_book_snapshots seed mode =
+  let sp = defaultParams { spSeed = seed, spCandles = 20, spOrdersPerCandle = 50, spMode = mode, spBookDepth = 10 }
+      (cs, ts) = runSimTicks sp
+      lastVol i = case [tickVol t | t <- ts, tickCandle t == i] of
+        [] -> -1
+        vs -> last vs
+  in counterexample "candle count" (length [ tickCandle t | t <- ts, tickVol t == 0 ] >= length cs)
+     .&&. counterexample "marker last" (all (\i -> lastVol i == 0) [0 .. length cs - 1])
+     .&&. counterexample "sorted levels" (all sortedLevels ts)
+
+sortedLevels :: Tick -> Bool
+sortedLevels t =
+  let bidPs = map (unPrice . fst) (tickBids t)
+      askPs = map (unPrice . fst) (tickAsks t)
+      vols  = map (unVol . snd) (tickBids t ++ tickAsks t)
+  in bidPs == reverse (sort bidPs)
+     && askPs == sort askPs
+     && length bidPs <= 10 && length askPs <= 10
+     && all (> 0) vols
+
+instance Arbitrary SimMode where
+  arbitrary = elements [ModeCandles, ModeTickTrades, ModeTickSteps]
+
 validCandle :: Candle -> Bool
 validCandle c =
   not (isEmptyCandle c)
@@ -90,4 +122,6 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_trade_volume_conserved
   , property prop_candle_invariants
   , property prop_sim_produces_valid_candles
+  , property prop_ticks_candles_match_runSim
+  , property prop_ticks_book_snapshots
   ]

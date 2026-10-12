@@ -26,13 +26,18 @@ func clear() -> void:
 	queue_redraw()
 
 func set_ladder(mid_price: float, step: float) -> void:
-	mid = mid_price
-	bids.clear()
-	asks.clear()
+	var b: Array[Vector2] = []
+	var a: Array[Vector2] = []
 	for k in range(1, DEPTH + 1):
 		var v := BASE_VOL * pow(DECAY, k - 1)
-		bids.append(Vector2(mid - step * k, v))
-		asks.append(Vector2(mid + step * k, v))
+		b.append(Vector2(mid_price - step * k, v))
+		a.append(Vector2(mid_price + step * k, v))
+	set_book(b, a, mid_price)
+
+func set_book(new_bids: Array[Vector2], new_asks: Array[Vector2], mid_price: float) -> void:
+	mid = mid_price
+	bids = new_bids.slice(0, DEPTH)
+	asks = new_asks.slice(0, DEPTH)
 	queue_redraw()
 
 func _draw() -> void:

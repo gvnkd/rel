@@ -4,6 +4,7 @@ extends RefCounted
 class Series:
 	var name := ""
 	var candles: Array[Candle] = []
+	var books: Array = []
 	var col_pos := Color.YELLOW_GREEN
 	var col_neg := Color.WEB_GREEN
 	var visible := true

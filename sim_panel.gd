@@ -17,7 +17,10 @@ const PARAM_FIELDS := [
 	["start-vol", "start vol", "200"],
 	["buy-thresh", "buy thresh", "0.25"],
 	["sell-thresh", "sell thresh", "0.75"],
+	["book-depth", "book depth", "50"],
 ]
+
+const MODES := ["candles", "tick-trades", "tick-steps"]
 
 const DATA_DIR := "user://simdata"
 
@@ -28,6 +31,7 @@ var status_label: Label
 var sim_available := false
 var _sim: Variant
 var _box: VBoxContainer
+var mode_option: OptionButton
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -59,6 +63,15 @@ func _build_ui() -> void:
 		edit.custom_minimum_size.x = 90
 		grid.add_child(edit)
 		fields[spec[0]] = edit
+
+	var mode_label := Label.new()
+	mode_label.text = "mode"
+	grid.add_child(mode_label)
+	mode_option = OptionButton.new()
+	for m: String in MODES:
+		mode_option.add_item(m)
+	mode_option.custom_minimum_size.x = 90
+	grid.add_child(mode_option)
 
 	var gen_btn := Button.new()
 	gen_btn.text = "Generate"
@@ -105,6 +118,8 @@ func _params_string() -> String:
 		if key == "name":
 			continue
 		parts.append("%s=%s" % [key, fields[key].text.strip_edges()])
+	var mode: String = MODES[mode_option.selected]
+	parts.append("mode=%s" % mode)
 	return ";".join(parts)
 
 func _on_generate() -> void:

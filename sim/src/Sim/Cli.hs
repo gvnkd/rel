@@ -25,6 +25,9 @@ applyArgs = go defaultParams
     go p ("--sell-thresh" : v : rest) = case reads v of
       [(x, "")] -> go p { spSellThresh = x } rest
       _         -> Left ("invalid --sell-thresh value: " ++ v)
+    go p ("--mode" : v : rest) = case parseMode v of
+      Just m  -> go p { spMode = m } rest
+      Nothing -> Left ("invalid --mode value (expected candles|tick-trades|tick-steps): " ++ v)
     go p (name : v : rest)
       | Just set <- lookup name setters = case reads v of
           [(x, "")] -> go (set x p) rest
@@ -41,7 +44,14 @@ setters =
   , ("--start-ask",         \x s -> s { spStartAsk = Price x })
   , ("--start-vol",         \x s -> s { spStartVol = fromMaybeDefault s (mkVol x) })
   , ("--price-scale",       \x s -> s { spPriceScale = x })
+  , ("--book-depth",        \x s -> s { spBookDepth = x })
   ]
+
+parseMode :: String -> Maybe SimMode
+parseMode "candles"    = Just ModeCandles
+parseMode "tick-trades" = Just ModeTickTrades
+parseMode "tick-steps" = Just ModeTickSteps
+parseMode _            = Nothing
 
 fromMaybeDefault :: SimParams -> Maybe Vol -> Vol
 fromMaybeDefault s = maybe (spStartVol s) id
@@ -59,5 +69,8 @@ usage = unlines
   , "  --start-ask P          initial ask price in ticks (default 102195)"
   , "  --start-vol V          initial book volume (default 200)"
   , "  --price-scale N        ticks per price unit (default 100000)"
-  , "output: CSV on stdout (open,high,low,close,vol)"
+  , "  --mode M               candles | tick-trades | tick-steps (default candles)"
+  , "  --book-depth N         book levels per side in tick rows (default 50)"
+  , "output: CSV on stdout (open,high,low,close,vol); in tick modes the UI"
+  , "  additionally writes <out>.ticks.csv next to the candles file"
   ]

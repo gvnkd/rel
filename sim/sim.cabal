@@ -9,6 +9,7 @@ library
     exposed-modules:  Sim.Types
                       Sim.Engine
                       Sim.Gen
+                      Sim.TickGen
                       Sim.Cli
                       Sim.Csv
     other-modules:    Sim.Internal

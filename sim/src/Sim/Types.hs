@@ -11,8 +11,10 @@ module Sim.Types
   , Candle (..)
   , emptyCandle
   , isEmptyCandle
+  , SimMode (..)
   , SimParams (..)
   , defaultParams
+  , Tick (..)
   ) where
 
 import Sim.Internal

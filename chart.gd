@@ -112,6 +112,7 @@ func _process(delta: float) -> void:
 	data.head = head
 	if view.follow:
 		view.follow_tail(head)
+	_update_book()
 	_refresh()
 	if head >= data.max_len():
 		playing = false
@@ -125,7 +126,13 @@ func _refresh() -> void:
 func add_timeline(tl_name: String, path: String) -> int:
 	var s := PlotDataScript.Series.new()
 	s.name = tl_name
-	s.candles = _load_candles(path)
+	var ticks_path := "%s.ticks.csv" % path.get_basename()
+	if FileAccess.file_exists(ticks_path):
+		var t := _load_ticks(ticks_path)
+		s.candles = t["candles"]
+		s.books = t["books"]
+	else:
+		s.candles = _load_candles(path)
 	var idx: int = data.series.size()
 	var col: Color = PALETTE[idx % PALETTE.size()]
 	s.col_pos = col
@@ -173,10 +180,24 @@ func _update_book() -> void:
 		if not s.visible or s.candles.is_empty():
 			continue
 		var n := s.candles.size()
+		var i := clampi(head - 1, 0, n - 1)
+		if not s.books.is_empty() and i < s.books.size():
+			var snap: Dictionary = s.books[i]
+			var sb: Array[Vector2] = snap["bids"]
+			var sa: Array[Vector2] = snap["asks"]
+			var mid := 0.0
+			if not sb.is_empty() and not sa.is_empty():
+				mid = (sb[0].x + sa[0].x) / 2.0
+			elif not sb.is_empty():
+				mid = sb[0].x
+			elif not sa.is_empty():
+				mid = sa[0].x
+			book_widget.set_book(sb, sa, mid)
+			return
 		var probe := mini(n, 100)
 		var span_sum := 0.0
-		for i in range(n - probe, n):
-			span_sum += s.candles[i].high - s.candles[i].low
+		for k in range(n - probe, n):
+			span_sum += s.candles[k].high - s.candles[k].low
 		var step := maxf(span_sum / probe / 4.0, 1.0e-9)
 		book_widget.set_ladder(s.candles[n - 1].close, step)
 		return
@@ -213,3 +234,54 @@ func _load_candles(path: String) -> Array[Candle]:
 			c.vol = parts[4].to_int()
 		loaded.append(c)
 	return loaded
+
+# ticks export: one row per event — c,price,vol, then book-depth
+# (bid px,bid vol,ask px,ask vol) quads; rows with vol == 0 carry no trade
+# (book-only placement or end-of-candle marker). Ticks are aggregated to
+# candles; each candle keeps the book of its last row.
+func _load_ticks(path: String) -> Dictionary:
+	var candles: Array[Candle] = []
+	var books: Array = []
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_error("cannot open ticks file: " + path)
+		return { "candles": candles, "books": books }
+	f.get_line()
+	var cur := -1
+	var c: Candle = null
+	var bids: Array[Vector2] = []
+	var asks: Array[Vector2] = []
+	while not f.eof_reached():
+		var line := f.get_line().strip_edges()
+		if line.is_empty():
+			continue
+		var parts := line.split(",")
+		if parts.size() < 7:
+			continue
+		var ci := parts[0].to_int()
+		if ci != cur:
+			if c != null:
+				books.append({ "bids": bids, "asks": asks })
+			c = Candle.new()
+			candles.append(c)
+			cur = ci
+		var vol := parts[2].to_int()
+		if vol > 0:
+			c.update(parts[1].to_float())
+			c.vol += vol
+		bids = _levels(parts, 3)
+		asks = _levels(parts, 5)
+	if c != null:
+		books.append({ "bids": bids, "asks": asks })
+	return { "candles": candles, "books": books }
+
+func _levels(parts: PackedStringArray, offset: int) -> Array[Vector2]:
+	var out: Array[Vector2] = []
+	var i := offset
+	while i + 1 < parts.size():
+		var px := parts[i].to_float()
+		var v := parts[i + 1].to_int()
+		if v > 0:
+			out.append(Vector2(px, v))
+		i += 4
+	return out

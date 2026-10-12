@@ -4,9 +4,10 @@ import Control.Exception (SomeException, try)
 import Foreign.C.String (CString, peekCString)
 import Foreign.C.Types (CInt (..))
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvText)
+import Sim.Csv (csvText, ticksCsv, ticksPath)
 import Sim.Gen (runSim)
-import Sim.Types (SimParams)
+import Sim.TickGen (runSimTicks)
+import Sim.Types (SimMode (..), SimParams (..))
 import System.IO (IOMode (WriteMode), hPutStr, withFile)
 
 -- params are "key=value" pairs separated by ';', keys as in the CLI
@@ -26,7 +27,14 @@ simGenerate paramsPtr outPtr = do
         Right _ -> 0
 
 writeCsv :: FilePath -> SimParams -> IO ()
-writeCsv path p = withFile path WriteMode $ \h -> hPutStr h (csvText p (runSim p))
+writeCsv path p = case spMode p of
+  ModeCandles -> write path (csvText p (runSim p))
+  _           -> do
+    let (cs, ts) = runSimTicks p
+    write path (csvText p cs)
+    write (ticksPath path) (ticksCsv p ts)
+  where
+    write fp s = withFile fp WriteMode $ \h -> hPutStr h s
 
 toArgs :: String -> [String]
 toArgs = concatMap pair . filter (not . null) . map trim . split ';'
