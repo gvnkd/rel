@@ -17,6 +17,7 @@
     {
       packages = forAllSystems (system: {
         redot = nixpkgs.legacyPackages.${system}.callPackage ./nix/redot.nix { };
+        sim = nixpkgs.legacyPackages.${system}.callPackage ./nix/sim.nix { };
         default = self.packages.${system}.redot;
       });
 
@@ -24,7 +25,11 @@
         default = nixpkgs.legacyPackages.${system}.mkShell {
           packages = [
             self.packages.${system}.redot
+            self.packages.${system}.sim
             nixpkgs.legacyPackages.${system}.gdtoolkit_4
+            (nixpkgs.legacyPackages.${system}.haskellPackages.ghcWithPackages (
+              ps: with ps; [ QuickCheck splitmix ]
+            ))
           ];
         };
       });

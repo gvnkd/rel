@@ -9,6 +9,7 @@ var current: Candle
 var scale_factor := 100000.0
 var base_price := 0.0
 var step_x := 22.0
+var window := 2000
 var col_pos := Color.YELLOW_GREEN
 var col_neg := Color.WEB_GREEN
 var col_sha := Color.PERU
@@ -22,10 +23,12 @@ func _price_y(p: float) -> float:
 	return (p - base_price) * scale_factor
 
 func _draw() -> void:
-	for i in candles.size():
-		_draw_candle(candles[i], i)
+	var total := candles.size()
+	var start := maxi(0, total - window)
+	for i in range(start, total):
+		_draw_candle(candles[i], i - start)
 	if current != null and not current.is_empty():
-		_draw_candle(current, candles.size())
+		_draw_candle(current, total - start)
 
 func _draw_candle(c: Candle, ndx: int) -> void:
 	_draw_shadow(c, ndx)

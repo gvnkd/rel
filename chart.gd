@@ -22,6 +22,13 @@ var paused := true
 var time := 0.0
 var t := 0.0
 
+@export var replay_file := "res://candles.csv"
+@export var replay_rate := 60.0
+
+var replaying := false
+var replay_queue: Array[Candle] = []
+var replay_acc := 0.0
+
 @onready var order_book_ui: OrderBookPanel = $OrderBook
 @onready var plot_data: Node2D = $Plot/Data
 
@@ -29,6 +36,11 @@ func _ready() -> void:
 	ob.traded.connect(_on_traded)
 	plot_data.candles = completed
 	plot_data.current = current
+	if FileAccess.file_exists(replay_file):
+		replay_queue = _load_candles(replay_file)
+		replaying = not replay_queue.is_empty()
+		paused = false
+		return
 	ob.place_order(102190, 200)
 	ob.place_order(102195, -200)
 	_update_labels()
@@ -36,8 +48,15 @@ func _ready() -> void:
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause"):
 		paused = not paused
+	elif event.is_action_pressed("speed_up"):
+		replay_rate *= 2.0
+	elif event.is_action_pressed("speed_down"):
+		replay_rate = maxf(replay_rate / 2.0, 1.0)
 
 func _process(delta: float) -> void:
+	if replaying:
+		_process_replay(delta)
+		return
 	if paused:
 		return
 	time += delta
@@ -94,6 +113,44 @@ func _update_labels() -> void:
 	order_book_ui.set_ask_label(ask_text)
 
 	order_book_ui.set_ohlc(current.open, current.high, current.low, current.close)
+
+func _process_replay(delta: float) -> void:
+	if paused:
+		return
+	replay_acc += delta * replay_rate
+	var n := mini(int(replay_acc), replay_queue.size())
+	if n <= 0:
+		return
+	replay_acc -= n
+	for i in n:
+		current = replay_queue.pop_front()
+		completed.append(current)
+	plot_data.current = current
+	order_book_ui.set_ohlc(current.open, current.high, current.low, current.close)
+	plot_data.queue_redraw()
+	if replay_queue.is_empty():
+		replaying = false
+
+func _load_candles(path: String) -> Array[Candle]:
+	var loaded: Array[Candle] = []
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return loaded
+	f.get_line()
+	while not f.eof_reached():
+		var line := f.get_line().strip_edges()
+		if line.is_empty():
+			continue
+		var parts := line.split(",")
+		if parts.size() < 4:
+			continue
+		var c := Candle.new()
+		c.open = parts[0].to_float()
+		c.high = parts[1].to_float()
+		c.low = parts[2].to_float()
+		c.close = parts[3].to_float()
+		loaded.append(c)
+	return loaded
 
 func _roll_candle() -> void:
 	if current.is_empty():

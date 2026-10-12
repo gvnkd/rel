@@ -5,3 +5,6 @@
 # Nix
 result
 .direnv/
+
+# generated data
+/candles*.csv
