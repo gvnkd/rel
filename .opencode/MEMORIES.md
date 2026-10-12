@@ -7,7 +7,7 @@ Order-book market sim. Redot (Godot fork) 26.2 = renderer + UI only; **Haskell (
 - `sim/` — Haskell package `rel-sim`: `Sim.Engine` (order book: `Side`/`Order`/`Book`/`Trade`, volumes positive by construction via `mkVol`), `Sim.Gen` (seeded splitmix generator), `Sim.Cli`/`Sim.Csv`, `SimFFI` (foreign-library, C ABI `sim_generate`). QuickCheck suite runs in the nix build (buildPhase).
 - `gdextension/shim.cpp` — godot-cpp 4.5 shim exposing `SimNative.generate(params, out_path)` to GDScript; `hs_init`/`hs_exit` in ELF constructors.
 - `sim_panel.gd` — params form + time-line list (click = show/hide); Generate writes `user://simdata/<name>.csv`.
-- `chart.gd` / `plot_data.gd` — multi-series candle rendering, shared playback head (space/`=`/`-`), per-series palette color + baseline.
+- `chart.gd` / `chart.tscn` — chart scene: root Control owns `ChartView` (shared index↔x / price↔y transform, pan/zoom, nice grid steps) + `PlotData` (series list, playback head). Widgets (full-rect Controls, all draw in screen space from ChartView, no Camera2D/node scaling): `grid_widget.gd` (grid + axis labels in margins), `series_widget.gd` (modes candles/bars/line/dots, key `M`), `indicator_widget.gd` (SMA, key `I`), `order_book_widget.gd` (bids/asks ladder via `set_ladder`, synthetic placeholder data from last candle until sim exports book), `cursor_widget.gd` (OHLC at head), `cross_widget.gd` (crosshair + axis tags, follows mouse). Keys: space/=`-` playback, wheel zoom at cursor, drag pan.
 - `nix/` — ALL nix code lives here (`redot.nix`, `sim.nix`, `godot-cpp.nix`, `gdextension.nix`, `patches/`). Root has only `flake.nix`.
 - Deleted and gone: GDScript order-book engine, `tests.gd`, order-book UI. Do not reintroduce logic into GDScript.
 
