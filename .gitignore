@@ -9,3 +9,6 @@ result
 # generated data
 /candles*.csv
 *.swp
+/addons/sim_native/bin/
+*.csv.import
+*.translation
