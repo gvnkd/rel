@@ -14,7 +14,6 @@ module Sim.Types
   , SimMode (..)
   , SimParams (..)
   , defaultParams
-  , RefMode (..)
   , Tick (..)
   , SimHooks (..)
   , defaultHooks

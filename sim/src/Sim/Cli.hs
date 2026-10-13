@@ -29,9 +29,6 @@ applyArgs = go defaultParams
     go p ("--mode" : v : rest) = case parseMode v of
       Just m  -> go p { spMode = m } rest
       Nothing -> Left ("invalid --mode value (expected candles|tick-trades|tick-steps): " ++ v)
-    go p ("--price-ref" : v : rest) = case parseRefMode v of
-      Just r  -> go p { spRefMode = r } rest
-      Nothing -> Left ("invalid --price-ref value (expected opposite|mid): " ++ v)
     go p ("--clamp-rest" : v : rest) = case parseBool v of
       Just b  -> go p { spClampRest = b } rest
       Nothing -> Left ("invalid --clamp-rest value (expected on|off): " ++ v)
@@ -59,11 +56,6 @@ parseMode "candles"    = Just ModeCandles
 parseMode "tick-trades" = Just ModeTickTrades
 parseMode "tick-steps" = Just ModeTickSteps
 parseMode _            = Nothing
-
-parseRefMode :: String -> Maybe RefMode
-parseRefMode "opposite" = Just RefOppositeBest
-parseRefMode "mid"      = Just RefMid
-parseRefMode _          = Nothing
 
 parseBool :: String -> Maybe Bool
 parseBool v = case map toLower v of
@@ -93,7 +85,6 @@ usage = unlines
   , "  --price-scale N        ticks per price unit (default 100000)"
   , "  --mode M               candles | tick-trades | tick-steps (default candles)"
   , "  --book-depth N         book levels per side in tick rows (default 50)"
-  , "  --price-ref R          opposite | mid (default opposite)"
   , "  --clamp-rest B         on | off — rest orders at most tick-range beyond"
   , "                         their side's best (default off)"
   , "output: CSV on stdout (open,high,low,close,vol); in tick modes the UI"

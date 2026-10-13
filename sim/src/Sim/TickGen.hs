@@ -97,14 +97,10 @@ matchTrail = go []
 type PriceFun = Book -> Side -> Int -> Price -> Maybe Price
 
 mkPriceFun :: SimParams -> PriceFun
-mkPriceFun sp = case (spRefMode sp, spClampRest sp) of
-  (RefOppositeBest, False) -> \book side pd _ ->
-    move side pd <$> oppositeRef book side
-  (RefOppositeBest, True) -> \book side pd _ ->
-    clampOwn book side . move side pd <$> oppositeRef book side
-  (RefMid, False) -> \book side pd anchor ->
+mkPriceFun sp = case spClampRest sp of
+  False -> \book side pd anchor ->
     move side pd <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
-  (RefMid, True) -> \book side pd anchor ->
+  True -> \book side pd anchor ->
     clampOwn book side . move side pd
       <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
   where

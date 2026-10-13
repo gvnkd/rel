@@ -78,13 +78,12 @@ prop_sim_produces_valid_candles seed =
   let cs = runSim defaultParams { spSeed = seed, spCandles = 50, spOrdersPerCandle = 100 }
   in not (null cs) ==> all validCandle cs
 
-prop_sim_valid_with_options :: Word64 -> RefMode -> Bool -> Property
-prop_sim_valid_with_options seed ref clamp =
+prop_sim_valid_with_options :: Word64 -> Bool -> Property
+prop_sim_valid_with_options seed clamp =
   let sp = defaultParams
         { spSeed = seed
         , spCandles = 50
         , spOrdersPerCandle = 100
-        , spRefMode = ref
         , spClampRest = clamp
         }
       cs = runSim sp
@@ -92,25 +91,23 @@ prop_sim_valid_with_options seed ref clamp =
 
 -- the book must never stay empty: a run with plenty of orders per candle
 -- always produces candles
-prop_sim_no_dead_market :: Word64 -> RefMode -> Bool -> Property
-prop_sim_no_dead_market seed ref clamp =
+prop_sim_no_dead_market :: Word64 -> Bool -> Property
+prop_sim_no_dead_market seed clamp =
   let sp = defaultParams
         { spSeed = seed
         , spCandles = 20
         , spOrdersPerCandle = 200
-        , spRefMode = ref
         , spClampRest = clamp
         }
   in property (length (runSim sp) == 20)
 
-prop_ticks_candles_match_runSim :: Word64 -> SimMode -> RefMode -> Bool -> Property
-prop_ticks_candles_match_runSim seed mode ref clamp =
+prop_ticks_candles_match_runSim :: Word64 -> SimMode -> Bool -> Property
+prop_ticks_candles_match_runSim seed mode clamp =
   let sp = defaultParams
         { spSeed = seed
         , spCandles = 30
         , spOrdersPerCandle = 50
         , spMode = mode
-        , spRefMode = ref
         , spClampRest = clamp
         }
       (cs, _ts) = runSimTicks sp
@@ -139,9 +136,6 @@ sortedLevels t =
 
 instance Arbitrary SimMode where
   arbitrary = elements [ModeCandles, ModeTickTrades, ModeTickSteps]
-
-instance Arbitrary RefMode where
-  arbitrary = elements [RefOppositeBest, RefMid]
 
 validCandle :: Candle -> Bool
 validCandle c =

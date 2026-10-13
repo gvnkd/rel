@@ -51,20 +51,17 @@ placeRandomOrder pf sp gs =
          Nothing -> gs3
        Nothing -> gs3
 
--- full price for an order on `side` given the book and the tick offset;
--- resolved once per run by mkPriceFun so the hot loop sees the mode
--- constants inlined
+-- full price for an order on `side` given the book and the tick offset:
+-- anchored at the bid/ask mid (falling back to the opposite side's
+-- best, then the last trade, when a side is empty); resolved once per
+-- run by mkPriceFun so the hot loop sees the clamp constant inlined
 type PriceFun = Book -> Side -> Int -> Price -> Maybe Price
 
 mkPriceFun :: SimParams -> PriceFun
-mkPriceFun sp = case (spRefMode sp, spClampRest sp) of
-  (RefOppositeBest, False) -> \book side pd _ ->
-    move side pd <$> oppositeRef book side
-  (RefOppositeBest, True) -> \book side pd _ ->
-    clampOwn book side . move side pd <$> oppositeRef book side
-  (RefMid, False) -> \book side pd anchor ->
+mkPriceFun sp = case spClampRest sp of
+  False -> \book side pd anchor ->
     move side pd <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
-  (RefMid, True) -> \book side pd anchor ->
+  True -> \book side pd anchor ->
     clampOwn book side . move side pd
       <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
   where
