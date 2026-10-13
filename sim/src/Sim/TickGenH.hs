@@ -21,39 +21,46 @@ import Sim.Gen (GenState (..), initState)
 import Sim.Internal
 import System.Random.SplitMix (nextWord64)
 
--- hooked variant of Sim.TickGen.runSimTicks: per-candle progress +
--- cancellation poll (throws SimCancelled), same output
-runSimTicksH :: SimHooks -> SimParams -> IO ([Candle], [Tick])
-runSimTicksH hooks sp = go (spCandles sp) 0 (initState sp) [] []
+-- hooked tick-mode driver with streaming export: tick rows are emitted
+-- through the sink as produced (constant memory -- the list-based
+-- Sim.TickGen.runSimTicks materializes every tick and stays for the
+-- test suite); candle order and row order are identical to the
+-- list-based export. Returns the candles.
+runSimTicksH :: SimHooks -> (Tick -> IO ()) -> SimParams -> IO [Candle]
+runSimTicksH hooks sink sp = go (spCandles sp) 0 (initState sp) []
   where
     total = spCandles sp
-    go 0 _ _ cs tss = pure (reverse cs, concat (reverse tss))
-    go k ci gs cs tss = do
+    go 0 _ _ cs = pure (reverse cs)
+    go k ci gs cs = do
       cancelled <- hookCancelled hooks
       when cancelled (throwIO SimCancelled)
-      let (gs', ticks) = runBatch sp ci gs
-          c            = gsCandle gs'
-          rolled       = gs' { gsCandle = emptyCandle }
+      gs' <- runBatch sink sp ci gs
+      let c      = gsCandle gs'
+          rolled = gs' { gsCandle = emptyCandle }
       hookProgress hooks (total - k + 1) total
       if isEmptyCandle c
-        then go (k - 1) ci rolled cs tss
-        else go (k - 1) (ci + 1) rolled (c : cs) (reverse ticks : tss)
+        then go (k - 1) ci rolled cs
+        else go (k - 1) (ci + 1) rolled (c : cs)
 
 -- --- duplicated from Sim.TickGen (see module header) ---------------------
 
--- run one candle batch; ticks are returned most-recent-first, the head
--- being the end-of-candle marker
-runBatch :: SimParams -> Int -> GenState -> (GenState, [Tick])
-runBatch sp ci gs0 = finish (go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 [])
+-- run one candle batch, streaming: each order step's ticks in step
+-- order, then the end-of-candle book-only marker (the list-based
+-- runBatch returns the same steps most-recent-first with the marker
+-- head; the driver reverses that, so emitting steps forward + marker
+-- last reproduces its row order exactly)
+runBatch :: (Tick -> IO ()) -> SimParams -> Int -> GenState -> IO GenState
+runBatch sink sp ci gs0 = go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 >>= finish
   where
-    go _ 0 gs acc = (gs, acc)
-    go pf k gs acc =
+    go _ 0 gs = pure gs
+    go pf k gs = do
       let (gs', ticks) = runStep pf sp ci gs
-      in go pf (k - 1) gs' (ticks : acc)
-    finish (gs, acc) =
+      mapM_ sink ticks
+      go pf (k - 1) gs'
+    finish gs = do
       let book = gsBook gs
-          marker = Tick ci (Price 0) 0 (snapBids book) (snapAsks book)
-      in (gs, marker : concatMap reverse acc)
+      sink (Tick ci (Price 0) 0 (snapBids book) (snapAsks book))
+      pure gs
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))
 

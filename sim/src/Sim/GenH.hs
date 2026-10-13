@@ -19,7 +19,7 @@ import Data.Word (Word64)
 import Sim.Engine
 import Sim.Gen (GenState (..), initState)
 import Sim.Internal
-import System.Random.SplitMix (SMGen, nextWord64)
+import System.Random.SplitMix (nextWord64)
 
 -- like Sim.Gen.runSim but driven in IO: reports per-candle progress and
 -- polls for cancellation once per candle (throws SimCancelled); the

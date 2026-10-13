@@ -2,6 +2,8 @@ module Sim.Csv
   ( csvText
   , candleCsv
   , ticksCsv
+  , tickHeader
+  , tickRow
   , ticksPath
   , metaText
   ) where

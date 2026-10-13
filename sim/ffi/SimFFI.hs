@@ -7,12 +7,12 @@ import Foreign.C.String (CString, peekCString)
 import Foreign.C.Types (CDouble (..), CInt (..))
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvText, metaText, ticksCsv, ticksPath)
+import Sim.Csv (csvText, metaText, tickHeader, tickRow, ticksPath)
 import Sim.GenH (runSimH)
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
 import System.Directory (removeFile)
-import System.IO (IOMode (WriteMode), hPutStr, withFile)
+import System.IO (BufferMode (BlockBuffering), IOMode (WriteMode), hPutStr, hSetBuffering, withFile)
 import System.IO.Error (isDoesNotExistError)
 
 -- params are "key=value" pairs separated by ';', keys as in the CLI
@@ -71,11 +71,14 @@ writeCsv path p = do
   case spMode p of
     ModeCandles -> write path . csvText p =<< runSimH simHooks p
     _           -> do
-      (cs, ts) <- runSimTicksH simHooks p
+      cs <- withFile (ticksPath path) WriteMode $ \h -> do
+        hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
+        hPutStr h (tickHeader (spBookDepth p) ++ "\n")
+        runSimTicksH simHooks (emitTick h) p
       write path (csvText p cs)
-      write (ticksPath path) (ticksCsv p ts)
   where
     write fp s = withFile fp WriteMode $ \h -> hPutStr h s
+    emitTick h t = hPutStr h (tickRow (spPriceScale p) (spBookDepth p) t ++ "\n")
     simHooks = SimHooks
       { hookProgress = \d t -> writeIORef progressRef (d, t)
       , hookCancelled = readIORef cancelRef
