@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3 uid="uid://cstjrpfbx0k33"]
+[gd_scene load_steps=11 format=3 uid="uid://cstjrpfbx0k33"]
 
 [ext_resource type="Script" uid="uid://7hei3gpwt2v2" path="res://chart.gd" id="1_0bwlf"]
 [ext_resource type="Script" path="res://sim_panel.gd" id="2_sim"]
@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://order_book_widget.gd" id="7_book"]
 [ext_resource type="Script" path="res://cross_widget.gd" id="8_cross"]
 [ext_resource type="Script" path="res://cursor_widget.gd" id="9_cursor"]
+[ext_resource type="Script" path="res://volume_widget.gd" id="10_vol"]
 
 [node name="Chart" type="Control"]
 anchors_preset = 15
@@ -46,6 +47,16 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("6_ind")
+
+[node name="Volume" type="Control" parent="."]
+clip_contents = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("10_vol")
 
 [node name="Book" type="Control" parent="."]
 layout_mode = 1

@@ -67,9 +67,10 @@ func pan_by(delta: Vector2) -> void:
 func follow_tail(index: float) -> void:
 	base_index = index + 1.0 - plot_rect.size.x / px_per_index
 
-func fit_prices(lo: float, hi: float) -> void:
+func fit_prices(lo: float, hi: float, avail_h := 0.0) -> void:
+	var h := avail_h if avail_h > 0.0 else plot_rect.size.y
 	var span := maxf(hi - lo, 1.0e-9)
-	px_per_price = plot_rect.size.y * 0.9 / span
+	px_per_price = h * 0.9 / span
 	base_price = hi + span * 0.05
 
 static func nice_step(raw: float) -> float:

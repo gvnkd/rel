@@ -3,11 +3,18 @@ extends Control
 const PlotDataScript := preload("res://plot_data.gd")
 
 const ZOOM_FACTOR := 1.2
+const VOL_GRIP := 4.0
+const VOL_SNAP := 0.02
+const VOL_MAX_FRAC := 0.6
 
 @export var replay_rate := 60.0
 
 var view := ChartView.new()
 var data: PlotData = PlotDataScript.new()
+
+var vol_frac := 0.2
+var vol_collapsed := false
+var vol_dragging := false
 
 var head := -1
 var playing := false
@@ -27,6 +34,7 @@ const PALETTE: Array[Color] = [
 @onready var grid: GridWidget = $Grid
 @onready var series_widget: SeriesWidget = $Series
 @onready var indicator_widget: IndicatorWidget = $Indicators
+@onready var volume_widget: VolumeWidget = $Volume
 @onready var book_widget: OrderBookWidget = $Book
 @onready var cross_widget: CrossWidget = $Cross
 @onready var cursor_widget: CursorWidget = $Cursor
@@ -34,9 +42,10 @@ const PALETTE: Array[Color] = [
 @onready var sim_panel: SimPanel = $SimWindow/Box/SimPanel
 
 func _ready() -> void:
-	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget]:
+	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget]:
 		w.view = view
 		w.data = data
+	_sync_volume()
 	cursor_widget.mode_text = SeriesWidget.MODE_NAMES[series_widget.mode]
 	cursor_widget.indicators_text = "on" if indicator_widget.enabled else "off"
 	cursor_widget.cross = cross_widget
@@ -48,6 +57,7 @@ func _ready() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
 		view.layout(size)
+		_sync_volume()
 		_refresh()
 
 func _input(event: InputEvent) -> void:
@@ -70,10 +80,25 @@ func _input(event: InputEvent) -> void:
 			elif button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 				view.zoom_x_at(button.position, 1.0 / ZOOM_FACTOR)
 				_refresh()
+			elif button.button_index == MOUSE_BUTTON_LEFT:
+				if button.double_click and _near_vol_grip(button.position):
+					_toggle_volume()
+				elif _near_vol_grip(button.position):
+					vol_dragging = true
+		elif not button.pressed and button.button_index == MOUSE_BUTTON_LEFT:
+			vol_dragging = false
+			if vol_frac < VOL_SNAP:
+				vol_collapsed = true
+			_sync_volume()
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
 		cross_widget.mouse = motion.position
-		if not sim_window.is_dragging() and not _over_ui(motion.position):
+		if vol_dragging:
+			var plot_h := maxf(view.plot_rect.size.y, 1.0)
+			vol_collapsed = false
+			vol_frac = clampf((view.plot_rect.end.y - motion.position.y) / plot_h, 0.0, VOL_MAX_FRAC)
+			_sync_volume()
+		elif not sim_window.is_dragging() and not _over_ui(motion.position):
 			if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
 				view.scale_by(motion.relative, motion.position)
 				view.follow = false
@@ -99,6 +124,31 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_refresh()
 	elif key.keycode == KEY_F1:
 		sim_window.toggle()
+	elif key.keycode == KEY_V:
+		_toggle_volume()
+
+func vol_pane_h() -> float:
+	if vol_collapsed:
+		return 0.0
+	return view.plot_rect.size.y * vol_frac
+
+func _near_vol_grip(pos: Vector2) -> bool:
+	var r := view.plot_rect
+	return pos.x >= r.position.x and pos.x <= r.end.x \
+		and absf(pos.y - (r.end.y - vol_pane_h())) <= VOL_GRIP
+
+func _toggle_volume() -> void:
+	vol_collapsed = not vol_collapsed
+	if not vol_collapsed and vol_frac < VOL_SNAP:
+		vol_frac = 0.2
+	_sync_volume()
+
+func _sync_volume() -> void:
+	if volume_widget == null:
+		return
+	volume_widget.pane_h = vol_pane_h()
+	volume_widget.collapsed = vol_collapsed
+	_refresh()
 
 func _process(delta: float) -> void:
 	if not playing or paused:
@@ -120,7 +170,7 @@ func _process(delta: float) -> void:
 func _refresh() -> void:
 	if grid == null:
 		return
-	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget]:
+	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget]:
 		w.queue_redraw()
 
 func add_timeline(tl_name: String, path: String) -> int:
@@ -183,7 +233,7 @@ func _fit_view(s) -> void:
 	for c in s.candles:
 		lo = minf(lo, c.low)
 		hi = maxf(hi, c.high)
-	view.fit_prices(lo, hi)
+	view.fit_prices(lo, hi, view.plot_rect.size.y - vol_pane_h())
 
 func _update_book() -> void:
 	book_widget.clear()

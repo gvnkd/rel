@@ -30,9 +30,10 @@ func _draw() -> void:
 		elif data.head >= 0:
 			i = clampi(data.head, 0, n - 1)
 		var c: Candle = s.candles[i]
-		var txt := "%s  O %s  H %s  L %s  C %s" % [s.name,
+		var txt := "%s  O %s  H %s  L %s  C %s  V %s" % [s.name,
 			view.fmt_price(c.open), view.fmt_price(c.high),
-			view.fmt_price(c.low), view.fmt_price(c.close)]
+			view.fmt_price(c.low), view.fmt_price(c.close),
+			VolumeWidget.fmt_vol(c.vol)]
 		lines.append([txt, s.col_pos])
 	var extra: Array[String] = []
 	if not mode_text.is_empty():
