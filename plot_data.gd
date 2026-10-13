@@ -7,6 +7,10 @@ class Series:
 	var books: Array = []
 	var col_pos := Color.YELLOW_GREEN
 	var col_neg := Color.WEB_GREEN
+	var body_up := Color.TRANSPARENT
+	var body_down := Color.TRANSPARENT
+	var wick := Color.TRANSPARENT
+	var ind_colors := {}
 	var visible := true
 
 var series: Array[Series] = []

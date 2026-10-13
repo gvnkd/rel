@@ -6,6 +6,14 @@ const ZOOM_FACTOR := 1.2
 const VOL_GRIP := 4.0
 const VOL_SNAP := 0.02
 const VOL_MAX_FRAC := 0.6
+const RMB_CLICK_TOL := 4.0
+const ID_IND_TOGGLE_BASE := 100
+const SUB_ID_DELETE := 1
+const SERIES_ID_BODY_UP := 1
+const SERIES_ID_BODY_DOWN := 2
+const SERIES_ID_WICK := 3
+const SERIES_ID_RESET := 4
+const SERIES_ID_IND_COLOR_BASE := 100
 
 @export var replay_rate := 60.0
 
@@ -21,6 +29,16 @@ var playing := false
 var paused := false
 var pan_mode := false
 var t_acc := 0.0
+var _rmb_down := false
+var _rmb_down_pos := Vector2.ZERO
+enum PickTarget { NONE, SERIES_BODY_UP, SERIES_BODY_DOWN, SERIES_WICK, SERIES_IND }
+
+var _popup: PopupMenu
+var _color_popup: PopupPanel
+var _picker: ColorPicker
+var _pick_target: PickTarget = PickTarget.NONE
+var _pick_idx := -1
+var _pick_series := -1
 
 const PALETTE: Array[Color] = [
 	Color(0.56, 0.93, 0.56),
@@ -46,13 +64,22 @@ func _ready() -> void:
 		w.view = view
 		w.data = data
 	_sync_volume()
-	cursor_widget.mode_text = SeriesWidget.MODE_NAMES[series_widget.mode]
-	cursor_widget.indicators_text = "on" if indicator_widget.enabled else "off"
+	_sync_mode_hud()
+	_sync_indicator_hud()
 	cursor_widget.cross = cross_widget
 	view.layout(size)
 	sim_panel.timeline_added.connect(_on_timeline_added)
 	sim_panel.timeline_removed.connect(_on_timeline_removed)
 	sim_panel.timeline_toggled.connect(_on_timeline_toggled)
+	_popup = PopupMenu.new()
+	_popup.hide_on_checkable_item_selection = false
+	_popup.id_pressed.connect(_on_popup_id)
+	add_child(_popup)
+	_color_popup = PopupPanel.new()
+	_picker = ColorPicker.new()
+	_picker.color_changed.connect(_on_picker_color)
+	_color_popup.add_child(_picker)
+	add_child(_color_popup)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
@@ -85,11 +112,19 @@ func _input(event: InputEvent) -> void:
 					_toggle_volume()
 				elif _near_vol_grip(button.position):
 					vol_dragging = true
-		elif not button.pressed and button.button_index == MOUSE_BUTTON_LEFT:
-			vol_dragging = false
-			if vol_frac < VOL_SNAP:
-				vol_collapsed = true
-			_sync_volume()
+			elif button.button_index == MOUSE_BUTTON_RIGHT:
+				_rmb_down = true
+				_rmb_down_pos = button.position
+		elif not button.pressed:
+			if button.button_index == MOUSE_BUTTON_LEFT:
+				vol_dragging = false
+				if vol_frac < VOL_SNAP:
+					vol_collapsed = true
+				_sync_volume()
+			elif button.button_index == MOUSE_BUTTON_RIGHT:
+				if _rmb_down and button.position.distance_to(_rmb_down_pos) < RMB_CLICK_TOL:
+					_open_popup(button.position)
+				_rmb_down = false
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
 		cross_widget.mouse = motion.position
@@ -116,11 +151,11 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		return
 	if key.keycode == KEY_M:
 		series_widget.cycle_mode()
-		cursor_widget.mode_text = SeriesWidget.MODE_NAMES[series_widget.mode]
+		_sync_mode_hud()
 		_refresh()
 	elif key.keycode == KEY_I:
 		indicator_widget.enabled = not indicator_widget.enabled
-		cursor_widget.indicators_text = "on" if indicator_widget.enabled else "off"
+		_sync_indicator_hud()
 		_refresh()
 	elif key.keycode == KEY_F1:
 		sim_window.toggle()
@@ -148,6 +183,171 @@ func _sync_volume() -> void:
 		return
 	volume_widget.pane_h = vol_pane_h()
 	volume_widget.collapsed = vol_collapsed
+	_refresh()
+
+func _sync_mode_hud() -> void:
+	cursor_widget.mode_text = SeriesWidget.MODE_NAMES[series_widget.mode]
+
+func _sync_indicator_hud() -> void:
+	if not indicator_widget.enabled:
+		cursor_widget.indicators_text = "off"
+		return
+	var parts: Array[String] = []
+	for ind in indicator_widget.indicators:
+		if ind.enabled:
+			parts.append("%s %d" % [ind.kind, ind.period])
+	cursor_widget.indicators_text = ", ".join(parts)
+
+func _open_popup(at: Vector2) -> void:
+	for c in _popup.get_children():
+		_popup.remove_child(c)
+		c.free()
+	_popup.clear()
+	_popup.add_separator("chart mode")
+	for m in SeriesWidget.MODE_NAMES.size():
+		_popup.add_radio_check_item(SeriesWidget.MODE_NAMES[m], m)
+		_popup.set_item_checked(_popup.item_count - 1, series_widget.mode == m)
+	_popup.add_separator("indicators")
+	if indicator_widget.indicators.is_empty():
+		_popup.add_item("(none)")
+		_popup.set_item_disabled(_popup.item_count - 1, true)
+	for i in indicator_widget.indicators.size():
+		var ind: IndicatorWidget.Indicator = indicator_widget.indicators[i]
+		var label := "%s (%d)" % [ind.kind, ind.period]
+		_popup.add_check_item(label, ID_IND_TOGGLE_BASE + i)
+		_popup.set_item_checked(_popup.item_count - 1, ind.enabled)
+		_popup.add_submenu_item(label + "…", _build_ind_submenu(i).name)
+	var add_sub := PopupMenu.new()
+	add_sub.name = "add_indicator"
+	add_sub.add_item("SMA")
+	add_sub.id_pressed.connect(_on_add_sma)
+	_popup.add_child(add_sub)
+	_popup.add_separator()
+	_popup.add_submenu_item("add indicator", add_sub.name)
+	if not data.series.is_empty():
+		_popup.add_separator("series")
+		for i in data.series.size():
+			var s: PlotData.Series = data.series[i]
+			_popup.add_submenu_item(s.name, _build_series_submenu(i).name)
+			_set_color_chip(_popup, _popup.item_count - 1, s.col_pos)
+	_popup.popup(Rect2i((get_screen_position() + at).round(), Vector2i(1, 1)))
+
+func _build_series_submenu(si: int) -> PopupMenu:
+	var s: PlotData.Series = data.series[si]
+	var sub := PopupMenu.new()
+	sub.name = "series_%d" % si
+	sub.add_item("body up", SERIES_ID_BODY_UP)
+	_set_color_chip(sub, sub.item_count - 1, s.body_up if s.body_up.a > 0.0 else s.col_pos)
+	sub.add_item("body down", SERIES_ID_BODY_DOWN)
+	_set_color_chip(sub, sub.item_count - 1, s.body_down if s.body_down.a > 0.0 else s.col_neg)
+	sub.add_item("wick", SERIES_ID_WICK)
+	_set_color_chip(sub, sub.item_count - 1, s.wick if s.wick.a > 0.0 else s.col_pos)
+	sub.add_separator()
+	sub.add_item("reset", SERIES_ID_RESET)
+	if not indicator_widget.indicators.is_empty():
+		sub.add_separator()
+		for k in indicator_widget.indicators.size():
+			var ind: IndicatorWidget.Indicator = indicator_widget.indicators[k]
+			sub.add_item("%s (%d) color" % [ind.kind, ind.period], SERIES_ID_IND_COLOR_BASE + k)
+			_set_color_chip(sub, sub.item_count - 1, indicator_widget.color_for(s, k))
+	sub.id_pressed.connect(_on_series_color_id.bind(si))
+	_popup.add_child(sub)
+	return sub
+
+func _set_color_chip(pm: PopupMenu, idx: int, col: Color) -> void:
+	var chip := Image.create(12, 12, false, Image.FORMAT_RGBA8)
+	chip.fill(col)
+	pm.set_item_icon(idx, ImageTexture.create_from_image(chip))
+
+func _build_ind_submenu(idx: int) -> PopupMenu:
+	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[idx]
+	var sub := PopupMenu.new()
+	sub.name = "ind_%d" % idx
+	sub.add_separator("period")
+	for p: int in IndicatorWidget.PERIODS:
+		sub.add_radio_check_item(str(p), p)
+		sub.set_item_checked(sub.item_count - 1, ind.period == p)
+	sub.add_separator()
+	sub.add_item("delete", SUB_ID_DELETE)
+	sub.id_pressed.connect(_on_ind_submenu_id.bind(idx))
+	_popup.add_child(sub)
+	return sub
+
+func _on_popup_id(id: int) -> void:
+	if id >= ID_IND_TOGGLE_BASE:
+		var ind: IndicatorWidget.Indicator = indicator_widget.indicators[id - ID_IND_TOGGLE_BASE]
+		ind.enabled = not ind.enabled
+		_sync_indicator_hud()
+		_refresh()
+	elif id < SeriesWidget.MODE_COUNT:
+		series_widget.mode = id as SeriesWidget.Mode
+		_sync_mode_hud()
+		_popup.hide()
+		_refresh()
+
+func _on_ind_submenu_id(id: int, idx: int) -> void:
+	if id == SUB_ID_DELETE:
+		indicator_widget.remove_indicator(idx)
+		_popup.hide()
+		_sync_indicator_hud()
+		_refresh()
+	else:
+		indicator_widget.indicators[idx].period = id
+		_popup.hide()
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_series_color_id(id: int, si: int) -> void:
+	var s: PlotData.Series = data.series[si]
+	if id == SERIES_ID_RESET:
+		s.body_up = Color.TRANSPARENT
+		s.body_down = Color.TRANSPARENT
+		s.wick = Color.TRANSPARENT
+		_popup.hide()
+		_refresh()
+		return
+	if id >= SERIES_ID_IND_COLOR_BASE:
+		var k := id - SERIES_ID_IND_COLOR_BASE
+		_open_color_picker(PickTarget.SERIES_IND, k, si, indicator_widget.color_for(s, k))
+		return
+	var target := PickTarget.SERIES_BODY_UP
+	var current := s.body_up if s.body_up.a > 0.0 else s.col_pos
+	if id == SERIES_ID_BODY_DOWN:
+		target = PickTarget.SERIES_BODY_DOWN
+		current = s.body_down if s.body_down.a > 0.0 else s.col_neg
+	elif id == SERIES_ID_WICK:
+		target = PickTarget.SERIES_WICK
+		current = s.wick if s.wick.a > 0.0 else s.col_pos
+	_open_color_picker(target, -1, si, current)
+
+func _open_color_picker(target: PickTarget, idx: int, si: int, current: Color) -> void:
+	_pick_target = target
+	_pick_idx = idx
+	_pick_series = si
+	_picker.color = current
+	_popup.hide()
+	_color_popup.position = _popup.position + Vector2i(maxi(_popup.size.x, 1) + 8, 0)
+	_color_popup.popup()
+
+func _on_picker_color(c: Color) -> void:
+	if _pick_series < 0 or _pick_series >= data.series.size():
+		return
+	var s: PlotData.Series = data.series[_pick_series]
+	match _pick_target:
+		PickTarget.SERIES_BODY_UP:
+			s.body_up = c
+		PickTarget.SERIES_BODY_DOWN:
+			s.body_down = c
+		PickTarget.SERIES_WICK:
+			s.wick = c
+		PickTarget.SERIES_IND:
+			s.ind_colors[_pick_idx] = c
+	_refresh()
+
+func _on_add_sma(_id: int) -> void:
+	indicator_widget.add_indicator("SMA", 20)
+	_popup.hide()
+	_sync_indicator_hud()
 	_refresh()
 
 func _process(delta: float) -> void:
