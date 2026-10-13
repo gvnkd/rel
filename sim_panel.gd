@@ -9,7 +9,7 @@ const PARAM_FIELDS := [
 	["name", "name", "sim1"],
 	["seed", "seed", "42"],
 	["candles", "candles", "1000"],
-	["orders-per-candle", "orders/candle", "500"],
+	["orders-per-candle", "orders/candle lo,hi", "500,500"],
 	["tick-range", "tick range", "10"],
 	["vol", "vol lo,hi", "1,20"],
 	["start-bid", "start bid", "102190"],

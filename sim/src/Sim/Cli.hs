@@ -15,6 +15,11 @@ applyArgs = go defaultParams
     go p ("--seed" : v : rest) = case reads v of
       [(x, "")] -> go p { spSeed = x } rest
       _         -> Left ("invalid --seed value: " ++ v)
+    go p ("--orders-per-candle" : v : rest) =
+      let (lo, rest') = span (/= ',') v
+      in case (reads lo, reads (drop 1 rest')) of
+        ([(l, "")], [(h, "")]) -> go p { spOrdersLo = l, spOrdersHi = h } rest
+        _                      -> Left ("invalid --orders-per-candle value (expected lo,hi): " ++ v)
     go p ("--vol" : v : rest) =
       let (lo, rest') = span (/= ',') v
       in case (reads lo, reads (drop 1 rest')) of
@@ -42,7 +47,6 @@ applyArgs = go defaultParams
 setters :: [(String, Int -> SimParams -> SimParams)]
 setters =
   [ ("--candles",           \x s -> s { spCandles = x })
-  , ("--orders-per-candle", \x s -> s { spOrdersPerCandle = x })
   , ("--tick-range",        \x s -> s { spTickRange = x })
   , ("--start-bid",         \x s -> s { spStartBid = Price x })
   , ("--start-ask",         \x s -> s { spStartAsk = Price x })
@@ -75,7 +79,7 @@ usage = unlines
   [ "sim — offline candle generator"
   , "usage: sim [options]"
   , "  --candles N            number of candles to generate (default 1000)"
-  , "  --orders-per-candle N  orders simulated per candle (default 500)"
+  , "  --orders-per-candle lo,hi  orders simulated per candle (default 500,500)"
   , "  --seed N               RNG seed (default 42)"
   , "  --tick-range N         max distance from best price in ticks (default 10)"
   , "  --vol lo,hi            order volume range (default 1,20)"

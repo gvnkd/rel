@@ -107,17 +107,28 @@ runOrders sp n gs = go (mkPriceFun sp) n gs
             _       -> tradePrice (last trades)
       in go pf (k - 1) placed { gsBook = book', gsCandle = candle', gsAnchor = anchor' }
 
--- one candle per spOrdersPerCandle placed orders, seeded book, deterministic
+-- one candle per candle's rolled order count, seeded book, deterministic
 runSim :: SimParams -> [Candle]
 runSim sp = go (spCandles sp) (initState sp) []
   where
     go 0 _ acc = reverse acc
     go k gs acc =
-      let gs'    = runOrders sp (spOrdersPerCandle sp) gs
+      let (n, gsR) = rollCount sp gs
+          gs'    = runOrders sp n gsR
           c      = gsCandle gs'
           acc'   = if isEmptyCandle c then acc else c : acc
           rolled = gs' { gsCandle = emptyCandle }
       in acc' `seq` go (k - 1) rolled acc'
+
+-- order count for one candle, uniform in [lo,hi]; a scalar config
+-- (lo==hi) draws no RNG so old runs stay bit-identical
+rollCount :: SimParams -> GenState -> (Int, GenState)
+rollCount sp gs
+  | lo == hi  = (lo, gs)
+  | otherwise = rollInt (min lo hi, max lo hi) gs
+  where
+    lo = spOrdersLo sp
+    hi = spOrdersHi sp
 
 rollInt :: (Int, Int) -> GenState -> (Int, GenState)
 rollInt (lo, hi) gs =

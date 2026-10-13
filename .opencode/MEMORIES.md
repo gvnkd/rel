@@ -25,7 +25,7 @@ Order-book market sim. Redot (Godot fork) 26.2 = renderer + UI only; **Haskell (
 - `nix run .#link-sim-extension` — copy `.so` + `.gdextension` into `addons/sim_native/` (required after rebuild; artifacts gitignored)
 - `nix flake check` — sim-generate + scene-loads checks
 - Headless: `./result/bin/redot --headless --path . --import` (needed once for global class cache), then `-s script.gd` or `--quit-after N chart.tscn`
-- CLI: `sim --candles 100000 --orders-per-candle 1000` → CSV stdout (~14s for 100M orders)
+- CLI: `sim --candles 100000 --orders-per-candle 1000,1000` → CSV stdout (~14s for 100M orders); orders/candle is a per-candle uniform lo,hi roll (lo==hi draws no RNG → old scalar runs stay bit-identical)
 - Redot version: 26.2-stable built from source, `rev` overridable in `nix/redot.nix`
 
 ## Nix gotchas (all cost a build cycle)

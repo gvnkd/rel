@@ -75,7 +75,7 @@ prop_candle_invariants ps0 =
         _ -> property True
 prop_sim_produces_valid_candles :: Word64 -> Property
 prop_sim_produces_valid_candles seed =
-  let cs = runSim defaultParams { spSeed = seed, spCandles = 50, spOrdersPerCandle = 100 }
+  let cs = runSim defaultParams { spSeed = seed, spCandles = 50, spOrdersLo = 100, spOrdersHi = 100 }
   in not (null cs) ==> all validCandle cs
 
 prop_sim_valid_with_options :: Word64 -> Bool -> Property
@@ -83,7 +83,20 @@ prop_sim_valid_with_options seed clamp =
   let sp = defaultParams
         { spSeed = seed
         , spCandles = 50
-        , spOrdersPerCandle = 100
+        , spOrdersLo = 100
+        , spOrdersHi = 100
+        , spClampRest = clamp
+        }
+      cs = runSim sp
+  in not (null cs) ==> all validCandle cs
+
+prop_sim_valid_with_order_range :: Word64 -> Bool -> Property
+prop_sim_valid_with_order_range seed clamp =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 50
+        , spOrdersLo = 60
+        , spOrdersHi = 140
         , spClampRest = clamp
         }
       cs = runSim sp
@@ -96,7 +109,8 @@ prop_sim_no_dead_market seed clamp =
   let sp = defaultParams
         { spSeed = seed
         , spCandles = 20
-        , spOrdersPerCandle = 200
+        , spOrdersLo = 200
+        , spOrdersHi = 200
         , spClampRest = clamp
         }
   in property (length (runSim sp) == 20)
@@ -106,7 +120,8 @@ prop_ticks_candles_match_runSim seed mode clamp =
   let sp = defaultParams
         { spSeed = seed
         , spCandles = 30
-        , spOrdersPerCandle = 50
+        , spOrdersLo = 50
+        , spOrdersHi = 50
         , spMode = mode
         , spClampRest = clamp
         }
@@ -115,7 +130,7 @@ prop_ticks_candles_match_runSim seed mode clamp =
 
 prop_ticks_book_snapshots :: Word64 -> SimMode -> Property
 prop_ticks_book_snapshots seed mode =
-  let sp = defaultParams { spSeed = seed, spCandles = 20, spOrdersPerCandle = 50, spMode = mode, spBookDepth = 10 }
+  let sp = defaultParams { spSeed = seed, spCandles = 20, spOrdersLo = 50, spOrdersHi = 50, spMode = mode, spBookDepth = 10 }
       (cs, ts) = runSimTicks sp
       lastVol i = case [tickVol t | t <- ts, tickCandle t == i] of
         [] -> -1
@@ -152,6 +167,7 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_candle_invariants
   , property prop_sim_produces_valid_candles
   , property prop_sim_valid_with_options
+  , property prop_sim_valid_with_order_range
   , property prop_sim_no_dead_market
   , property prop_ticks_candles_match_runSim
   , property prop_ticks_book_snapshots

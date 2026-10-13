@@ -84,7 +84,8 @@ data SimMode = ModeCandles | ModeTickTrades | ModeTickSteps
 data SimParams = SimParams
   { spSeed            :: !Word64
   , spCandles         :: !Int
-  , spOrdersPerCandle :: !Int
+  , spOrdersLo        :: !Int
+  , spOrdersHi        :: !Int
   , spTickRange       :: !Int
   , spVolLo           :: !Int
   , spVolHi           :: !Int
@@ -104,7 +105,8 @@ defaultParams :: SimParams
 defaultParams = SimParams
   { spSeed            = 42
   , spCandles         = 1000
-  , spOrdersPerCandle = 500
+  , spOrdersLo        = 500
+  , spOrdersHi        = 500
   , spTickRange       = 10
   , spVolLo           = 1
   , spVolHi           = 20

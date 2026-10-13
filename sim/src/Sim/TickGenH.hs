@@ -50,7 +50,9 @@ runSimTicksH hooks sink sp = go (spCandles sp) 0 (initState sp) []
 -- head; the driver reverses that, so emitting steps forward + marker
 -- last reproduces its row order exactly)
 runBatch :: (Tick -> IO ()) -> SimParams -> Int -> GenState -> IO GenState
-runBatch sink sp ci gs0 = go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 >>= finish
+runBatch sink sp ci gs0 =
+  let (n, gsR) = rollCount sp gs0
+  in go (mkPriceFun sp) n gsR >>= finish
   where
     go _ 0 gs = pure gs
     go pf k gs = do
@@ -154,6 +156,16 @@ rollOrder pf sp gs =
             Order Bid <$> pf book Bid pd (gsAnchor gs3)
         | otherwise = Nothing
   in (mOrder <*> mkVol vol, gs3)
+
+-- order count for one candle, uniform in [lo,hi]; a scalar config
+-- (lo==hi) draws no RNG so old runs stay bit-identical
+rollCount :: SimParams -> GenState -> (Int, GenState)
+rollCount sp gs
+  | lo == hi  = (lo, gs)
+  | otherwise = rollInt (min lo hi, max lo hi) gs
+  where
+    lo = spOrdersLo sp
+    hi = spOrdersHi sp
 
 rollInt :: (Int, Int) -> GenState -> (Int, GenState)
 rollInt (lo, hi) gs =

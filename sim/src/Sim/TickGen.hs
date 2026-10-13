@@ -40,7 +40,9 @@ runSimTicks sp = go (spCandles sp) 0 (initState sp) [] []
 -- run one candle batch; ticks are returned most-recent-first, the head
 -- being the end-of-candle marker
 runBatch :: SimParams -> Int -> GenState -> (GenState, [Tick])
-runBatch sp ci gs0 = finish (go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 [])
+runBatch sp ci gs0 =
+  let (n, gsR) = rollCount sp gs0
+  in finish (go (mkPriceFun sp) n gsR [])
   where
     go _ 0 gs acc = (gs, acc)
     go pf k gs acc =
@@ -145,6 +147,16 @@ rollOrder pf sp gs =
             Order Bid <$> pf book Bid pd (gsAnchor gs3)
         | otherwise = Nothing
   in (mOrder <*> mkVol vol, gs3)
+
+-- order count for one candle, uniform in [lo,hi]; a scalar config
+-- (lo==hi) draws no RNG so old runs stay bit-identical
+rollCount :: SimParams -> GenState -> (Int, GenState)
+rollCount sp gs
+  | lo == hi  = (lo, gs)
+  | otherwise = rollInt (min lo hi, max lo hi) gs
+  where
+    lo = spOrdersLo sp
+    hi = spOrdersHi sp
 
 rollInt :: (Int, Int) -> GenState -> (Int, GenState)
 rollInt (lo, hi) gs =

@@ -69,7 +69,7 @@
               nativeBuildInputs = [ self.packages.${system}.sim ];
             }
             ''
-              ${self.packages.${system}.sim}/bin/sim --candles 100 --orders-per-candle 50 > candles.csv
+              ${self.packages.${system}.sim}/bin/sim --candles 100 --orders-per-candle 50,50 > candles.csv
               grep -q "open,high,low,close" candles.csv
               test $(wc -l < candles.csv) -eq 101
               cp candles.csv $out

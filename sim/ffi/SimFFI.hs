@@ -70,7 +70,9 @@ writeCsv :: FilePath -> SimParams -> IO ()
 writeCsv path p = do
   write (path ++ ".meta") (metaText p)
   case spMode p of
-    ModeCandles -> write path . csvText p =<< runSimH simHooks p
+    ModeCandles -> do
+      rm (ticksPath path)
+      write path . csvText p =<< runSimH simHooks p
     _           -> do
       cs <- withFile (ticksPath path) WriteMode $ \h -> do
         hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
@@ -78,6 +80,9 @@ writeCsv path p = do
         runSimTicksH simHooks (emitTick h) p
       write path (csvText p cs)
   where
+    -- a candles-mode run leaves no sidecar: drop a stale one from an
+    -- earlier same-name tick-mode run, or the UI would load it instead
+    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
     write fp s = withFile fp WriteMode $ \h -> hPutStr h s
     emitTick h t = hPutBuilder h (tickRowB (spPriceScale p) (spBookDepth p) t <> char8 '\n')
     simHooks = SimHooks

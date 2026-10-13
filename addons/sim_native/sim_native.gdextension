@@ -2,7 +2,12 @@
 
 entry_symbol = "sim_native_init"
 compatibility_minimum = "4.5"
-reloadable = true
+# never reloadable: the shim's hs_init/hs_exit run on dlopen/dlclose, and
+# the GHC RTS cannot be reinitialized after hs_exit — an editor auto-reload
+# (Redot reloads changed .so's on focus) wedges the RTS: generation
+# completes but the worker thread never returns, freezing the UI
+# (observed 2026-10-13). Editor restart is required after relinking.
+reloadable = false
 
 [libraries]
 

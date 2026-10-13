@@ -32,7 +32,8 @@ runSimH hooks sp = go (spCandles sp) (initState sp) []
     go k gs acc = do
       cancelled <- hookCancelled hooks
       when cancelled (throwIO SimCancelled)
-      let gs'    = runOrders sp (spOrdersPerCandle sp) gs
+      let (n, gsR) = rollCount sp gs
+          gs'    = runOrders sp n gsR
           c      = gsCandle gs'
           acc'   = if isEmptyCandle c then acc else c : acc
           rolled = gs' { gsCandle = emptyCandle }
@@ -116,6 +117,16 @@ runOrders sp n gs = go (mkPriceFun sp) n gs
             []      -> gsAnchor placed
             _       -> tradePrice (last trades)
       in go pf (k - 1) placed { gsBook = book', gsCandle = candle', gsAnchor = anchor' }
+
+-- order count for one candle, uniform in [lo,hi]; a scalar config
+-- (lo==hi) draws no RNG so old runs stay bit-identical
+rollCount :: SimParams -> GenState -> (Int, GenState)
+rollCount sp gs
+  | lo == hi  = (lo, gs)
+  | otherwise = rollInt (min lo hi, max lo hi) gs
+  where
+    lo = spOrdersLo sp
+    hi = spOrdersHi sp
 
 rollInt :: (Int, Int) -> GenState -> (Int, GenState)
 rollInt (lo, hi) gs =
