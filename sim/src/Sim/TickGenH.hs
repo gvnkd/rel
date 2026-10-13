@@ -108,11 +108,16 @@ matchTrail = go []
 type PriceFun = Book -> Side -> Int -> Price -> Maybe Price
 
 mkPriceFun :: SimParams -> PriceFun
-mkPriceFun sp = case spClampRest sp of
-  False -> \book side pd anchor ->
+mkPriceFun sp = case (spPriceOffset sp, spClampRest sp) of
+  (OffsetTicks, False) -> \book side pd anchor ->
     move side pd <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
-  True -> \book side pd anchor ->
+  (OffsetTicks, True) -> \book side pd anchor ->
     clampOwn book side . move side pd
+      <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
+  (OffsetPercent, False) -> \book side pd anchor ->
+    movePct side pd <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
+  (OffsetPercent, True) -> \book side pd anchor ->
+    clampOwn book side . movePct side pd
       <$> (midOf' book <|> oppositeRef book side <|> Just anchor)
   where
     r = spTickRange sp
@@ -142,6 +147,21 @@ move :: Side -> Int -> Price -> Price
 move Bid = addTicks
 move Ask = subtractTicks
 
+-- proportional offset: pd basis points of the reference price; the ask
+-- is floored at 1 tick, so percent mode can never quote a non-positive
+-- price no matter the tick-range
+movePct :: Side -> Int -> Price -> Price
+movePct Bid pd (Price p) = Price (p + p * pd `div` 10000)
+movePct Ask pd (Price p) = Price (max 1 (p - p * pd `div` 10000))
+
+-- with the zero floor on, an agent refuses to place an order that would
+-- rest at a non-positive price (a seller won't pay to sell, a buyer's
+-- limit is always positive)
+guardFloor :: SimParams -> Maybe Price -> Maybe Price
+guardFloor sp mp = case mp of
+  Just p | spZeroFloor sp && unPrice p < 1 -> Nothing
+  _                                        -> mp
+
 rollOrder :: PriceFun -> SimParams -> GenState -> (Maybe Order, GenState)
 rollOrder pf sp gs =
   let (bs, gs1)  = rollProb gs
@@ -151,9 +171,9 @@ rollOrder pf sp gs =
       mOrder :: Maybe (Vol -> Order)
       mOrder
         | bs > spSellThresh sp =
-            Order Ask <$> pf book Ask pd (gsAnchor gs3)
+            fmap (Order Ask) (guardFloor sp (pf book Ask pd (gsAnchor gs3)))
         | bs < spBuyThresh sp =
-            Order Bid <$> pf book Bid pd (gsAnchor gs3)
+            fmap (Order Bid) (guardFloor sp (pf book Bid pd (gsAnchor gs3)))
         | otherwise = Nothing
   in (mOrder <*> mkVol vol, gs3)
 

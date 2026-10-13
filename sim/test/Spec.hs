@@ -115,6 +115,55 @@ prop_sim_no_dead_market seed clamp =
         }
   in property (length (runSim sp) == 20)
 
+-- percent offsets: prices stay strictly positive and candles stay valid,
+-- even with a tick-range wider than 10000 bp (the ask floored at 1 tick
+-- inside movePct carries this)
+prop_sim_percent_offsets_positive :: Word64 -> Bool -> Property
+prop_sim_percent_offsets_positive seed clamp =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 50
+        , spOrdersLo = 100
+        , spOrdersHi = 100
+        , spTickRange = 20000
+        , spClampRest = clamp
+        , spPriceOffset = OffsetPercent
+        }
+      cs = runSim sp
+  in not (null cs) ==> all (\c -> validCandle c && unPrice (candleLow c) > 0) cs
+
+-- zero floor: with arithmetic offsets and an enormous tick-range the
+-- book walks to zero; with the floor on, agents refuse non-positive
+-- quotes so no trade ever prints at or below zero
+prop_sim_zero_floor :: Word64 -> Property
+prop_sim_zero_floor seed =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 50
+        , spOrdersLo = 100
+        , spOrdersHi = 100
+        , spTickRange = 100000
+        , spZeroFloor = True
+        }
+      cs = runSim sp
+  in not (null cs) ==> all (\c -> validCandle c && unPrice (candleLow c) > 0) cs
+
+-- percent mode + floor: tick export compacts to the same candles as runSim
+prop_ticks_candles_match_runSim_percent :: Word64 -> SimMode -> Bool -> Property
+prop_ticks_candles_match_runSim_percent seed mode clamp =
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 30
+        , spOrdersLo = 50
+        , spOrdersHi = 50
+        , spMode = mode
+        , spClampRest = clamp
+        , spPriceOffset = OffsetPercent
+        , spZeroFloor = True
+        }
+      (cs, _ts) = runSimTicks sp
+  in property $ cs == runSim sp
+
 prop_ticks_candles_match_runSim :: Word64 -> SimMode -> Bool -> Property
 prop_ticks_candles_match_runSim seed mode clamp =
   let sp = defaultParams
@@ -169,6 +218,9 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_sim_valid_with_options
   , property prop_sim_valid_with_order_range
   , property prop_sim_no_dead_market
+  , property prop_sim_percent_offsets_positive
+  , property prop_sim_zero_floor
+  , property prop_ticks_candles_match_runSim_percent
   , property prop_ticks_candles_match_runSim
   , property prop_ticks_book_snapshots
   ]

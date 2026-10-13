@@ -14,6 +14,7 @@ module Sim.Internal
   , emptyCandle
   , isEmptyCandle
   , SimMode (..)
+  , PriceOffset (..)
   , SimParams (..)
   , defaultParams
   , Tick (..)
@@ -81,6 +82,12 @@ isEmptyCandle = (== Price 0) . candleOpen
 data SimMode = ModeCandles | ModeTickTrades | ModeTickSteps
   deriving (Eq, Show)
 
+-- how an order's distance from its reference price is measured:
+-- ticks = arithmetic (pd ticks), percent = proportional (pd basis points
+-- of the reference price)
+data PriceOffset = OffsetTicks | OffsetPercent
+  deriving (Eq, Show)
+
 data SimParams = SimParams
   { spSeed            :: !Word64
   , spCandles         :: !Int
@@ -98,6 +105,8 @@ data SimParams = SimParams
   , spMode            :: !SimMode
   , spBookDepth       :: !Int
   , spClampRest       :: !Bool
+  , spPriceOffset     :: !PriceOffset
+  , spZeroFloor       :: !Bool
   }
   deriving (Show)
 
@@ -119,6 +128,8 @@ defaultParams = SimParams
   , spMode            = ModeCandles
   , spBookDepth       = 50
   , spClampRest       = False
+  , spPriceOffset     = OffsetTicks
+  , spZeroFloor       = False
   }
 
 -- one row of the ticks export: a trade (tickVol > 0) or a book-only

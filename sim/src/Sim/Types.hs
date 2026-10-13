@@ -12,6 +12,7 @@ module Sim.Types
   , emptyCandle
   , isEmptyCandle
   , SimMode (..)
+  , PriceOffset (..)
   , SimParams (..)
   , defaultParams
   , Tick (..)

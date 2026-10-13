@@ -22,6 +22,8 @@ const PARAM_FIELDS := [
 
 const MODES := ["candles", "tick-trades", "tick-steps"]
 
+const PRICE_OFFSETS := ["ticks", "percent"]
+
 const DATA_DIR := "user://simdata"
 
 var fields := {}
@@ -33,6 +35,8 @@ var _sim: Variant
 var _box: VBoxContainer
 var mode_option: OptionButton
 var clamp_check: CheckBox
+var price_offset_option: OptionButton
+var zero_floor_check: CheckBox
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -79,6 +83,21 @@ func _build_ui() -> void:
 	grid.add_child(clamp_label)
 	clamp_check = CheckBox.new()
 	grid.add_child(clamp_check)
+
+	var price_offset_label := Label.new()
+	price_offset_label.text = "price offset"
+	grid.add_child(price_offset_label)
+	price_offset_option = OptionButton.new()
+	for o: String in PRICE_OFFSETS:
+		price_offset_option.add_item(o)
+	price_offset_option.custom_minimum_size.x = 90
+	grid.add_child(price_offset_option)
+
+	var zero_floor_label := Label.new()
+	zero_floor_label.text = "zero floor"
+	grid.add_child(zero_floor_label)
+	zero_floor_check = CheckBox.new()
+	grid.add_child(zero_floor_check)
 
 	var gen_btn := Button.new()
 	gen_btn.text = "Generate"
@@ -163,6 +182,8 @@ func _params_string() -> String:
 	var mode: String = MODES[mode_option.selected]
 	parts.append("mode=%s" % mode)
 	parts.append("clamp-rest=%s" % ("on" if clamp_check.button_pressed else "off"))
+	parts.append("price-offset=%s" % PRICE_OFFSETS[price_offset_option.selected])
+	parts.append("zero-floor=%s" % ("on" if zero_floor_check.button_pressed else "off"))
 	return ";".join(parts)
 
 func _on_generate() -> void:

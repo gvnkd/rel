@@ -37,6 +37,12 @@ applyArgs = go defaultParams
     go p ("--clamp-rest" : v : rest) = case parseBool v of
       Just b  -> go p { spClampRest = b } rest
       Nothing -> Left ("invalid --clamp-rest value (expected on|off): " ++ v)
+    go p ("--zero-floor" : v : rest) = case parseBool v of
+      Just b  -> go p { spZeroFloor = b } rest
+      Nothing -> Left ("invalid --zero-floor value (expected on|off): " ++ v)
+    go p ("--price-offset" : v : rest) = case parsePriceOffset v of
+      Just o  -> go p { spPriceOffset = o } rest
+      Nothing -> Left ("invalid --price-offset value (expected ticks|percent): " ++ v)
     go p (name : v : rest)
       | Just set <- lookup name setters = case reads v of
           [(x, "")] -> go (set x p) rest
@@ -60,6 +66,12 @@ parseMode "candles"    = Just ModeCandles
 parseMode "tick-trades" = Just ModeTickTrades
 parseMode "tick-steps" = Just ModeTickSteps
 parseMode _            = Nothing
+
+parsePriceOffset :: String -> Maybe PriceOffset
+parsePriceOffset v = case map toLower v of
+  "ticks"   -> Just OffsetTicks
+  "percent" -> Just OffsetPercent
+  _         -> Nothing
 
 parseBool :: String -> Maybe Bool
 parseBool v = case map toLower v of
@@ -91,6 +103,12 @@ usage = unlines
   , "  --book-depth N         book levels per side in tick rows (default 50)"
   , "  --clamp-rest B         on | off — rest orders at most tick-range beyond"
   , "                         their side's best (default off)"
+  , "  --price-offset M       ticks | percent — order distance from the"
+  , "                         reference price: ticks = arithmetic, percent ="
+  , "                         proportional, tick-range basis points of ref"
+  , "                         (default ticks)"
+  , "  --zero-floor B         on | off — agents refuse to rest orders at a"
+  , "                         non-positive price (default off)"
   , "output: CSV on stdout (open,high,low,close,vol); in tick modes the UI"
   , "  additionally writes <out>.ticks.csv next to the candles file"
   ]
