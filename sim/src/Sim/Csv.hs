@@ -4,10 +4,12 @@ module Sim.Csv
   , ticksCsv
   , tickHeader
   , tickRow
+  , tickRowB
   , ticksPath
   , metaText
   ) where
 
+import Data.ByteString.Builder (Builder, char8, intDec)
 import Data.List (intercalate, zipWith4)
 import Sim.Types
 import Text.Printf (printf)
@@ -49,6 +51,45 @@ tickRow scale d t =
     askVs = pad (map (unVol . snd) (tickAsks t))
     pad xs = take d xs ++ replicate (d - length xs) 0
     f = priceFloat scale
+
+-- Builder variant of tickRow for the streaming FFI path: prices are
+-- p / 10^decimals exactly, so the integer is formatted directly -- the
+-- output is identical to printf "%.5f" of the double (the decimal
+-- expansion has exactly 5 digits, well within double precision) and
+-- avoids float formatting entirely
+tickRowB :: Int -> Int -> Tick -> Builder
+tickRowB scale d t =
+  intDec (tickCandle t) <> char8 ',' <> priceB (tickPrice t) <> char8 ',' <> intDec (tickVol t)
+    <> mconcat (zipWith4 level bidPs bidVs askPs askVs)
+  where
+    level bp bv ap av =
+      char8 ',' <> priceB (Price bp) <> char8 ',' <> intDec bv
+        <> char8 ',' <> priceB (Price ap) <> char8 ',' <> intDec av
+    bidPs = pad (map (unPrice . fst) (tickBids t))
+    bidVs = pad (map (unVol . snd) (tickBids t))
+    askPs = pad (map (unPrice . fst) (tickAsks t))
+    askVs = pad (map (unVol . snd) (tickAsks t))
+    pad xs = take d xs ++ replicate (d - length xs) 0
+
+    decimals = decimalsOf scale
+
+    priceB (Price p) =
+      (if p < 0 then char8 '-' else mempty)
+        <> intDec w <> char8 '.' <> padDec decimals frac
+      where
+        w = abs p `div` scale
+        frac = abs p `mod` scale
+
+    -- zero-pad a fraction to `digits` columns
+    padDec digits v = go (digits - digitCount v) <> intDec v
+      where
+        go n | n <= 0    = mempty
+             | otherwise = char8 '0' <> go (n - 1)
+
+    digitCount v = loop 0 (max 1 v)
+      where
+        loop n x | x < 10    = n + 1
+                 | otherwise = loop (n + 1) (x `div` 10)
 
 ticksPath :: FilePath -> FilePath
 ticksPath path = case break (== '.') (reverse path) of

@@ -2,12 +2,13 @@ module SimFFI where
 
 import Control.Exception (SomeException, catch, fromException, ioError, try)
 import Control.Monad (unless)
+import Data.ByteString.Builder (char8, hPutBuilder)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Foreign.C.String (CString, peekCString)
 import Foreign.C.Types (CDouble (..), CInt (..))
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvText, metaText, tickHeader, tickRow, ticksPath)
+import Sim.Csv (csvText, metaText, tickHeader, tickRowB, ticksPath)
 import Sim.GenH (runSimH)
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
@@ -78,7 +79,7 @@ writeCsv path p = do
       write path (csvText p cs)
   where
     write fp s = withFile fp WriteMode $ \h -> hPutStr h s
-    emitTick h t = hPutStr h (tickRow (spPriceScale p) (spBookDepth p) t ++ "\n")
+    emitTick h t = hPutBuilder h (tickRowB (spPriceScale p) (spBookDepth p) t <> char8 '\n')
     simHooks = SimHooks
       { hookProgress = \d t -> writeIORef progressRef (d, t)
       , hookCancelled = readIORef cancelRef
