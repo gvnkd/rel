@@ -135,7 +135,7 @@ func _process(_delta: float) -> void:
 	if _gen_thread == null:
 		set_process(false)
 		return
-	var elapsed := (Time.get_ticks_msec() - _gen_start) / 1000
+	var elapsed := int((Time.get_ticks_msec() - _gen_start) / 1000.0)
 	if _gen_thread.is_alive():
 		if elapsed != _gen_status_sec:
 			_gen_status_sec = elapsed

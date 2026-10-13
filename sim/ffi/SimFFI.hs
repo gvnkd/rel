@@ -52,7 +52,7 @@ simGenerate paramsPtr outPtr = do
   case applyArgs (toArgs paramsStr) of
     Left _  -> pure 1
     Right p -> do
-      writeIORef progressRef (0, spCandles p)
+      writeIORef progressRef (0, spCandles p + 1)
       writeIORef cancelRef False
       result <- try (writeCsv outPath p) :: IO (Either SomeException ())
       case result of
@@ -61,7 +61,9 @@ simGenerate paramsPtr outPtr = do
               cleanup outPath p
               pure 3
           | otherwise -> pure 2
-        Right _ -> pure 0
+        Right _ -> do
+          writeIORef progressRef (1, 1)
+          pure 0
 
 writeCsv :: FilePath -> SimParams -> IO ()
 writeCsv path p = do

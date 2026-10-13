@@ -22,18 +22,20 @@ import System.Random.SplitMix (nextWord64)
 -- candles (compacted, same as runSim) plus the tick export:
 -- in ModeTickTrades one row per trade, in ModeTickSteps additionally one
 -- row per placed order that did not trade; every candle ends with a
--- book-only marker row carrying the exact end-of-candle book
+-- book-only marker row carrying the exact end-of-candle book.
+-- per-candle tick lists are collected as chunks and concatenated once
+-- at the end: `ts ++ reverse ticks` per candle is quadratic overall.
 runSimTicks :: SimParams -> ([Candle], [Tick])
 runSimTicks sp = go (spCandles sp) 0 (initState sp) [] []
   where
-    go 0 _ _ cs ts = (reverse cs, ts)
-    go k ci gs cs ts =
+    go 0 _ _ cs tss = (reverse cs, concat (reverse tss))
+    go k ci gs cs tss =
       let (gs', ticks) = runBatch sp ci gs
           c            = gsCandle gs'
           rolled       = gs' { gsCandle = emptyCandle }
       in if isEmptyCandle c
-           then go (k - 1) ci rolled cs ts
-           else go (k - 1) (ci + 1) rolled (c : cs) (ts ++ reverse ticks)
+           then go (k - 1) ci rolled cs tss
+           else go (k - 1) (ci + 1) rolled (c : cs) (reverse ticks : tss)
 
 -- run one candle batch; ticks are returned most-recent-first, the head
 -- being the end-of-candle marker
@@ -43,11 +45,11 @@ runBatch sp ci gs0 = finish (go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 [])
     go _ 0 gs acc = (gs, acc)
     go pf k gs acc =
       let (gs', ticks) = runStep pf sp ci gs
-      in go pf (k - 1) gs' (reverse ticks ++ acc)
+      in go pf (k - 1) gs' (ticks : acc)
     finish (gs, acc) =
       let book = gsBook gs
           marker = Tick ci (Price 0) 0 (snapBids book) (snapAsks book)
-      in (gs, marker : acc)
+      in (gs, marker : concatMap reverse acc)
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))
 

@@ -27,8 +27,8 @@ runSimTicksH :: SimHooks -> SimParams -> IO ([Candle], [Tick])
 runSimTicksH hooks sp = go (spCandles sp) 0 (initState sp) [] []
   where
     total = spCandles sp
-    go 0 _ _ cs ts = pure (reverse cs, ts)
-    go k ci gs cs ts = do
+    go 0 _ _ cs tss = pure (reverse cs, concat (reverse tss))
+    go k ci gs cs tss = do
       cancelled <- hookCancelled hooks
       when cancelled (throwIO SimCancelled)
       let (gs', ticks) = runBatch sp ci gs
@@ -36,8 +36,8 @@ runSimTicksH hooks sp = go (spCandles sp) 0 (initState sp) [] []
           rolled       = gs' { gsCandle = emptyCandle }
       hookProgress hooks (total - k + 1) total
       if isEmptyCandle c
-        then go (k - 1) ci rolled cs ts
-        else go (k - 1) (ci + 1) rolled (c : cs) (ts ++ reverse ticks)
+        then go (k - 1) ci rolled cs tss
+        else go (k - 1) (ci + 1) rolled (c : cs) (reverse ticks : tss)
 
 -- --- duplicated from Sim.TickGen (see module header) ---------------------
 
@@ -49,11 +49,11 @@ runBatch sp ci gs0 = finish (go (mkPriceFun sp) (spOrdersPerCandle sp) gs0 [])
     go _ 0 gs acc = (gs, acc)
     go pf k gs acc =
       let (gs', ticks) = runStep pf sp ci gs
-      in go pf (k - 1) gs' (reverse ticks ++ acc)
+      in go pf (k - 1) gs' (ticks : acc)
     finish (gs, acc) =
       let book = gsBook gs
           marker = Tick ci (Price 0) 0 (snapBids book) (snapAsks book)
-      in (gs, marker : acc)
+      in (gs, marker : concatMap reverse acc)
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))
 
