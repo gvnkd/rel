@@ -70,7 +70,10 @@ fftBest rmsePct predict closes
     vcloses = VU.fromList closes
     w = clamp 0 1 (fromIntegral rmsePct / 100)
     cands = bestGrid len predict
-    scored = [ (score w predict vcloses (win, k), win, k) | (win, k) <- cands ]
+    scored = [ (s, win, k)
+             | (win, k) <- cands
+             , Just s <- [score w predict vcloses (win, k)]
+             ]
 
 bestGrid :: Int -> Int -> [(Int, Int)]
 bestGrid len predict =
@@ -81,7 +84,7 @@ bestGrid len predict =
   where
     minOv = min 50 predict
 
-score :: Double -> Int -> VU.Vector Double -> (Int, Int) -> Double
+score :: Double -> Int -> VU.Vector Double -> (Int, Int) -> Maybe Double
 score w predict vcloses (win, waves) =
   let len = VU.length vcloses
       step = max 1 predict
@@ -94,7 +97,9 @@ score w predict vcloses (win, waves) =
             scale = max 1e-9 (abs (head act))
             rmse = sqrt (sum [ (p - x) ^ 2 | (p, x) <- zip fc act ] / fromIntegral avail) / scale
         in w * rmse + (1 - w) * (1 - dirAcc fc act)
-  in if null anchors then 1e9 else sum (map one anchors) / fromIntegral (length anchors)
+  in if null anchors
+       then Nothing
+       else Just (sum (map one anchors) / fromIntegral (length anchors))
 
 -- fraction of candles where the predicted move direction matches the
 -- actual one (zero moves excluded)
@@ -231,12 +236,19 @@ gram n ws = [ [ entry i j | j <- [0 .. m - 1] ] | i <- [0 .. m - 1] ]
       where
         wi = w i
         wj = w j
-    d x
+    d x0
       | abs x < 1e-12 = n'
       | otherwise = sin (n' * x / 2) * cos ((n' - 1) * x / 2) / sin (x / 2)
-    s x
+      where
+        x = wrap x0
+    s x0
       | abs x < 1e-12 = 0
       | otherwise = sin (n' * x / 2) * sin ((n' - 1) * x / 2) / sin (x / 2)
+      where
+        x = wrap x0
+    -- reduce to (-pi, pi] so multiples of 2*pi hit the guards instead of
+    -- the sin(x/2) pole
+    wrap x = x - 2 * pi * fromIntegral (round (x / (2 * pi)))
 
 -- least squares fit of cos/sin columns at the given frequencies (cycles
 -- per sample) against ys; the Gram matrix is eigendecomposed (Jacobi) and

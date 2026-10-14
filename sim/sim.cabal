@@ -56,4 +56,4 @@ test-suite spec
                       rel-sim,
                       QuickCheck
     default-language: Haskell2010
-    ghc-options:      -Wall -Wcompat
+    ghc-options:      -Wall -Wcompat -O1

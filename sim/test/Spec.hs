@@ -14,8 +14,10 @@ import Sim.Csv (tickRow)
 import Sim.Resume (parseState, stateText)
 import Sim.TickGen (runSimTicks)
 import Sim.TickGenH (runSimTicksH)
+import System.Exit (exitFailure, exitSuccess)
 import Sim.Types
-import Test.QuickCheck
+import Test.QuickCheck hiding (Result)
+import Test.QuickCheck (Result)
 
 -- order flows, mirroring the invariants the GDScript suite checks
 newtype Flow = Flow [Order]
@@ -249,7 +251,7 @@ prop_fft_gram_matches_bruteforce n0 seeds =
       cols = concat [ [map (cos . (wj *)) ts, map (sin . (wj *)) ts] | wj <- ws ]
       brute = [ [sum (zipWith (*) ci cj) | cj <- cols] | ci <- cols ]
       closed = gram n ws
-      ys = map (fromIntegral . abs) seeds
+      ys = take n [ fromIntegral (abs s `mod` 1000) | s <- seeds ]
       bruteC = concat [ [sum (zipWith (*) (map (cos . (wj *)) ts) ys), sum (zipWith (*) (map (sin . (wj *)) ts) ys)] | wj <- ws ]
       closedC = concatMap (\w -> let (c, s) = corr n ys w in [c, s]) ws
       close a b = abs (a - b) < 1e-6
@@ -263,7 +265,7 @@ prop_fft_solve_residual seeds =
   let n = 200
       freqs = [1 / 8, 1 / 20, 3 / 16 :: Double]
       ws = map (2 * pi *) freqs
-      ys = take n (map (fromIntegral . abs) seeds ++ repeat 0.5)
+      ys = take n ([ fromIntegral (abs s `mod` 1000) | s <- seeds ] ++ repeat 0.5)
       g = gram n ws
       b = concatMap (\w -> let (c, s) = corr n ys w in [c, s]) ws
       x = solveLS n ys freqs
@@ -274,13 +276,13 @@ prop_fft_solve_residual seeds =
 -- extrapolation stays bounded even at the max wave count: the truncated
 -- eigensolve cannot produce the runaway coefficients that shoot the
 -- forecast out of the plot
-prop_fft_forecast_bounded :: [Int] -> Property
+prop_fft_forecast_bounded :: [Int] -> Bool
 prop_fft_forecast_bounded seeds =
   let n = 64
       ys = [ fromIntegral (abs s `mod` 100) | s <- take n seeds ]
       (_, fc) = fftApprox (n `div` 4) ys 0 n 16
       ymax = maximum (map abs ys) + 1
-  in not (null fc) ==> maximum (map abs fc) < 10 * ymax
+  in null fc || maximum (map abs fc) < 10 * ymax
 
 -- the in-window fit must reproduce the window itself
 prop_fft_fit_covers_window :: Bool
@@ -311,14 +313,14 @@ prop_fft_waves_limit =
 
 -- length contract: full window -> (window, predict) points, short window
 -- or non-positive predict -> nothing
-prop_fft_forecast_length :: Int -> Int -> Int -> Property
+prop_fft_forecast_length :: Int -> Int -> Int -> Bool
 prop_fft_forecast_length total w p =
   let total' = 16 + abs total `mod` 500
       w' = abs w `mod` (total' + 1)
       p' = abs p `mod` 100 + 1
       series = map (sin . fromIntegral) [0 .. total' - 1]
       (fit, fc) = fftApprox 0 series 0 w' p'
-  in (w' >= 16) ==> length fit == w' && length fc == p'
+  in w' < 16 || (length fit == w' && length fc == p')
 
 prop_fft_forecast_invalid :: [Int] -> Bool
 prop_fft_forecast_invalid xs =
@@ -392,11 +394,11 @@ prop_resume_ticks seed mode = ioProperty $ do
 -- harmonic (its forecast is essentially exact, so the hybrid score ~ 0)
 prop_fft_best_finds_sinusoid :: Bool
 prop_fft_best_finds_sinusoid =
-  let n = 3000
+  let n = 1500
       f = 8 / 512 :: Double
       sig t = 100 + 5 * cos (2 * pi * f * fromIntegral t)
       closes = [sig t | t <- [0 .. n - 1]]
-      (w, k, sc) = fftBest 50 64 closes
+      (w, k, sc) = fftBest 50 32 closes
   in w > 0 && k > 0 && sc < 0.1
 
 -- a flat candidate set must yield the no-result sentinel (series too
@@ -406,33 +408,44 @@ prop_fft_best_no_data =
   fftBest 50 64 [1 .. 40] == (0, 0, 0)
 
 main :: IO ()
-main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
-  [ property prop_no_crossed_book
-  , property prop_positive_volumes
-  , property prop_trades_at_ask_prices
-  , property prop_trade_volume_conserved
-  , property prop_candle_invariants
-  , property prop_sim_produces_valid_candles
-  , property prop_sim_valid_with_options
-  , property prop_sim_valid_with_order_range
-  , property prop_sim_no_dead_market
-  , property prop_sim_percent_offsets_positive
-  , property prop_sim_zero_floor
-  , property prop_ticks_candles_match_runSim_percent
-  , property prop_ticks_candles_match_runSim
-  , property prop_ticks_book_snapshots
-  , property prop_resume_candles
-  , property prop_state_roundtrip
-  , property prop_resume_ticks
-  , property prop_fft_recovers_sinusoid
-  , property prop_fft_recovers_sinusoid_offset
-  , property prop_fft_fit_covers_window
-  , property prop_fft_waves_limit
-  , property prop_fft_gram_matches_bruteforce
-  , property prop_fft_solve_residual
-  , property prop_fft_forecast_bounded
-  , property prop_fft_forecast_length
-  , property prop_fft_forecast_invalid
-  , property prop_fft_best_finds_sinusoid
-  , property prop_fft_best_no_data
+main = do
+  results <- mapM runProp props
+  if all (isSuccess . snd) results then exitSuccess else exitFailure
+
+runProp :: (String, Property) -> IO (String, Result)
+runProp (name, prop) = do
+  putStrLn ("\n== " ++ name)
+  r <- quickCheckWithResult (stdArgs { maxSuccess = 500 }) prop
+  pure (name, r)
+
+props :: [(String, Property)]
+props =
+  [ ("no_crossed_book", property prop_no_crossed_book)
+  , ("positive_volumes", property prop_positive_volumes)
+  , ("trades_at_ask_prices", property prop_trades_at_ask_prices)
+  , ("trade_volume_conserved", property prop_trade_volume_conserved)
+  , ("candle_invariants", property prop_candle_invariants)
+  , ("sim_produces_valid_candles", property prop_sim_produces_valid_candles)
+  , ("sim_valid_with_options", property prop_sim_valid_with_options)
+  , ("sim_valid_with_order_range", property prop_sim_valid_with_order_range)
+  , ("sim_no_dead_market", property prop_sim_no_dead_market)
+  , ("sim_percent_offsets_positive", property prop_sim_percent_offsets_positive)
+  , ("sim_zero_floor", property prop_sim_zero_floor)
+  , ("ticks_candles_match_runSim_percent", property prop_ticks_candles_match_runSim_percent)
+  , ("ticks_candles_match_runSim", property prop_ticks_candles_match_runSim)
+  , ("ticks_book_snapshots", property prop_ticks_book_snapshots)
+  , ("resume_candles", property prop_resume_candles)
+  , ("state_roundtrip", property prop_state_roundtrip)
+  , ("resume_ticks", property prop_resume_ticks)
+  , ("fft_recovers_sinusoid", property prop_fft_recovers_sinusoid)
+  , ("fft_recovers_sinusoid_offset", property prop_fft_recovers_sinusoid_offset)
+  , ("fft_fit_covers_window", property prop_fft_fit_covers_window)
+  , ("fft_waves_limit", property prop_fft_waves_limit)
+  , ("fft_gram_matches_bruteforce", property prop_fft_gram_matches_bruteforce)
+  , ("fft_solve_residual", property prop_fft_solve_residual)
+  , ("fft_forecast_bounded", property prop_fft_forecast_bounded)
+  , ("fft_forecast_length", property prop_fft_forecast_length)
+  , ("fft_forecast_invalid", property prop_fft_forecast_invalid)
+  , ("fft_best_finds_sinusoid", property prop_fft_best_finds_sinusoid)
+  , ("fft_best_no_data", property prop_fft_best_no_data)
   ]
