@@ -9,6 +9,7 @@ class Indicator:
 	var end := 0
 	var predict := 50
 	var waves := 0
+	var edge_w := 1.0
 	var m := 5
 	var locked := false
 	var opt_score := -1.0
@@ -198,7 +199,7 @@ func _fft_ensure(ind: Indicator, s: PlotData.Series) -> bool:
 	var e_end := w.y
 	if e_end - e_start < FFT_MIN_WINDOW or ind.predict < 1:
 		return false
-	var key := "%d:%d:%d:%d:%d:%d" % [data.series.find(s), e_start, e_end, ind.predict, ind.waves, n]
+	var key := "%d:%d:%d:%d:%d:%f:%d" % [data.series.find(s), e_start, e_end, ind.predict, ind.waves, ind.edge_w, n]
 	if key == ind.cache_key:
 		return not ind.fit.is_empty()
 	if not _ensure_sim():
@@ -207,7 +208,7 @@ func _fft_ensure(ind: Indicator, s: PlotData.Series) -> bool:
 	closes.resize(e_end - e_start)
 	for i in range(e_end - e_start):
 		closes[i] = s.candles[e_start + i].close
-	var ret: Variant = _sim.call("fft_forecast", closes, 0, closes.size(), ind.predict, ind.waves)
+	var ret: Variant = _sim.call("fft_forecast", closes, 0, closes.size(), ind.predict, ind.waves, ind.edge_w)
 	var all: PackedFloat64Array = ret as PackedFloat64Array
 	if all.size() != closes.size() + ind.predict:
 		ind.fit = PackedFloat64Array()

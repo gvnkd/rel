@@ -9,7 +9,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
 import Sim.Entropy (permEntropy, rollingPermEntropy)
-import Sim.Fft (corr, fftApprox, fftBest, fftForecast, gram, solveLS)
+import qualified Data.Vector.Unboxed as VU
+import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, solveLS)
 import Sim.Gen
 import Sim.GenH (runSimH)
 import Sim.Csv (tickRow)
@@ -225,7 +226,7 @@ prop_fft_recovers_sinusoid =
       f = 1 / 16 :: Double
       sig t = 100 + 3 * cos (2 * pi * f * fromIntegral t)
       series = [sig t | t <- [0 .. n - 1]]
-      (_, fc) = fftApprox 0 series 0 n 32
+      (_, fc) = fftApprox 0 1 series 0 n 32
       expect = [sig t | t <- [n .. n + 31]]
   in length fc == 32 && maximum (map abs (zipWith (-) fc expect)) < 1e-6
 
@@ -237,7 +238,7 @@ prop_fft_recovers_sinusoid_offset =
       f = 4 / 512 :: Double
       sig t = 50 - 2 * sin (2 * pi * f * fromIntegral t)
       series = [sig t | t <- [0 .. n - 1]]
-      (_, fc) = fftApprox 0 series off 356 16
+      (_, fc) = fftApprox 0 1 series off 356 16
       expect = [sig t | t <- [356 .. 371]]
   in length fc == 16 && maximum (map abs (zipWith (-) fc expect)) < 1e-6
 
@@ -253,12 +254,32 @@ prop_fft_gram_matches_bruteforce n0 seeds =
       cols = concat [ [map (cos . (wj *)) ts, map (sin . (wj *)) ts] | wj <- ws ]
       brute = [ [sum (zipWith (*) ci cj) | cj <- cols] | ci <- cols ]
       closed = gram n ws
-      ys = take n [ fromIntegral (abs s `mod` 1000) | s <- seeds ]
+      ys = take n ([ fromIntegral (abs s `mod` 1000) | s <- seeds ] ++ repeat 7)
       bruteC = concat [ [sum (zipWith (*) (map (cos . (wj *)) ts) ys), sum (zipWith (*) (map (sin . (wj *)) ts) ys)] | wj <- ws ]
       closedC = concatMap (\w -> let (c, s) = corr n ys w in [c, s]) ws
       close a b = abs (a - b) < 1e-6
-  in length closed == length brute && and (zipWith close (concat closed) (concat brute))
-     && and (zipWith close closedC bruteC)
+      -- weighted path: same comparison against a brute-force build with
+      -- the ramp weights (h = max 1 (n div 8), ramps at both edges)
+      h = max 2 (n `div` 128)
+      edgeW = 17
+      wts = [ 1 + (edgeW - 1) * max 0 (max (1 - fromIntegral t / fromIntegral h) (1 - fromIntegral (n - 1 - t) / fromIntegral h)) | t <- [0 .. n - 1] ]
+      colsW = map (zipWith (*) wts) cols
+      ysW = zipWith (*) wts ys
+      bruteW = [ [sum (zipWith (*) ci cj) | cj <- cols] | ci <- colsW ]
+      closedW = gramW n edgeW ws
+      bruteCW = concat [ [sum (zipWith (*) (map (cos . (wj *)) ts) ysW), sum (zipWith (*) (map (sin . (wj *)) ts) ysW)] | wj <- ws ]
+      closedCW = concatMap (\w -> let (c, s) = corrWV n (VU.fromList ys) edgeW w in [c, s]) ws
+      okBase = length closed == length brute && and (zipWith close (concat closed) (concat brute))
+        && and (zipWith close closedC bruteC)
+      okW = and (zipWith close (concat closedW) (concat bruteW))
+        && and (zipWith close closedCW bruteCW)
+      maxW = maximum (0 : [ abs (a - b) | (a, b) <- zip (concat closedW) (concat bruteW) ])
+      maxCW = maximum (0 : [ abs (a - b) | (a, b) <- zip closedCW bruteCW ])
+  in if okBase && okW then True
+     else error ("maxW=" ++ show maxW ++ " maxCW=" ++ show maxCW
+                 ++ " n=" ++ show n ++ " ws=" ++ show ws
+                 ++ " closedW=" ++ show (take 4 (concat closedW))
+                 ++ " bruteW=" ++ show (take 4 (concat bruteW)))
 
 -- on a well-conditioned system the solve must satisfy the normal
 -- equations (validates the Jacobi eigendecomposition end to end)
@@ -270,7 +291,7 @@ prop_fft_solve_residual seeds =
       ys = take n ([ fromIntegral (abs s `mod` 1000) | s <- seeds ] ++ repeat 0.5)
       g = gram n ws
       b = concatMap (\w -> let (c, s) = corr n ys w in [c, s]) ws
-      x = solveLS n ys freqs
+      x = solveLS n 1 ys freqs
       resid = sqrt (sum [ (sum (zipWith (*) (g !! i) x) - b !! i) ^ 2 | i <- [0 .. length b - 1] ])
       bnorm = sqrt (sum [ bi ^ 2 | bi <- b ])
   in bnorm > 0 && resid / bnorm < 1e-6
@@ -282,7 +303,7 @@ prop_fft_forecast_bounded :: [Int] -> Bool
 prop_fft_forecast_bounded seeds =
   let n = 64
       ys = [ fromIntegral (abs s `mod` 100) | s <- take n seeds ]
-      (_, fc) = fftApprox (n `div` 4) ys 0 n 16
+      (_, fc) = fftApprox (n `div` 4) 1 ys 0 n 16
       ymax = maximum (map abs ys) + 1
   in null fc || maximum (map abs fc) < 10 * ymax
 
@@ -293,7 +314,7 @@ prop_fft_fit_covers_window =
       f = 1 / 16 :: Double
       sig t = 100 + 3 * cos (2 * pi * f * fromIntegral t)
       series = [sig t | t <- [0 .. n - 1]]
-      (fit, _) = fftApprox 0 series 0 n 32
+      (fit, _) = fftApprox 0 1 series 0 n 32
   in length fit == n && maximum (map abs (zipWith (-) fit series)) < 1e-6
 
 -- with waves=1 only the dominant bin is kept: a second, weaker harmonic
@@ -307,7 +328,7 @@ prop_fft_waves_limit =
       sig t = 100 + 3 * cos (2 * pi * f1 * fromIntegral t) + 0.3 * cos (2 * pi * f2 * fromIntegral t)
       main t = 100 + 3 * cos (2 * pi * f1 * fromIntegral t)
       series = [sig t | t <- [0 .. n - 1]]
-      (fit, fc) = fftApprox 1 series 0 n 16
+      (fit, fc) = fftApprox 1 1 series 0 n 16
       bad = maximum
         (map abs (zipWith (-) fit (map main [0 .. n - 1]))
            ++ map abs (zipWith (-) fc (map main [n .. n + 15])))
@@ -321,15 +342,15 @@ prop_fft_forecast_length total w p =
       w' = abs w `mod` (total' + 1)
       p' = abs p `mod` 100 + 1
       series = map (sin . fromIntegral) [0 .. total' - 1]
-      (fit, fc) = fftApprox 0 series 0 w' p'
+      (fit, fc) = fftApprox 0 1 series 0 w' p'
   in w' < 16 || (length fit == w' && length fc == p')
 
 prop_fft_forecast_invalid :: [Int] -> Bool
 prop_fft_forecast_invalid xs =
   let series = map fromIntegral xs
-      (f1, c1) = fftApprox 0 series 0 100 0
-      (f2, c2) = fftApprox 0 series 0 5 10
-      (f3, c3) = fftApprox 0 series 0 100 (-3)
+      (f1, c1) = fftApprox 0 1 series 0 100 0
+      (f2, c2) = fftApprox 0 1 series 0 5 10
+      (f3, c3) = fftApprox 0 1 series 0 100 (-3)
   in null f1 && null c1 && null f2 && null c2 && null f3 && null c3
 
 -- a resumed run continues the exact same sequence: two hooked segments
@@ -473,6 +494,20 @@ prop_ks_rolling_invalid =
       && not (isNaN (last badM))
       && abs (last badM - ref) < 1e-12
 
+-- endpoint weighting must pin the fit to the first candle: with a spike
+-- at t=0 plain LS absorbs only a fraction of it, weighted LS (edgeW
+-- large) absorbs nearly all
+prop_fft_edge_weight :: Bool
+prop_fft_edge_weight =
+  let n = 256
+      series = [ (if t == 0 then 120 else 100) + 3 * cos (2 * pi * fromIntegral t / 64) | t <- [0 .. n - 1] ]
+      errOf fit = abs (head fit - head series)
+      (fitP, _) = fftApprox 8 1 series 0 n 16
+      (fitW, _) = fftApprox 8 1000 series 0 n 16
+      eP = errOf fitP
+      eW = errOf fitW
+  in eW < eP - 3
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -514,6 +549,7 @@ props =
   , ("fft_forecast_invalid", property prop_fft_forecast_invalid)
   , ("fft_best_finds_sinusoid", property prop_fft_best_finds_sinusoid)
   , ("fft_best_no_data", property prop_fft_best_no_data)
+  , ("fft_edge_weight", property prop_fft_edge_weight)
   , ("ks_monotone_zero", property prop_ks_monotone_zero)
   , ("ks_alternating_two_patterns", property prop_ks_alternating_two_patterns)
   , ("ks_iid_near_max", property prop_ks_iid_near_max)

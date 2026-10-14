@@ -253,15 +253,15 @@ func _add_section(title: String) -> void:
 	lbl.text = title
 	_menu_box.add_child(lbl)
 
-func _add_spin(grid: GridContainer, label: String, value: int, on_change: Callable) -> SpinBox:
+func _add_spin(grid: GridContainer, label: String, value: float, on_change: Callable, step := 1.0, max_value := 99999999.0) -> SpinBox:
 	var lbl := Label.new()
 	lbl.text = label
 	lbl.custom_minimum_size = Vector2(64, 0)
 	grid.add_child(lbl)
 	var spin := SpinBox.new()
-	spin.step = 1
+	spin.step = step
 	spin.min_value = 0
-	spin.max_value = 99999999
+	spin.max_value = max_value
 	spin.alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	spin.custom_minimum_size = Vector2(96, 0)
 	spin.value = value
@@ -309,6 +309,7 @@ func _build_indicator_row(i: int) -> void:
 		_fft_spins["end"] = _add_spin(grid, "end", ind.end, _on_menu_fft_value.bind(i, "end"))
 		_fft_spins["predict"] = _add_spin(grid, "predict", ind.predict, _on_menu_fft_value.bind(i, "predict"))
 		_fft_spins["waves"] = _add_spin(grid, "waves", ind.waves, _on_menu_fft_value.bind(i, "waves"))
+		_fft_spins["edge w"] = _add_spin(grid, "edge w", ind.edge_w, _on_menu_fft_value.bind(i, "edge_w"), 1.0, 1000.0)
 		_add_spin(grid, "opt rmse %", _opt_rmse_pct, _on_menu_opt_weight)
 	elif ind.kind == "KS":
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
@@ -425,6 +426,8 @@ func _on_menu_fft_value(v: float, i: int, field: String) -> void:
 			ind.predict = int(v)
 		"waves":
 			ind.waves = int(v)
+		"edge_w":
+			ind.edge_w = maxf(1.0, v)
 	_sync_indicator_hud()
 	_refresh()
 

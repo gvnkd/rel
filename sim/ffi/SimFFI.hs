@@ -51,16 +51,17 @@ foreign export ccall "sim_cancel" simCancel :: IO ()
 
 -- FFT fit + forecast over closes[start..end): writes (window length +
 -- predict) doubles — the ridge-LS fit over the window followed by the
--- forecast — into out, returns the total count (0 on invalid input)
+-- forecast — into out, returns the total count (0 on invalid input);
+-- edgeW > 1 endpoint-weights the fit
 foreign export ccall "sim_fft_forecast" simFftForecast
-  :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> CInt -> CDouble -> Ptr CDouble -> IO CInt
 
-simFftForecast :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
-simFftForecast ptr (CInt count) (CInt start) (CInt end) (CInt predict) (CInt waves) out
+simFftForecast :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> CInt -> CDouble -> Ptr CDouble -> IO CInt
+simFftForecast ptr (CInt count) (CInt start) (CInt end) (CInt predict) (CInt waves) (CDouble edgeW) out
   | count <= 0 || predict <= 0 = pure 0
   | otherwise = do
       closes <- peekArray (fromIntegral count) ptr
-      let (fit, fc) = fftApprox (fromIntegral waves) (map (\(CDouble d) -> d) closes) (fromIntegral start) (fromIntegral end) (fromIntegral predict)
+      let (fit, fc) = fftApprox (fromIntegral waves) edgeW (map (\(CDouble d) -> d) closes) (fromIntegral start) (fromIntegral end) (fromIntegral predict)
           allOut = fit ++ fc
       if length fc /= fromIntegral predict
         then pure 0

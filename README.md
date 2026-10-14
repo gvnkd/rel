@@ -111,7 +111,14 @@ Values are blank during warm-up / outside the indicator's range.
   window, low-passed at period ≥ 8 candles so per-candle noise is never
   extrapolated); the dashed curve continues it for `predict` candles,
   anchored at the fit's last point. `waves` caps the harmonic count
-  (0 = auto). `opt` runs a walk-forward search over (window, waves) for
+  (0 = auto). `edge w` endpoint-weights the fit (linear ramps over
+  ~n/128 candles at both edges): boundary leverage is `2k·w0/Σw`, so
+  with a rich basis (many waves) even moderate values pin smooth
+  endpoint deviations — on real data the last-candle fit error drops
+  ~4x at `edge w` 100, tightening the fit/prediction junction. A sharp
+  single-candle spike at the edge is unmatchable by any smooth basis;
+  heavy weights there backfire (Gibbs overshoot) — keep `edge w` low
+  for those. `opt` runs a walk-forward search over (window, waves) for
   the given `predict` length, scoring each candidate with the hybrid
   objective `w·relRMSE + (1−w)·(1−direction accuracy)` where `w` is the
   `opt rmse %` spin; the optimized window is placed so its prediction

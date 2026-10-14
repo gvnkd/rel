@@ -8,7 +8,7 @@ extern "C" int sim_generate(const char *params, const char *out_path);
 extern "C" int sim_continue(const char *params, const char *out_path);
 extern "C" double sim_progress(void);
 extern "C" void sim_cancel(void);
-extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double *out);
+extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double edge_w, double *out);
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
@@ -34,7 +34,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("resume", "params", "out_path"), &SimNative::resume);
 		godot::ClassDB::bind_method(godot::D_METHOD("progress"), &SimNative::progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("cancel"), &SimNative::cancel);
-		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves"), &SimNative::fft_forecast);
+		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves", "edge_w"), &SimNative::fft_forecast);
 		godot::ClassDB::bind_method(godot::D_METHOD("perm_entropy", "closes", "window", "m"), &SimNative::perm_entropy);
 	}
 
@@ -59,12 +59,12 @@ public:
 		sim_cancel();
 	}
 
-	godot::PackedFloat64Array fft_forecast(const godot::PackedFloat64Array &closes, int64_t start, int64_t end, int64_t predict, int64_t waves) {
+	godot::PackedFloat64Array fft_forecast(const godot::PackedFloat64Array &closes, int64_t start, int64_t end, int64_t predict, int64_t waves, double edge_w) {
 		godot::PackedFloat64Array out;
 		if (closes.is_empty() || predict < 1 || predict > 1000000)
 			return out;
 		out.resize((int)(closes.size() + predict));
-		int got = sim_fft_forecast(closes.ptr(), (int)closes.size(), (int)start, (int)end, (int)predict, (int)waves, out.ptrw());
+		int got = sim_fft_forecast(closes.ptr(), (int)closes.size(), (int)start, (int)end, (int)predict, (int)waves, edge_w, out.ptrw());
 		out.resize(got < 0 ? 0 : got);
 		return out;
 	}
