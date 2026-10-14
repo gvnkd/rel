@@ -56,8 +56,10 @@ core waves series start end
 -- roll the forecast origin across the series and score each anchor by
 -- the hybrid objective
 --   score = w * relativeRMSE + (1 - w) * (1 - directionAccuracy)
--- where w = rmsePct / 100. Returns (bestWindow, bestWaves, bestScore);
--- (0, 0, 0) when no candidate has a single valid anchor
+-- where w = rmsePct / 100. Anchors run up to 50 candles before the tail
+-- so the evaluated forecast always overlaps real data; a longer forecast
+-- is scored on its overlapping head only. Returns (bestWindow,
+-- bestWaves, bestScore); (0, 0, 0) when no candidate has a valid anchor
 fftBest :: Int -> Int -> [Double] -> (Int, Int, Double)
 fftBest rmsePct predict closes
   | null scored = (0, 0, 0)
@@ -73,20 +75,24 @@ fftBest rmsePct predict closes
 bestGrid :: Int -> Int -> [(Int, Int)]
 bestGrid len predict =
   [ (win, k)
-  | win <- dedup [ clamp minWindow (len - predict) (round (f * fromIntegral predict)) | f <- [2, 3, 4.5, 7, 11, 17] ]
+  | win <- dedup [ clamp minWindow (len - minOv) (round (f * fromIntegral predict)) | f <- [2, 3, 4.5, 7, 11, 17] ]
   , k <- dedup [ clamp 1 (max 1 (win `div` 8)) kw | kw <- [2, 4, 8, 16, 24, 32] ]
   ]
+  where
+    minOv = min 50 predict
 
 score :: Double -> Int -> VU.Vector Double -> (Int, Int) -> Double
 score w predict vcloses (win, waves) =
   let len = VU.length vcloses
       step = max 1 predict
-      anchors = [win, win + step .. len - predict]
+      minOv = min 50 predict
+      anchors = [win, win + step .. len - minOv]
       one a =
-        let fc = fftForecast waves (VU.toList (VU.slice (a - win) win vcloses)) 0 win predict
-            act = VU.toList (VU.slice a predict vcloses)
+        let avail = min predict (len - a)
+            fc = take avail (fftForecast waves (VU.toList (VU.slice (a - win) win vcloses)) 0 win predict)
+            act = VU.toList (VU.slice a avail vcloses)
             scale = max 1e-9 (abs (head act))
-            rmse = sqrt (sum [ (p - x) ^ 2 | (p, x) <- zip fc act ] / fromIntegral predict) / scale
+            rmse = sqrt (sum [ (p - x) ^ 2 | (p, x) <- zip fc act ] / fromIntegral avail) / scale
         in w * rmse + (1 - w) * (1 - dirAcc fc act)
   in if null anchors then 1e9 else sum (map one anchors) / fromIntegral (length anchors)
 

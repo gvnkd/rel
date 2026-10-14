@@ -370,7 +370,9 @@ func _on_menu_fft_optimize(i: int) -> void:
 	for s in data.series:
 		if best_s == null or s.candles.size() > best_s.candles.size():
 			best_s = s
-	if best_s == null or best_s.candles.size() < ind.predict * 2 + IndicatorWidget.FFT_MIN_WINDOW:
+	# the optimized window must leave at least 50 candles of real data
+	# overlapping the prediction
+	if best_s == null or best_s.candles.size() < IndicatorWidget.FFT_MIN_WINDOW + 50:
 		return
 	var closes := PackedFloat64Array()
 	closes.resize(best_s.candles.size())
@@ -381,7 +383,7 @@ func _on_menu_fft_optimize(i: int) -> void:
 	if r.size() != 3:
 		return
 	ind.waves = int(r[1])
-	ind.end = best_s.candles.size()
+	ind.end = best_s.candles.size() - 50
 	ind.start = maxi(0, ind.end - int(r[0]))
 	ind.opt_score = r[2]
 	_rebuild_menu()

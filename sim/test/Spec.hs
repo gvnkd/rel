@@ -334,10 +334,11 @@ prop_fft_best_finds_sinusoid =
       (w, k, sc) = fftBest 50 64 closes
   in w > 0 && k > 0 && sc < 0.1
 
--- a flat candidate set must yield the no-result sentinel
+-- a flat candidate set must yield the no-result sentinel (series too
+-- short for any anchor with the mandatory 50-candle overlap)
 prop_fft_best_no_data :: Bool
 prop_fft_best_no_data =
-  fftBest 50 64 [1 .. 100] == (0, 0, 0)
+  fftBest 50 64 [1 .. 40] == (0, 0, 0)
 
 main :: IO ()
 main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
