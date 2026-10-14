@@ -143,18 +143,23 @@ func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	if ind.forecast.is_empty():
 		return
 	var pts := PackedVector2Array()
-	pts.append(Vector2(view.index_to_x(e_end - 1) + view.px_per_index / 2.0, view.price_to_y(s.candles[e_end - 1].close)))
+	# anchor the prediction at the fit's last point so the two curves meet
+	var anchor := ind.forecast[0]
+	if ind.fit.size() >= 1:
+		anchor = ind.fit[ind.fit.size() - 1]
+	pts.append(Vector2(view.index_to_x(e_end - 1) + view.px_per_index / 2.0, view.price_to_y(anchor)))
 	for j in ind.forecast.size():
 		pts.append(Vector2(view.index_to_x(e_end + j) + view.px_per_index / 2.0, view.price_to_y(ind.forecast[j])))
 	for j in range(pts.size() - 1):
 		draw_dashed_line(pts[j], pts[j + 1], col, 1.5, 4.0)
 
-# resolves the FFT window against a series length; 0 = auto (end = last
-# candle, start = end - 256)
+# resolves the FFT window against a series length; end 0 (or past the
+# end) follows the series tail, negative start falls back to end - 256;
+# index 0 is a valid concrete start
 func fft_window(ind: Indicator, n: int) -> Vector2i:
 	var e_end := ind.end if ind.end > 0 else n
 	e_end = mini(e_end, n)
-	var e_start := ind.start if ind.start > 0 else maxi(0, e_end - 256)
+	var e_start := ind.start if ind.start >= 0 else maxi(0, e_end - 256)
 	e_start = clampi(e_start, 0, maxi(e_end - FFT_MIN_WINDOW, 0))
 	return Vector2i(e_start, e_end)
 

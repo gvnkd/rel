@@ -7,17 +7,6 @@ const VOL_GRIP := 4.0
 const VOL_SNAP := 0.02
 const VOL_MAX_FRAC := 0.6
 const RMB_CLICK_TOL := 4.0
-const ID_IND_TOGGLE_BASE := 100
-const SUB_ID_DELETE := 1
-const SERIES_ID_BODY_UP := 1
-const SERIES_ID_BODY_DOWN := 2
-const SERIES_ID_WICK := 3
-const SERIES_ID_RESET := 4
-const SERIES_ID_IND_COLOR_BASE := 100
-const SUB_ID_FFT_START := 10
-const SUB_ID_FFT_END := 11
-const SUB_ID_FFT_PREDICT := 12
-const SUB_ID_FFT_WAVES := 13
 
 @export var replay_rate := 60.0
 
@@ -36,18 +25,9 @@ var t_acc := 0.0
 var _rmb_down := false
 var _rmb_down_pos := Vector2.ZERO
 var _fft_drag: Array = []
-enum PickTarget { NONE, SERIES_BODY_UP, SERIES_BODY_DOWN, SERIES_WICK, SERIES_IND }
-
-var _popup: PopupMenu
-var _color_popup: PopupPanel
-var _picker: ColorPicker
-var _num_popup: PopupPanel
-var _num_edit: LineEdit
-var _num_idx := -1
-var _num_field := -1
-var _pick_target: PickTarget = PickTarget.NONE
-var _pick_idx := -1
-var _pick_series := -1
+var _menu: PopupPanel
+var _menu_box: VBoxContainer
+var _fft_spins := {}
 
 const PALETTE: Array[Color] = [
 	Color(0.56, 0.93, 0.56),
@@ -80,21 +60,12 @@ func _ready() -> void:
 	sim_panel.timeline_added.connect(_on_timeline_added)
 	sim_panel.timeline_removed.connect(_on_timeline_removed)
 	sim_panel.timeline_toggled.connect(_on_timeline_toggled)
-	_popup = PopupMenu.new()
-	_popup.hide_on_checkable_item_selection = false
-	_popup.id_pressed.connect(_on_popup_id)
-	add_child(_popup)
-	_color_popup = PopupPanel.new()
-	_picker = ColorPicker.new()
-	_picker.color_changed.connect(_on_picker_color)
-	_color_popup.add_child(_picker)
-	add_child(_color_popup)
-	_num_popup = PopupPanel.new()
-	_num_edit = LineEdit.new()
-	_num_edit.custom_minimum_size = Vector2(100, 0)
-	_num_edit.text_submitted.connect(_on_num_submit)
-	_num_popup.add_child(_num_edit)
-	add_child(_num_popup)
+	_menu = PopupPanel.new()
+	var panel := PanelContainer.new()
+	_menu_box = VBoxContainer.new()
+	panel.add_child(_menu_box)
+	_menu.add_child(panel)
+	add_child(_menu)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
@@ -228,205 +199,221 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
-	for c in _popup.get_children():
-		_popup.remove_child(c)
-		c.free()
-	_popup.clear()
-	_popup.add_separator("chart mode")
-	for m in SeriesWidget.MODE_NAMES.size():
-		_popup.add_radio_check_item(SeriesWidget.MODE_NAMES[m], m)
-		_popup.set_item_checked(_popup.item_count - 1, series_widget.mode == m)
-	_popup.add_separator("indicators")
+	_rebuild_menu()
+	_menu.position = (get_screen_position() + at).round()
+	_menu.popup()
+
+func _rebuild_menu() -> void:
+	for c in _menu_box.get_children():
+		_menu_box.remove_child(c)
+		c.queue_free()
+	_fft_spins.clear()
+	_add_section("chart mode")
+	var modes := OptionButton.new()
+	for mname in SeriesWidget.MODE_NAMES:
+		modes.add_item(mname)
+	modes.selected = series_widget.mode
+	modes.item_selected.connect(_on_menu_mode)
+	_menu_box.add_child(modes)
+	_add_section("indicators")
 	if indicator_widget.indicators.is_empty():
-		_popup.add_item("(none)")
-		_popup.set_item_disabled(_popup.item_count - 1, true)
+		var none := Label.new()
+		none.text = "(none)"
+		_menu_box.add_child(none)
 	for i in indicator_widget.indicators.size():
-		var ind: IndicatorWidget.Indicator = indicator_widget.indicators[i]
-		var label := _ind_label(ind)
-		_popup.add_check_item(label, ID_IND_TOGGLE_BASE + i)
-		_popup.set_item_checked(_popup.item_count - 1, ind.enabled)
-		_popup.add_submenu_item(label + "…", _build_ind_submenu(i).name)
-	var add_sub := PopupMenu.new()
-	add_sub.name = "add_indicator"
-	add_sub.add_item("SMA")
-	add_sub.add_item("FFT forecast")
-	add_sub.id_pressed.connect(_on_add_indicator)
-	_popup.add_child(add_sub)
-	_popup.add_separator()
-	_popup.add_submenu_item("add indicator", add_sub.name)
+		_build_indicator_row(i)
+	var add_row := HBoxContainer.new()
+	var b_sma := Button.new()
+	b_sma.text = "add SMA"
+	b_sma.pressed.connect(_on_add_sma)
+	var b_fft := Button.new()
+	b_fft.text = "add FFT"
+	b_fft.pressed.connect(_on_add_fft)
+	add_row.add_child(b_sma)
+	add_row.add_child(b_fft)
+	_menu_box.add_child(add_row)
 	if not data.series.is_empty():
-		_popup.add_separator("series")
+		_add_section("series")
 		for i in data.series.size():
-			var s: PlotData.Series = data.series[i]
-			_popup.add_submenu_item(s.name, _build_series_submenu(i).name)
-			_set_color_chip(_popup, _popup.item_count - 1, s.col_pos)
-	_popup.popup(Rect2i((get_screen_position() + at).round(), Vector2i(1, 1)))
+			_build_series_row(i)
 
-func _build_series_submenu(si: int) -> PopupMenu:
-	var s: PlotData.Series = data.series[si]
-	var sub := PopupMenu.new()
-	sub.name = "series_%d" % si
-	sub.add_item("body up", SERIES_ID_BODY_UP)
-	_set_color_chip(sub, sub.item_count - 1, s.body_up if s.body_up.a > 0.0 else s.col_pos)
-	sub.add_item("body down", SERIES_ID_BODY_DOWN)
-	_set_color_chip(sub, sub.item_count - 1, s.body_down if s.body_down.a > 0.0 else s.col_neg)
-	sub.add_item("wick", SERIES_ID_WICK)
-	_set_color_chip(sub, sub.item_count - 1, s.wick if s.wick.a > 0.0 else s.col_pos)
-	sub.add_separator()
-	sub.add_item("reset", SERIES_ID_RESET)
-	if not indicator_widget.indicators.is_empty():
-		sub.add_separator()
-		for k in indicator_widget.indicators.size():
-			var ind: IndicatorWidget.Indicator = indicator_widget.indicators[k]
-			sub.add_item(_ind_label(ind) + " color", SERIES_ID_IND_COLOR_BASE + k)
-			_set_color_chip(sub, sub.item_count - 1, indicator_widget.color_for(s, k))
-	sub.id_pressed.connect(_on_series_color_id.bind(si))
-	_popup.add_child(sub)
-	return sub
+func _add_section(title: String) -> void:
+	if _menu_box.get_child_count() > 0:
+		_menu_box.add_child(HSeparator.new())
+	var lbl := Label.new()
+	lbl.text = title
+	_menu_box.add_child(lbl)
 
-func _set_color_chip(pm: PopupMenu, idx: int, col: Color) -> void:
-	var chip := Image.create(12, 12, false, Image.FORMAT_RGBA8)
-	chip.fill(col)
-	pm.set_item_icon(idx, ImageTexture.create_from_image(chip))
+func _add_spin(grid: GridContainer, label: String, value: int, on_change: Callable) -> SpinBox:
+	var lbl := Label.new()
+	lbl.text = label
+	lbl.custom_minimum_size = Vector2(64, 0)
+	grid.add_child(lbl)
+	var spin := SpinBox.new()
+	spin.step = 1
+	spin.min_value = 0
+	spin.max_value = 99999999
+	spin.alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	spin.custom_minimum_size = Vector2(96, 0)
+	spin.value = value
+	spin.value_changed.connect(on_change)
+	spin.gui_input.connect(_on_spin_wheel.bind(spin))
+	grid.add_child(spin)
+	return spin
 
-func _build_ind_submenu(idx: int) -> PopupMenu:
-	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[idx]
-	var sub := PopupMenu.new()
-	sub.name = "ind_%d" % idx
+func _on_spin_wheel(event: InputEvent, spin: SpinBox) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			spin.value += spin.step
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			spin.value = maxf(spin.min_value, spin.value - spin.step)
+
+func _build_indicator_row(i: int) -> void:
+	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[i]
+	var row := HBoxContainer.new()
+	var cb := CheckBox.new()
+	cb.text = ind.kind
+	cb.button_pressed = ind.enabled
+	cb.toggled.connect(_on_menu_ind_toggle.bind(i))
+	row.add_child(cb)
+	var del := Button.new()
+	del.text = "x"
+	del.tooltip_text = "delete"
+	del.pressed.connect(_on_menu_ind_delete.bind(i))
+	row.add_child(del)
+	_menu_box.add_child(row)
+	var grid := GridContainer.new()
+	grid.columns = 2
 	if ind.kind == "FFT":
-		sub.add_item("start: %d" % ind.start, SUB_ID_FFT_START)
-		sub.add_item("end: %d" % ind.end, SUB_ID_FFT_END)
-		sub.add_item("predict: %d" % ind.predict, SUB_ID_FFT_PREDICT)
-		sub.add_item(("waves: %d" % ind.waves) if ind.waves > 0 else "waves: auto", SUB_ID_FFT_WAVES)
+		_fft_spins["start"] = _add_spin(grid, "start", ind.start, _on_menu_fft_value.bind(i, "start"))
+		_fft_spins["end"] = _add_spin(grid, "end", ind.end, _on_menu_fft_value.bind(i, "end"))
+		_fft_spins["predict"] = _add_spin(grid, "predict", ind.predict, _on_menu_fft_value.bind(i, "predict"))
+		_fft_spins["waves"] = _add_spin(grid, "waves", ind.waves, _on_menu_fft_value.bind(i, "waves"))
 	else:
-		sub.add_separator("period")
-		for p: int in IndicatorWidget.PERIODS:
-			sub.add_radio_check_item(str(p), p)
-			sub.set_item_checked(sub.item_count - 1, ind.period == p)
-	sub.add_separator()
-	sub.add_item("delete", SUB_ID_DELETE)
-	sub.id_pressed.connect(_on_ind_submenu_id.bind(idx))
-	_popup.add_child(sub)
-	return sub
+		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
+	_menu_box.add_child(grid)
 
-func _on_popup_id(id: int) -> void:
-	if id >= ID_IND_TOGGLE_BASE:
-		var ind: IndicatorWidget.Indicator = indicator_widget.indicators[id - ID_IND_TOGGLE_BASE]
-		ind.enabled = not ind.enabled
-		_sync_indicator_hud()
-		_refresh()
-	elif id < SeriesWidget.MODE_COUNT:
-		series_widget.mode = id as SeriesWidget.Mode
-		_sync_mode_hud()
-		_popup.hide()
-		_refresh()
+func _build_series_row(i: int) -> void:
+	var s: PlotData.Series = data.series[i]
+	var row := HBoxContainer.new()
+	var lbl := Label.new()
+	lbl.text = s.name
+	lbl.custom_minimum_size = Vector2(64, 0)
+	row.add_child(lbl)
+	var up := _color_button(s.body_up if s.body_up.a > 0.0 else s.col_pos)
+	up.color_changed.connect(_on_menu_series_color.bind(i, "body_up"))
+	row.add_child(up)
+	var down := _color_button(s.body_down if s.body_down.a > 0.0 else s.col_neg)
+	down.color_changed.connect(_on_menu_series_color.bind(i, "body_down"))
+	row.add_child(down)
+	var wick := _color_button(s.wick if s.wick.a > 0.0 else s.col_pos)
+	wick.color_changed.connect(_on_menu_series_color.bind(i, "wick"))
+	row.add_child(wick)
+	var reset := Button.new()
+	reset.text = "r"
+	reset.tooltip_text = "reset colors"
+	reset.pressed.connect(_on_menu_series_reset.bind(i))
+	row.add_child(reset)
+	for k in indicator_widget.indicators.size():
+		var icb := _color_button(indicator_widget.color_for(s, k))
+		icb.color_changed.connect(_on_menu_ind_color.bind(i, k))
+		row.add_child(icb)
+	_menu_box.add_child(row)
 
-func _on_ind_submenu_id(id: int, idx: int) -> void:
-	if id == SUB_ID_DELETE:
-		indicator_widget.remove_indicator(idx)
-		_popup.hide()
-		_sync_indicator_hud()
-		_refresh()
-	elif id == SUB_ID_FFT_START or id == SUB_ID_FFT_END or id == SUB_ID_FFT_PREDICT or id == SUB_ID_FFT_WAVES:
-		_open_num_input(idx, id)
-	else:
-		indicator_widget.indicators[idx].period = id
-		_popup.hide()
-		_sync_indicator_hud()
-		_refresh()
+func _color_button(c: Color) -> ColorPickerButton:
+	var b := ColorPickerButton.new()
+	b.edit_alpha = false
+	b.custom_minimum_size = Vector2(32, 20)
+	b.color = c
+	return b
 
-func _open_num_input(idx: int, field: int) -> void:
-	_num_idx = idx
-	_num_field = field
-	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[idx]
-	var current := ind.start
-	if field == SUB_ID_FFT_END:
-		current = ind.end
-	elif field == SUB_ID_FFT_PREDICT:
-		current = ind.predict
-	elif field == SUB_ID_FFT_WAVES:
-		current = ind.waves
-	_num_edit.text = str(current)
-	_popup.hide()
-	_num_popup.position = _popup.position + Vector2i(maxi(_popup.size.x, 1) + 8, 0)
-	_num_popup.popup()
-	_num_edit.grab_focus()
-	_num_edit.select_all()
+func _on_menu_mode(idx: int) -> void:
+	series_widget.mode = idx as SeriesWidget.Mode
+	_sync_mode_hud()
+	_refresh()
 
-func _on_num_submit(text: String) -> void:
-	_num_popup.hide()
-	if _num_idx < 0 or _num_idx >= indicator_widget.indicators.size():
-		return
-	if not text.is_valid_int() or text.to_int() < 0:
-		return
-	var v := text.to_int()
-	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[_num_idx]
-	if _num_field == SUB_ID_FFT_START:
-		ind.start = v
-	elif _num_field == SUB_ID_FFT_END:
-		ind.end = v
-	elif _num_field == SUB_ID_FFT_PREDICT:
-		ind.predict = v
-	elif _num_field == SUB_ID_FFT_WAVES:
-		ind.waves = v
-	_num_idx = -1
+func _on_menu_ind_toggle(on: bool, i: int) -> void:
+	indicator_widget.indicators[i].enabled = on
 	_sync_indicator_hud()
 	_refresh()
 
-func _on_series_color_id(id: int, si: int) -> void:
-	var s: PlotData.Series = data.series[si]
-	if id == SERIES_ID_RESET:
-		s.body_up = Color.TRANSPARENT
-		s.body_down = Color.TRANSPARENT
-		s.wick = Color.TRANSPARENT
-		_popup.hide()
+func _on_menu_ind_delete(i: int) -> void:
+	indicator_widget.remove_indicator(i)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_menu_sma_period(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].period = maxi(1, int(v))
+		_sync_indicator_hud()
 		_refresh()
-		return
-	if id >= SERIES_ID_IND_COLOR_BASE:
-		var k := id - SERIES_ID_IND_COLOR_BASE
-		_open_color_picker(PickTarget.SERIES_IND, k, si, indicator_widget.color_for(s, k))
-		return
-	var target := PickTarget.SERIES_BODY_UP
-	var current := s.body_up if s.body_up.a > 0.0 else s.col_pos
-	if id == SERIES_ID_BODY_DOWN:
-		target = PickTarget.SERIES_BODY_DOWN
-		current = s.body_down if s.body_down.a > 0.0 else s.col_neg
-	elif id == SERIES_ID_WICK:
-		target = PickTarget.SERIES_WICK
-		current = s.wick if s.wick.a > 0.0 else s.col_pos
-	_open_color_picker(target, -1, si, current)
 
-func _open_color_picker(target: PickTarget, idx: int, si: int, current: Color) -> void:
-	_pick_target = target
-	_pick_idx = idx
-	_pick_series = si
-	_picker.color = current
-	_popup.hide()
-	_color_popup.position = _popup.position + Vector2i(maxi(_popup.size.x, 1) + 8, 0)
-	_color_popup.popup()
-
-func _on_picker_color(c: Color) -> void:
-	if _pick_series < 0 or _pick_series >= data.series.size():
+func _on_menu_fft_value(v: float, i: int, field: String) -> void:
+	if i >= indicator_widget.indicators.size():
 		return
-	var s: PlotData.Series = data.series[_pick_series]
-	match _pick_target:
-		PickTarget.SERIES_BODY_UP:
+	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[i]
+	match field:
+		"start":
+			ind.start = int(v)
+		"end":
+			ind.end = int(v)
+		"predict":
+			ind.predict = int(v)
+		"waves":
+			ind.waves = int(v)
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_add_sma() -> void:
+	indicator_widget.add_indicator("SMA", 20)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_add_fft() -> void:
+	indicator_widget.add_indicator("FFT", 0)
+	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[indicator_widget.indicators.size() - 1]
+	ind.end = data.max_len()
+	ind.start = maxi(0, ind.end - 256)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_menu_series_color(c: Color, i: int, field: String) -> void:
+	if i >= data.series.size():
+		return
+	var s: PlotData.Series = data.series[i]
+	match field:
+		"body_up":
 			s.body_up = c
-		PickTarget.SERIES_BODY_DOWN:
+		"body_down":
 			s.body_down = c
-		PickTarget.SERIES_WICK:
+		"wick":
 			s.wick = c
-		PickTarget.SERIES_IND:
-			s.ind_colors[_pick_idx] = c
+	_refresh()
+
+func _on_menu_ind_color(c: Color, si: int, k: int) -> void:
+	if si < data.series.size():
+		data.series[si].ind_colors[k] = c
+		_refresh()
+
+func _on_menu_series_reset(i: int) -> void:
+	if i >= data.series.size():
+		return
+	var s: PlotData.Series = data.series[i]
+	s.body_up = Color.TRANSPARENT
+	s.body_down = Color.TRANSPARENT
+	s.wick = Color.TRANSPARENT
+	_rebuild_menu()
 	_refresh()
 
 func _begin_fft_drag(hit: Array) -> void:
 	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[hit[0]]
-	# materialize auto (0) values so the drag works against concrete indices
+	# materialize an auto end (0 = follow tail) so the drag works against
+	# a concrete index; start 0 is a valid first-candle index
 	if ind.end <= 0:
 		ind.end = data.max_len()
-	if ind.start <= 0:
-		ind.start = maxi(0, ind.end - 256)
 	_fft_drag = hit
 	Input.set_default_cursor_shape(Input.CURSOR_HSIZE)
 	_refresh()
@@ -441,17 +428,6 @@ func _drag_fft_to(pos: Vector2) -> void:
 	_sync_indicator_hud()
 	_refresh()
 
-func _on_add_indicator(id: int) -> void:
-	if id == 1:
-		indicator_widget.add_indicator("FFT", 0)
-		var ind: IndicatorWidget.Indicator = indicator_widget.indicators[indicator_widget.indicators.size() - 1]
-		ind.end = data.max_len()
-		ind.start = maxi(0, ind.end - 256)
-	else:
-		indicator_widget.add_indicator("SMA", 20)
-	_popup.hide()
-	_sync_indicator_hud()
-	_refresh()
 
 func _process(delta: float) -> void:
 	if not playing or paused:

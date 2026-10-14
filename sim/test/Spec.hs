@@ -6,7 +6,7 @@ import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
-import Sim.Fft (fftApprox)
+import Sim.Fft (corr, fftApprox, gram, solveLS)
 import Sim.Gen
 import Sim.TickGen (runSimTicks)
 import Sim.Types
@@ -232,6 +232,51 @@ prop_fft_recovers_sinusoid_offset =
       expect = [sig t | t <- [356 .. 371]]
   in length fc == 16 && maximum (map abs (zipWith (-) fc expect)) < 1e-6
 
+-- the closed-form Gram matrix and correlations must agree with a brute
+-- force build of the design matrix columns
+prop_fft_gram_matches_bruteforce :: Int -> [Int] -> Bool
+prop_fft_gram_matches_bruteforce n0 seeds =
+  let n = 10 + abs n0 `mod` 50
+      k = 1 + length seeds `mod` 3
+      freqs = [ (1 + fromIntegral (abs s `mod` 7)) / fromIntegral n | s <- take k seeds ]
+      ws = map (2 * pi *) freqs
+      ts = map fromIntegral [0 .. n - 1] :: [Double]
+      cols = concat [ [map (cos . (wj *)) ts, map (sin . (wj *)) ts] | wj <- ws ]
+      brute = [ [sum (zipWith (*) ci cj) | cj <- cols] | ci <- cols ]
+      closed = gram n ws
+      ys = map (fromIntegral . abs) seeds
+      bruteC = concat [ [sum (zipWith (*) (map (cos . (wj *)) ts) ys), sum (zipWith (*) (map (sin . (wj *)) ts) ys)] | wj <- ws ]
+      closedC = concatMap (\w -> let (c, s) = corr n ys w in [c, s]) ws
+      close a b = abs (a - b) < 1e-6
+  in length closed == length brute && and (zipWith close (concat closed) (concat brute))
+     && and (zipWith close closedC bruteC)
+
+-- on a well-conditioned system the solve must satisfy the normal
+-- equations (validates the Jacobi eigendecomposition end to end)
+prop_fft_solve_residual :: [Int] -> Bool
+prop_fft_solve_residual seeds =
+  let n = 200
+      freqs = [1 / 8, 1 / 20, 3 / 16 :: Double]
+      ws = map (2 * pi *) freqs
+      ys = take n (map (fromIntegral . abs) seeds ++ repeat 0.5)
+      g = gram n ws
+      b = concatMap (\w -> let (c, s) = corr n ys w in [c, s]) ws
+      x = solveLS n ys freqs
+      resid = sqrt (sum [ (sum (zipWith (*) (g !! i) x) - b !! i) ^ 2 | i <- [0 .. length b - 1] ])
+      bnorm = sqrt (sum [ bi ^ 2 | bi <- b ])
+  in bnorm > 0 && resid / bnorm < 1e-6
+
+-- extrapolation stays bounded even at the max wave count: the truncated
+-- eigensolve cannot produce the runaway coefficients that shoot the
+-- forecast out of the plot
+prop_fft_forecast_bounded :: [Int] -> Property
+prop_fft_forecast_bounded seeds =
+  let n = 64
+      ys = [ fromIntegral (abs s `mod` 100) | s <- take n seeds ]
+      (_, fc) = fftApprox (n `div` 4) ys 0 n 16
+      ymax = maximum (map abs ys) + 1
+  in not (null fc) ==> maximum (map abs fc) < 10 * ymax
+
 -- the in-window fit must reproduce the window itself
 prop_fft_fit_covers_window :: Bool
 prop_fft_fit_covers_window =
@@ -298,6 +343,9 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_fft_recovers_sinusoid_offset
   , property prop_fft_fit_covers_window
   , property prop_fft_waves_limit
+  , property prop_fft_gram_matches_bruteforce
+  , property prop_fft_solve_residual
+  , property prop_fft_forecast_bounded
   , property prop_fft_forecast_length
   , property prop_fft_forecast_invalid
   ]
