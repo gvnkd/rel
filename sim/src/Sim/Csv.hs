@@ -1,5 +1,6 @@
 module Sim.Csv
   ( csvText
+  , csvRowsText
   , candleCsv
   , ticksCsv
   , tickHeader
@@ -17,6 +18,12 @@ import Text.Printf (printf)
 csvText :: SimParams -> [Candle] -> String
 csvText params cs =
   unlines $ "open,high,low,close,vol" : map (candleCsv (spPriceScale params)) cs
+
+-- rows only, no header: appended to an existing candles file when a run
+-- is resumed
+csvRowsText :: SimParams -> [Candle] -> String
+csvRowsText params =
+  unlines . map (candleCsv (spPriceScale params))
 
 candleCsv :: Int -> Candle -> String
 candleCsv scale c = printf "%.5f,%.5f,%.5f,%.5f,%d" (f o) (f h) (f l) (f cl) (candleVol c)

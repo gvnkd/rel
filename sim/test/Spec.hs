@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sort)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.Word (Word64)
@@ -8,7 +9,11 @@ import qualified Data.Set as Set
 import Sim.Engine
 import Sim.Fft (corr, fftApprox, fftBest, fftForecast, gram, solveLS)
 import Sim.Gen
+import Sim.GenH (runSimH)
+import Sim.Csv (tickRow)
+import Sim.Resume (parseState, stateText)
 import Sim.TickGen (runSimTicks)
+import Sim.TickGenH (runSimTicksH)
 import Sim.Types
 import Test.QuickCheck
 
@@ -323,6 +328,66 @@ prop_fft_forecast_invalid xs =
       (f3, c3) = fftApprox 0 series 0 100 (-3)
   in null f1 && null c1 && null f2 && null c2 && null f3 && null c3
 
+-- a resumed run continues the exact same sequence: two hooked segments
+-- (snapshotting the state in between) produce the same candles as one
+-- pure runSim of the combined length
+prop_resume_candles :: Word64 -> Property
+prop_resume_candles seed = ioProperty $ do
+  let sp = defaultParams { spSeed = seed, spCandles = 40, spOrdersLo = 80, spOrdersHi = 120 }
+  (gs1, cs1) <- runSimH defaultHooks sp { spCandles = 20 } (initState sp)
+  (_gs2, cs2) <- runSimH defaultHooks sp { spCandles = 20 } gs1
+  pure (cs1 ++ cs2 == runSim sp)
+
+-- the continuation snapshot round-trips: parsing a rendered state text
+-- yields the same params, done count, rng, book, anchor, and in-progress
+-- candle
+prop_state_roundtrip :: Word64 -> Bool -> Property
+prop_state_roundtrip seed clamp = ioProperty $ do
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 20
+        , spOrdersLo = 60
+        , spOrdersHi = 140
+        , spClampRest = clamp
+        }
+  (gs, _) <- runSimH defaultHooks sp (initState sp)
+  let done = 7
+  pure $ case parseState (stateText sp done gs) of
+    Left err -> counterexample err False
+    Right (sp', done', gs') -> conjoin
+      [ counterexample "params" (show sp == show sp')
+      , counterexample "done" (done == done')
+      , counterexample "rng" (show (gsRng gs) == show (gsRng gs'))
+      , counterexample "book" (show (gsBook gs) == show (gsBook gs'))
+      , counterexample "anchor" (gsAnchor gs == gsAnchor gs')
+      , counterexample "candle" (gsCandle gs == gsCandle gs')
+      ]
+
+-- resuming a tick-mode run: the appended segment's rows are the tail of
+-- a single combined run with candle indices shifted past the candles
+-- already written
+prop_resume_ticks :: Word64 -> SimMode -> Property
+prop_resume_ticks seed mode = ioProperty $ do
+  let sp = defaultParams
+        { spSeed = seed
+        , spCandles = 40
+        , spOrdersLo = 50
+        , spOrdersHi = 50
+        , spMode = mode
+        , spBookDepth = 5
+        }
+      (_, tsAll) = runSimTicks sp
+      rows = map (tickRow 100000 5)
+  ref <- newIORef []
+  (gs1, cs1) <- runSimTicksH defaultHooks (collect ref) sp { spCandles = 20 } 0 (initState sp)
+  ts1 <- reverse <$> readIORef ref
+  writeIORef ref []
+  (_gs2, _cs2) <- runSimTicksH defaultHooks (collect ref) sp { spCandles = 20 } (length cs1) gs1
+  ts2 <- reverse <$> readIORef ref
+  pure (rows (ts1 ++ ts2) == rows tsAll)
+  where
+    collect ref t = modifyIORef' ref (t :)
+
 -- the walk-forward search must find near-perfect parameters for an exact
 -- harmonic (its forecast is essentially exact, so the hybrid score ~ 0)
 prop_fft_best_finds_sinusoid :: Bool
@@ -356,6 +421,9 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_ticks_candles_match_runSim_percent
   , property prop_ticks_candles_match_runSim
   , property prop_ticks_book_snapshots
+  , property prop_resume_candles
+  , property prop_state_roundtrip
+  , property prop_resume_ticks
   , property prop_fft_recovers_sinusoid
   , property prop_fft_recovers_sinusoid_offset
   , property prop_fft_fit_covers_window

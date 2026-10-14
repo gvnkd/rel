@@ -10,13 +10,15 @@ import Foreign.Marshal.Array (peekArray, pokeArray)
 import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvText, metaText, tickHeader, tickRowB, ticksPath)
+import Sim.Csv (csvRowsText, csvText, metaText, tickHeader, tickRowB, ticksPath)
 import Sim.Fft (fftApprox, fftBest)
+import Sim.Gen (GenState, initState)
 import Sim.GenH (runSimH)
+import Sim.Resume (readState, statePath, writeState)
 import Sim.TickGenH (runSimTicksH)
-import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
-import System.Directory (removeFile)
-import System.IO (BufferMode (BlockBuffering), IOMode (WriteMode), hPutStr, hSetBuffering, withFile)
+import Sim.Types (Candle, SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
+import System.Directory (doesFileExist, getFileSize, removeFile)
+import System.IO (BufferMode (BlockBuffering), IOMode (AppendMode, WriteMode), hPutStr, hSetBuffering, hSetFileSize, withFile)
 import System.IO.Error (isDoesNotExistError)
 
 -- params are "key=value" pairs separated by ';', keys as in the CLI
@@ -25,6 +27,19 @@ import System.IO.Error (isDoesNotExistError)
 -- returns 0 on success, 1 on bad params, 2 on an IO/generation
 -- failure, 3 when cancelled via sim_cancel (partial output removed)
 foreign export ccall "sim_generate" simGenerate :: CString -> CString -> IO CInt
+
+-- continue a previously generated timeline: reads the state snapshot
+-- next to out_path (<basename>.state), generates spCandles MORE candles
+-- with the snapshot's parameters (only the candle count comes from the
+-- given params), and appends them to the candles csv and the ticks
+-- sidecar (sidecar rows continue the candle numbering). A fresh
+-- <basename>.state is written on success.
+--
+-- returns 0 on success, 1 on bad params, 2 on an IO/generation
+-- failure, 3 when cancelled via sim_cancel (the partially appended
+-- sidecar is truncated back, the candles csv is untouched), 4 when
+-- there is no state to continue from
+foreign export ccall "sim_continue" simContinue :: CString -> CString -> IO CInt
 
 -- generation progress as a 0..1 fraction, polled from the UI thread
 -- while a sim_generate call is running on a worker thread
@@ -106,22 +121,56 @@ simGenerate paramsPtr outPtr = do
           writeIORef progressRef (1, 1)
           pure 0
 
+simContinue :: CString -> CString -> IO CInt
+simContinue paramsPtr outPtr = do
+  paramsStr <- peekCString paramsPtr
+  outPath   <- peekCString outPtr
+  case applyArgs (toArgs paramsStr) of
+    Left _      -> pure 1
+    Right pForm -> do
+      st <- readState (statePath outPath) `catch` onMissing
+      case st of
+        Left _            -> pure 4
+        Right (p0, n, gs) -> do
+          let p = p0 { spCandles = spCandles pForm }
+          writeIORef progressRef (0, spCandles p + 1)
+          writeIORef cancelRef False
+          readSidecarSize (ticksPath outPath)
+          result <- try (appendCsv outPath p n gs) :: IO (Either SomeException (GenState, Int))
+          case result of
+            Left err
+              | Just SimCancelled <- fromException err -> do
+                  restoreSidecar outPath p
+                  pure 3
+              | otherwise -> pure 2
+            Right (gs', added) -> do
+              writeState (statePath outPath) p (n + added) gs'
+              writeIORef progressRef (1, 1)
+              pure 0
+  where
+    onMissing e
+      | isDoesNotExistError e = pure (Left "no state")
+      | otherwise             = ioError e
+
 writeCsv :: FilePath -> SimParams -> IO ()
 writeCsv path p = do
   write (path ++ ".meta") (metaText p)
   case spMode p of
     ModeCandles -> do
+      -- a candles-mode run leaves no sidecar: drop a stale one from an
+      -- earlier same-name tick-mode run, or the UI would load it instead
       rm (ticksPath path)
-      write path . csvText p =<< runSimH simHooks p
+      (gs, cs) <- runSimH simHooks p (initState p)
+      write path (csvText p cs)
+      writeState (statePath path) p (length cs) gs
     _           -> do
-      cs <- withFile (ticksPath path) WriteMode $ \h -> do
+      (gs, cs) <- withFile (ticksPath path) WriteMode $ \h -> do
         hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
         hPutStr h (tickHeader (spBookDepth p) ++ "\n")
-        runSimTicksH simHooks (emitTick h) p
+        runSimTicksH simHooks (emitTick h) p 0 (initState p)
       write path (csvText p cs)
+      writeState (statePath path) p (length cs) gs
   where
-    -- a candles-mode run leaves no sidecar: drop a stale one from an
-    -- earlier same-name tick-mode run, or the UI would load it instead
     rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
     write fp s = withFile fp WriteMode $ \h -> hPutStr h s
     emitTick h t = hPutBuilder h (tickRowB (spPriceScale p) (spBookDepth p) t <> char8 '\n')
@@ -129,6 +178,71 @@ writeCsv path p = do
       { hookProgress = \d t -> writeIORef progressRef (d, t)
       , hookCancelled = readIORef cancelRef
       }
+
+-- resume from a snapshot: generate more candles with the snapshot's
+-- parameters, append the candles rows to the csv (creating it with a
+-- header when missing), and stream the tick rows onto the sidecar
+-- (creating it with a header when missing). The state snapshot is NOT
+-- written here -- only after both files are complete. Returns the final
+-- state and how many candles were produced.
+appendCsv :: FilePath -> SimParams -> Int -> GenState -> IO (GenState, Int)
+appendCsv path p done gs0 = do
+  case spMode p of
+    ModeCandles -> do
+      rm (ticksPath path)
+      (gs, cs) <- runSimH simHooks p gs0
+      appendCandles path p cs
+      pure (gs, length cs)
+    _           -> do
+      exists <- doesFileExist sidecar
+      (gs, cs) <- withFile sidecar AppendMode $ \h -> do
+        hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
+        unless exists $ hPutStr h (tickHeader (spBookDepth p) ++ "\n")
+        runSimTicksH simHooks (emitTick h) p done gs0
+      appendCandles path p cs
+      pure (gs, length cs)
+  where
+    sidecar = ticksPath path
+    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
+    emitTick h t = hPutBuilder h (tickRowB (spPriceScale p) (spBookDepth p) t <> char8 '\n')
+    simHooks = SimHooks
+      { hookProgress = \d t -> writeIORef progressRef (d, t)
+      , hookCancelled = readIORef cancelRef
+      }
+
+appendCandles :: FilePath -> SimParams -> [Candle] -> IO ()
+appendCandles path p cs = do
+  exists <- doesFileExist path
+  withFile path AppendMode $ \h ->
+    hPutStr h $ (if exists then "" else csvHeader) ++ csvRowsText p cs
+  where
+    csvHeader = "open,high,low,close,vol\n"
+
+-- the sidecar size before the run, recorded by restoreSidecar's caller
+-- via readSidecarSize
+sidecarSizeRef :: IORef (Maybe Integer)
+sidecarSizeRef = unsafePerformIO (newIORef Nothing)
+{-# NOINLINE sidecarSizeRef #-}
+
+readSidecarSize :: FilePath -> IO ()
+readSidecarSize path = do
+  exists <- doesFileExist path
+  sz <- if exists then Just <$> getFileSize path else pure Nothing
+  writeIORef sidecarSizeRef sz
+
+-- undo a partially streamed sidecar after a cancellation: truncate back
+-- to the recorded size (or remove a file that did not exist before)
+restoreSidecar :: FilePath -> SimParams -> IO ()
+restoreSidecar path p = case spMode p of
+  ModeCandles -> pure ()
+  _           -> do
+    sz <- readIORef sidecarSizeRef
+    case sz of
+      Nothing -> rm sidecar
+      Just n  -> withFile sidecar AppendMode (`hSetFileSize` n)
+  where
+    sidecar = ticksPath path
+    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
 
 -- remove partial output after a cancellation (missing files ignored)
 cleanup :: FilePath -> SimParams -> IO ()

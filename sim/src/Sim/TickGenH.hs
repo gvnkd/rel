@@ -17,7 +17,7 @@ import Control.Monad (when)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import Sim.Engine
-import Sim.Gen (GenState (..), initState)
+import Sim.Gen (GenState (..))
 import Sim.Internal
 import System.Random.SplitMix (nextWord64)
 
@@ -25,12 +25,15 @@ import System.Random.SplitMix (nextWord64)
 -- through the sink as produced (constant memory -- the list-based
 -- Sim.TickGen.runSimTicks materializes every tick and stays for the
 -- test suite); candle order and row order are identical to the
--- list-based export. Returns the candles.
-runSimTicksH :: SimHooks -> (Tick -> IO ()) -> SimParams -> IO [Candle]
-runSimTicksH hooks sink sp = go (spCandles sp) 0 (initState sp) []
+-- list-based export. Starts from the given state (use initState for a
+-- fresh run) and the given candle index (0 for a fresh run, the number
+-- of candles already written when resuming); returns the final state
+-- and the candles.
+runSimTicksH :: SimHooks -> (Tick -> IO ()) -> SimParams -> Int -> GenState -> IO (GenState, [Candle])
+runSimTicksH hooks sink sp ci0 gs0 = go (spCandles sp) ci0 gs0 []
   where
     total = spCandles sp
-    go 0 _ _ cs = pure (reverse cs)
+    go 0 _ gs cs = pure (gs, reverse cs)
     go k ci gs cs = do
       cancelled <- hookCancelled hooks
       when cancelled (throwIO SimCancelled)

@@ -15,6 +15,7 @@ library
                       Sim.Cli
                       Sim.Csv
                       Sim.Fft
+                      Sim.Resume
     other-modules:    Sim.Internal
     build-depends:    base >=4 && <5,
                       array,

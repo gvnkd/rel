@@ -17,18 +17,20 @@ import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.Word (Word64)
 import Sim.Engine
-import Sim.Gen (GenState (..), initState)
+import Sim.Gen (GenState (..))
 import Sim.Internal
 import System.Random.SplitMix (nextWord64)
 
 -- like Sim.Gen.runSim but driven in IO: reports per-candle progress and
 -- polls for cancellation once per candle (throws SimCancelled); the
--- per-order hot loop below stays pure
-runSimH :: SimHooks -> SimParams -> IO [Candle]
-runSimH hooks sp = go (spCandles sp) (initState sp) []
+-- per-order hot loop below stays pure. Starts from the given state (use
+-- initState for a fresh run) and returns the final state, which is what
+-- a continuation snapshot is built from.
+runSimH :: SimHooks -> SimParams -> GenState -> IO (GenState, [Candle])
+runSimH hooks sp gs0 = go (spCandles sp) gs0 []
   where
     total = spCandles sp
-    go 0 _ acc = pure (reverse acc)
+    go 0 gs acc = pure (gs, reverse acc)
     go k gs acc = do
       cancelled <- hookCancelled hooks
       when cancelled (throwIO SimCancelled)

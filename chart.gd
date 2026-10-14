@@ -520,6 +520,11 @@ func _refresh() -> void:
 		w.queue_redraw()
 
 func add_timeline(tl_name: String, path: String) -> int:
+	# a same-name timeline is a reload (e.g. after resuming generation):
+	# refresh its data in place, keeping user colors and indicators
+	for i in data.series.size():
+		if data.series[i].name == tl_name:
+			return _reload_series(i, path)
 	var s := PlotDataScript.Series.new()
 	s.name = tl_name
 	var ticks_path := "%s.ticks.csv" % path.get_basename()
@@ -544,6 +549,20 @@ func add_timeline(tl_name: String, path: String) -> int:
 	_update_book()
 	_refresh()
 	return idx
+
+func _reload_series(i: int, path: String) -> int:
+	var s: PlotData.Series = data.series[i]
+	var ticks_path := "%s.ticks.csv" % path.get_basename()
+	if FileAccess.file_exists(ticks_path):
+		var t := _load_ticks(ticks_path)
+		s.candles = t["candles"]
+		s.books = t["books"]
+	else:
+		s.candles = _load_candles(path)
+		s.books = []
+	_update_book()
+	_refresh()
+	return i
 
 func remove_timeline(idx: int) -> void:
 	data.series.remove_at(idx)
