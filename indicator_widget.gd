@@ -124,23 +124,8 @@ func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	var e_end := w.y
 	if e_end - e_start < FFT_MIN_WINDOW or ind.predict < 1:
 		return
-	var key := "%d:%d:%d:%d:%d:%d" % [data.series.find(s), e_start, e_end, ind.predict, ind.waves, n]
-	if key != ind.cache_key:
-		if not _ensure_sim():
-			return
-		var closes := PackedFloat64Array()
-		closes.resize(e_end - e_start)
-		for i in range(e_end - e_start):
-			closes[i] = s.candles[e_start + i].close
-		var ret: Variant = _sim.call("fft_forecast", closes, 0, closes.size(), ind.predict, ind.waves)
-		var all: PackedFloat64Array = ret as PackedFloat64Array
-		if all.size() != closes.size() + ind.predict:
-			ind.fit = PackedFloat64Array()
-			ind.forecast = PackedFloat64Array()
-		else:
-			ind.fit = all.slice(0, closes.size())
-			ind.forecast = all.slice(closes.size())
-		ind.cache_key = key
+	if not _fft_ensure(ind, s):
+		return
 	var col := color_for(s, k)
 	if ind.fit.size() >= 2:
 		var fpts := PackedVector2Array()
@@ -164,23 +149,9 @@ func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
 # line over the full plot height: 1 = noise-like, near 0 = trending;
 # cached like the FFT, keyed by (series, period, m, candle count)
 func _draw_ks(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	if not _ks_ensure(ind, s):
+		return
 	var n: int = s.candles.size()
-	if n < 2:
-		return
-	var key := "%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.m, n]
-	if key != ind.cache_key:
-		if not _ensure_sim():
-			return
-		var closes := PackedFloat64Array()
-		closes.resize(n)
-		for i in n:
-			closes[i] = s.candles[i].close
-		var ret: Variant = _sim.call("perm_entropy", closes, ind.period, ind.m)
-		var vals: PackedFloat64Array = ret as PackedFloat64Array
-		ind.vals = vals if vals.size() == n else PackedFloat64Array()
-		ind.cache_key = key
-	if ind.vals.is_empty():
-		return
 	var ir := view.visible_index_range()
 	var i0 := maxi(0, int(floor(ir.x)))
 	var i1 := mini(int(ceil(ir.y)), n - 1)
@@ -194,6 +165,89 @@ func _draw_ks(ind: Indicator, s: PlotData.Series, k: int) -> void:
 		pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, r.end.y - v * r.size.y))
 	if pts.size() >= 2:
 		draw_polyline(pts, col, 1.5)
+
+# fills ind.vals for the series when the cache key is stale; false when
+# the value line cannot be computed (missing FFI, short series)
+func _ks_ensure(ind: Indicator, s: PlotData.Series) -> bool:
+	var n: int = s.candles.size()
+	if n < 2:
+		return false
+	var key := "%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.m, n]
+	if key == ind.cache_key:
+		return not ind.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var closes := PackedFloat64Array()
+	closes.resize(n)
+	for i in n:
+		closes[i] = s.candles[i].close
+	var ret: Variant = _sim.call("perm_entropy", closes, ind.period, ind.m)
+	var vals: PackedFloat64Array = ret as PackedFloat64Array
+	ind.vals = vals if vals.size() == n else PackedFloat64Array()
+	ind.cache_key = key
+	return not ind.vals.is_empty()
+
+# fills ind.fit/ind.forecast for the series when the cache key is stale;
+# false when the fit cannot be computed
+func _fft_ensure(ind: Indicator, s: PlotData.Series) -> bool:
+	var n: int = s.candles.size()
+	if n < FFT_MIN_WINDOW:
+		return false
+	var w := fft_window(ind, n)
+	var e_start := w.x
+	var e_end := w.y
+	if e_end - e_start < FFT_MIN_WINDOW or ind.predict < 1:
+		return false
+	var key := "%d:%d:%d:%d:%d:%d" % [data.series.find(s), e_start, e_end, ind.predict, ind.waves, n]
+	if key == ind.cache_key:
+		return not ind.fit.is_empty()
+	if not _ensure_sim():
+		return false
+	var closes := PackedFloat64Array()
+	closes.resize(e_end - e_start)
+	for i in range(e_end - e_start):
+		closes[i] = s.candles[e_start + i].close
+	var ret: Variant = _sim.call("fft_forecast", closes, 0, closes.size(), ind.predict, ind.waves)
+	var all: PackedFloat64Array = ret as PackedFloat64Array
+	if all.size() != closes.size() + ind.predict:
+		ind.fit = PackedFloat64Array()
+		ind.forecast = PackedFloat64Array()
+	else:
+		ind.fit = all.slice(0, closes.size())
+		ind.forecast = all.slice(closes.size())
+	ind.cache_key = key
+	return not ind.fit.is_empty()
+
+# indicator value for a series at candle index i, or null when undefined
+# there (SMA warm-up, KS NaN, FFT outside its fit/forecast range)
+func value_at(ind: Indicator, s: PlotData.Series, i: int) -> Variant:
+	if s.candles.is_empty() or i < 0 or i >= s.candles.size():
+		return null
+	if ind.kind == "SMA":
+		if i < ind.period - 1:
+			return null
+		var sum := 0.0
+		for j in range(i - ind.period + 1, i + 1):
+			sum += s.candles[j].close
+		return sum / ind.period
+	if ind.kind == "KS":
+		if not _ks_ensure(ind, s):
+			return null
+		var v: float = ind.vals[i]
+		return null if is_nan(v) else v
+	if ind.kind == "FFT":
+		var n: int = s.candles.size()
+		if n < FFT_MIN_WINDOW:
+			return null
+		var w := fft_window(ind, n)
+		if i < w.x:
+			return null
+		if not _fft_ensure(ind, s):
+			return null
+		if i < w.y:
+			return ind.fit[i - w.x] if i - w.x < ind.fit.size() else null
+		return ind.forecast[i - w.y] if i - w.y < ind.forecast.size() else null
+	return null
 
 # resolves the FFT window against a series length; end 0 (or past the
 # end) follows the series tail, negative start falls back to end - 256;

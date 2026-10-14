@@ -3,12 +3,13 @@ extends Control
 
 const FONT_SIZE := 12
 const LINE_H := 16.0
-const BLOCK_W := 420.0
+const BLOCK_W := 560.0
 const EXTRA_COL := Color(0.7, 0.72, 0.75)
 
 var view: ChartView
 var data: PlotData
 var cross: CrossWidget
+var indicators: IndicatorWidget
 var mode_text := ""
 var indicators_text := ""
 
@@ -34,6 +35,17 @@ func _draw() -> void:
 			view.fmt_price(c.open), view.fmt_price(c.high),
 			view.fmt_price(c.low), view.fmt_price(c.close),
 			VolumeWidget.fmt_vol(c.vol)]
+		if indicators != null and indicators.enabled:
+			for ind in indicators.indicators:
+				if not ind.enabled:
+					continue
+				var v: Variant = indicators.value_at(ind, s, i)
+				if v == null:
+					continue
+				if ind.kind == "KS":
+					txt += "  KS %.3f" % float(v)
+				else:
+					txt += "  %s %s" % [ind.kind, view.fmt_price(float(v))]
 		lines.append([txt, s.col_pos])
 	var extra: Array[String] = []
 	if not mode_text.is_empty():

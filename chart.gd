@@ -57,6 +57,7 @@ func _ready() -> void:
 	_sync_mode_hud()
 	_sync_indicator_hud()
 	cursor_widget.cross = cross_widget
+	cursor_widget.indicators = indicator_widget
 	view.layout(size)
 	sim_panel.timeline_added.connect(_on_timeline_added)
 	sim_panel.timeline_removed.connect(_on_timeline_removed)

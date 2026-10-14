@@ -92,6 +92,29 @@ bit-identically.
 - `--book-depth N` (50) — book levels per side recorded in tick rows;
   affects sidecar width only, not the simulation.
 
+## Chart indicators
+
+Indicators live in the right-click chart menu (`add SMA` / `add FFT` /
+`add KS`; per-indicator period/params, color, delete). The math runs in
+Haskell behind the FFI (`Sim.Fft`, `Sim.Entropy`), the widget only draws.
+The cursor tableau (top right) appends each enabled indicator's value at
+the hovered candle (or the replay head): `KS 0.871`, `SMA 1.02195`, etc.
+Values are blank during warm-up / outside the indicator's range.
+
+- **SMA** — simple moving average of closes over `period` candles,
+  drawn on the price scale.
+- **FFT** — ridge-LS fit of the top spectral bins inside a draggable
+  window (dashed handle lines) plus a dashed extrapolation for `predict`
+  candles. `waves` caps the harmonic count; `opt` searches the best
+  window/waves for the given prediction length.
+- **KS** — rolling permutation entropy (Bandt–Pompe) as a Kolmogorov-
+  Sinai proxy, normalized to 0..1 and drawn over the full plot height
+  (1 = noise-like, 0 = trending). `period` is the sliding window,
+  `m` (2–7, default 5) the ordinal-pattern length; NaN until the window
+  fills. Caveat: short windows cannot saturate — e.g. period 100 with
+  m=5 tops out around 0.87 (finite-sample, not a bug); use m=3 or a
+  wider window to reach ~1 on noise.
+
 ## Building / running
 
 - `nix build .#sim` — CLI (`result/bin/sim`)
