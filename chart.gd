@@ -28,6 +28,7 @@ var _fft_drag: Array = []
 var _menu: PopupPanel
 var _menu_box: VBoxContainer
 var _fft_spins := {}
+var _opt_rmse_pct := 50
 
 const PALETTE: Array[Color] = [
 	Color(0.56, 0.93, 0.56),
@@ -195,7 +196,8 @@ func _sync_indicator_hud() -> void:
 func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 	if ind.kind == "FFT":
 		var w := "x%d" % ind.waves if ind.waves > 0 else ""
-		return "FFT [%d..%d]+%d%s" % [ind.start, ind.end, ind.predict, w]
+		var sc := " (%.3f)" % ind.opt_score if ind.opt_score >= 0.0 else ""
+		return "FFT [%d..%d]+%d%s%s" % [ind.start, ind.end, ind.predict, w, sc]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -282,6 +284,11 @@ func _build_indicator_row(i: int) -> void:
 		lock.button_pressed = ind.locked
 		lock.toggled.connect(_on_menu_fft_lock.bind(i))
 		row.add_child(lock)
+		var opt := Button.new()
+		opt.text = "opt"
+		opt.tooltip_text = "search best window/waves for the prediction length"
+		opt.pressed.connect(_on_menu_fft_optimize.bind(i))
+		row.add_child(opt)
 	var del := Button.new()
 	del.text = "x"
 	del.tooltip_text = "delete"
@@ -295,6 +302,7 @@ func _build_indicator_row(i: int) -> void:
 		_fft_spins["end"] = _add_spin(grid, "end", ind.end, _on_menu_fft_value.bind(i, "end"))
 		_fft_spins["predict"] = _add_spin(grid, "predict", ind.predict, _on_menu_fft_value.bind(i, "predict"))
 		_fft_spins["waves"] = _add_spin(grid, "waves", ind.waves, _on_menu_fft_value.bind(i, "waves"))
+		_add_spin(grid, "opt rmse %", _opt_rmse_pct, _on_menu_opt_weight)
 	else:
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 	_menu_box.add_child(grid)
@@ -346,6 +354,39 @@ func _on_menu_ind_toggle(on: bool, i: int) -> void:
 func _on_menu_fft_lock(on: bool, i: int) -> void:
 	if i < indicator_widget.indicators.size():
 		indicator_widget.indicators[i].locked = on
+
+func _on_menu_opt_weight(v: float) -> void:
+	_opt_rmse_pct = clampi(int(v), 0, 100)
+
+func _on_menu_fft_optimize(i: int) -> void:
+	if i >= indicator_widget.indicators.size():
+		return
+	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[i]
+	if ind.kind != "FFT" or ind.predict < 1:
+		return
+	if not indicator_widget._ensure_sim():
+		return
+	var best_s: PlotData.Series = null
+	for s in data.series:
+		if best_s == null or s.candles.size() > best_s.candles.size():
+			best_s = s
+	if best_s == null or best_s.candles.size() < ind.predict * 2 + IndicatorWidget.FFT_MIN_WINDOW:
+		return
+	var closes := PackedFloat64Array()
+	closes.resize(best_s.candles.size())
+	for t in best_s.candles.size():
+		closes[t] = best_s.candles[t].close
+	var ret: Variant = indicator_widget._sim.call("fft_best", closes, ind.predict, _opt_rmse_pct)
+	var r: PackedFloat64Array = ret as PackedFloat64Array
+	if r.size() != 3:
+		return
+	ind.waves = int(r[1])
+	ind.end = best_s.candles.size()
+	ind.start = maxi(0, ind.end - int(r[0]))
+	ind.opt_score = r[2]
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
 
 func _on_menu_ind_delete(i: int) -> void:
 	indicator_widget.remove_indicator(i)

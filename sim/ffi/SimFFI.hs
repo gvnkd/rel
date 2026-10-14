@@ -11,7 +11,7 @@ import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import Sim.Csv (csvText, metaText, tickHeader, tickRowB, ticksPath)
-import Sim.Fft (fftApprox)
+import Sim.Fft (fftApprox, fftBest)
 import Sim.GenH (runSimH)
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
@@ -51,6 +51,24 @@ simFftForecast ptr (CInt count) (CInt start) (CInt end) (CInt predict) (CInt wav
         else do
           pokeArray out (map CDouble allOut)
           pure (CInt (fromIntegral (length allOut)))
+
+-- walk-forward search for the best (window, waves) pair for `predict`:
+-- writes [bestWindow, bestWaves, bestScore] into out, returns 1 on
+-- success, 0 when no candidate has a valid anchor
+foreign export ccall "sim_fft_best" simFftBest
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simFftBest :: Ptr CDouble -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simFftBest ptr (CInt count) (CInt predict) (CInt pct) out
+  | count <= 0 || predict <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let (win, waves, sc) = fftBest (fromIntegral pct) (fromIntegral predict) (map (\(CDouble d) -> d) closes)
+      if win <= 0
+        then pure 0
+        else do
+          pokeArray out [CDouble (fromIntegral win), CDouble (fromIntegral waves), CDouble sc]
+          pure 1
 
 {-# NOINLINE progressRef #-}
 progressRef :: IORef (Int, Int)

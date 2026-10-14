@@ -6,7 +6,7 @@ import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
-import Sim.Fft (corr, fftApprox, gram, solveLS)
+import Sim.Fft (corr, fftApprox, fftBest, fftForecast, gram, solveLS)
 import Sim.Gen
 import Sim.TickGen (runSimTicks)
 import Sim.Types
@@ -323,6 +323,22 @@ prop_fft_forecast_invalid xs =
       (f3, c3) = fftApprox 0 series 0 100 (-3)
   in null f1 && null c1 && null f2 && null c2 && null f3 && null c3
 
+-- the walk-forward search must find near-perfect parameters for an exact
+-- harmonic (its forecast is essentially exact, so the hybrid score ~ 0)
+prop_fft_best_finds_sinusoid :: Bool
+prop_fft_best_finds_sinusoid =
+  let n = 3000
+      f = 8 / 512 :: Double
+      sig t = 100 + 5 * cos (2 * pi * f * fromIntegral t)
+      closes = [sig t | t <- [0 .. n - 1]]
+      (w, k, sc) = fftBest 50 64 closes
+  in w > 0 && k > 0 && sc < 0.1
+
+-- a flat candidate set must yield the no-result sentinel
+prop_fft_best_no_data :: Bool
+prop_fft_best_no_data =
+  fftBest 50 64 [1 .. 100] == (0, 0, 0)
+
 main :: IO ()
 main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   [ property prop_no_crossed_book
@@ -348,4 +364,6 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_fft_forecast_bounded
   , property prop_fft_forecast_length
   , property prop_fft_forecast_invalid
+  , property prop_fft_best_finds_sinusoid
+  , property prop_fft_best_no_data
   ]

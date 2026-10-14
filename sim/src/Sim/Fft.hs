@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Sim.Fft (fftApprox, solveLS, gram, corr) where
+module Sim.Fft (fftApprox, fftBest, fftForecast, solveLS, gram, corr) where
 
 import Control.Monad (forM_, when)
 import Control.Monad.ST (ST, runST)
@@ -9,7 +9,7 @@ import Data.Array.MArray (newListArray, readArray, writeArray)
 import Data.Array.ST (STUArray, getElems)
 import Data.Bits (countTrailingZeros, setBit, testBit)
 import Data.Complex (Complex ((:+)), cis, magnitude)
-import Data.List (foldl', sortOn)
+import Data.List (foldl', minimumBy, sortOn)
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as VUM
 
@@ -23,8 +23,24 @@ minWindow = 16
 fftApprox :: Int -> [Double] -> Int -> Int -> Int -> ([Double], [Double])
 fftApprox waves series start end predict
   | predict < 1 = ([], [])
-  | n < minWindow = ([], [])
-  | otherwise = (VU.toList (VU.take n vals), VU.toList (VU.drop n vals))
+  | Just (n, mu, pairs) <- core waves series start end =
+      let vals = synth (n + predict) mu pairs
+      in (VU.toList (VU.take n vals), VU.toList (VU.drop n vals))
+  | otherwise = ([], [])
+
+-- forecast only, without synthesizing the in-window fit (half the work;
+-- used by the parameter search)
+fftForecast :: Int -> [Double] -> Int -> Int -> Int -> [Double]
+fftForecast waves series start end predict
+  | predict < 1 = []
+  | Just (n, mu, pairs) <- core waves series start end =
+      VU.toList (VU.drop n (synth (n + predict) mu pairs))
+  | otherwise = []
+
+core :: Int -> [Double] -> Int -> Int -> Maybe (Int, Double, [(Double, (Double, Double))])
+core waves series start end
+  | n < minWindow = Nothing
+  | otherwise = Just (n, mu, pairs)
   where
     len = length series
     lo = clamp 0 (len - 1) start
@@ -35,7 +51,61 @@ fftApprox waves series start end predict
     vysC = VU.map (subtract mu) vys
     freqs = topFreqs n vysC (resolveWaves waves n)
     pairs = zip freqs (pairUp (solveLS n (VU.toList vysC) freqs))
-    vals = synth (n + predict) mu pairs
+
+-- walk-forward parameter search: for every (window, waves) candidate,
+-- roll the forecast origin across the series and score each anchor by
+-- the hybrid objective
+--   score = w * relativeRMSE + (1 - w) * (1 - directionAccuracy)
+-- where w = rmsePct / 100. Returns (bestWindow, bestWaves, bestScore);
+-- (0, 0, 0) when no candidate has a single valid anchor
+fftBest :: Int -> Int -> [Double] -> (Int, Int, Double)
+fftBest rmsePct predict closes
+  | null scored = (0, 0, 0)
+  | otherwise = let (s, w, k) = minimumBy (\(a, _, _) (b, _, _) -> compare a b) scored
+                in (w, k, s)
+  where
+    len = length closes
+    vcloses = VU.fromList closes
+    w = clamp 0 1 (fromIntegral rmsePct / 100)
+    cands = bestGrid len predict
+    scored = [ (score w predict vcloses (win, k), win, k) | (win, k) <- cands ]
+
+bestGrid :: Int -> Int -> [(Int, Int)]
+bestGrid len predict =
+  [ (win, k)
+  | win <- dedup [ clamp minWindow (len - predict) (round (f * fromIntegral predict)) | f <- [2, 3, 4.5, 7, 11, 17] ]
+  , k <- dedup [ clamp 1 (max 1 (win `div` 8)) kw | kw <- [2, 4, 8, 16, 24, 32] ]
+  ]
+
+score :: Double -> Int -> VU.Vector Double -> (Int, Int) -> Double
+score w predict vcloses (win, waves) =
+  let len = VU.length vcloses
+      step = max 1 predict
+      anchors = [win, win + step .. len - predict]
+      one a =
+        let fc = fftForecast waves (VU.toList (VU.slice (a - win) win vcloses)) 0 win predict
+            act = VU.toList (VU.slice a predict vcloses)
+            scale = max 1e-9 (abs (head act))
+            rmse = sqrt (sum [ (p - x) ^ 2 | (p, x) <- zip fc act ] / fromIntegral predict) / scale
+        in w * rmse + (1 - w) * (1 - dirAcc fc act)
+  in if null anchors then 1e9 else sum (map one anchors) / fromIntegral (length anchors)
+
+-- fraction of candles where the predicted move direction matches the
+-- actual one (zero moves excluded)
+dirAcc :: [Double] -> [Double] -> Double
+dirAcc fc act =
+  let sgn x = if x > 0 then 1 :: Int else if x < 0 then -1 else 0
+      pairs = zip (zip fc (tail fc)) (zip act (tail act))
+      good = length [ () | ((a, b), (x, y)) <- pairs, sgn (b - a) /= 0, sgn (b - a) == sgn (y - x) ]
+      tot = length [ () | ((a, b), (x, y)) <- pairs, sgn (b - a) /= 0, sgn (y - x) /= 0 ]
+  in if tot == 0 then 0.5 else fromIntegral good / fromIntegral tot
+
+dedup :: Eq a => [a] -> [a]
+dedup = foldl' add []
+  where
+    add seen x
+      | x `elem` seen = seen
+      | otherwise = seen ++ [x]
 
 -- accumulates mu + the fitted waves into one unboxed vector; per point
 -- the rotation recurrence advances cos/sin with 4 multiplies, no trig

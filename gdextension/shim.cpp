@@ -8,6 +8,7 @@ extern "C" int sim_generate(const char *params, const char *out_path);
 extern "C" double sim_progress(void);
 extern "C" void sim_cancel(void);
 extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double *out);
+extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -57,6 +58,17 @@ public:
 		out.resize(got < 0 ? 0 : got);
 		return out;
 	}
+
+	godot::PackedFloat64Array fft_best(const godot::PackedFloat64Array &closes, int64_t predict, int64_t rmse_pct) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || predict < 1 || predict > 100000)
+			return out;
+		out.resize(3);
+		if (sim_fft_best(closes.ptr(), (int)closes.size(), (int)predict, (int)rmse_pct, out.ptrw()) == 1)
+			return out;
+		out.clear();
+		return out;
+	}
 };
 
 extern "C" {
@@ -70,7 +82,8 @@ GDExtensionBool GDE_EXPORT sim_native_init(
 	init_obj.register_initializer([](godot::ModuleInitializationLevel level) {
 		if (level == godot::MODULE_INITIALIZATION_LEVEL_SCENE) {
 			godot::ClassDB::register_class<SimNative>();
-		}
+		godot::ClassDB::bind_method(godot::D_METHOD("fft_best", "closes", "predict", "rmse_pct"), &SimNative::fft_best);
+	}
 	});
 	init_obj.set_minimum_library_initialization_level(godot::MODULE_INITIALIZATION_LEVEL_SCENE);
 
