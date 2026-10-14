@@ -9,10 +9,12 @@ class Indicator:
 	var end := 0
 	var predict := 50
 	var waves := 0
+	var m := 5
 	var locked := false
 	var opt_score := -1.0
 	var fit := PackedFloat64Array()
 	var forecast := PackedFloat64Array()
+	var vals := PackedFloat64Array()
 	var cache_key := ""
 
 const FFT_MIN_WINDOW := 16
@@ -90,6 +92,9 @@ func _draw() -> void:
 			if ind.kind == "FFT":
 				_draw_fft(ind, s, k)
 				continue
+			if ind.kind == "KS":
+				_draw_ks(ind, s, k)
+				continue
 			if s.candles.size() < ind.period:
 				continue
 			var col := color_for(s, k)
@@ -154,6 +159,41 @@ func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
 		pts.append(Vector2(view.index_to_x(e_end + j) + view.px_per_index / 2.0, view.price_to_y(ind.forecast[j])))
 	for j in range(pts.size() - 1):
 		draw_dashed_line(pts[j], pts[j + 1], col, 1.5, 4.0)
+
+# rolling KS entropy (permutation entropy, normalized to 0..1) drawn as a
+# line over the full plot height: 1 = noise-like, near 0 = trending;
+# cached like the FFT, keyed by (series, period, m, candle count)
+func _draw_ks(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var n: int = s.candles.size()
+	if n < 2:
+		return
+	var key := "%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.m, n]
+	if key != ind.cache_key:
+		if not _ensure_sim():
+			return
+		var closes := PackedFloat64Array()
+		closes.resize(n)
+		for i in n:
+			closes[i] = s.candles[i].close
+		var ret: Variant = _sim.call("perm_entropy", closes, ind.period, ind.m)
+		var vals: PackedFloat64Array = ret as PackedFloat64Array
+		ind.vals = vals if vals.size() == n else PackedFloat64Array()
+		ind.cache_key = key
+	if ind.vals.is_empty():
+		return
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := mini(int(ceil(ir.y)), n - 1)
+	var r := view.plot_rect
+	var col := color_for(s, k)
+	var pts := PackedVector2Array()
+	for i in range(i0, i1 + 1):
+		var v: float = ind.vals[i]
+		if is_nan(v):
+			continue
+		pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, r.end.y - v * r.size.y))
+	if pts.size() >= 2:
+		draw_polyline(pts, col, 1.5)
 
 # resolves the FFT window against a series length; end 0 (or past the
 # end) follows the series tail, negative start falls back to end - 256;

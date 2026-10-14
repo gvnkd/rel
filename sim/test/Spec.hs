@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Data.Bits (shiftL, shiftR, xor)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sort)
 import Data.Maybe (fromJust, listToMaybe)
@@ -7,6 +8,7 @@ import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
+import Sim.Entropy (permEntropy, rollingPermEntropy)
 import Sim.Fft (corr, fftApprox, fftBest, fftForecast, gram, solveLS)
 import Sim.Gen
 import Sim.GenH (runSimH)
@@ -407,6 +409,70 @@ prop_fft_best_no_data :: Bool
 prop_fft_best_no_data =
   fftBest 50 64 [1 .. 40] == (0, 0, 0)
 
+-- deterministic pseudo-noise (xorshift64*) shared by the entropy props
+lcgNoise :: [Double]
+lcgNoise = go (42 :: Word64)
+  where
+    go w = val : go w3
+      where
+        w1 = w `xor` (w `shiftL` 13)
+        w2 = w1 `xor` (w1 `shiftR` 7)
+        w3 = w2 `xor` (w2 `shiftL` 17)
+        val = fromIntegral ((w3 * 2685821657736338717) `shiftR` 11) / 9007199254740992 - 0.5
+
+-- a monotone series has a single ordinal pattern
+prop_ks_monotone_zero :: Bool
+prop_ks_monotone_zero = permEntropy 5 [1 .. 400] <= 1e-12
+
+-- a strict 2-cycle at m=4 has exactly two equally frequent ordinal
+-- patterns, so H = ln 2
+prop_ks_alternating_two_patterns :: Bool
+prop_ks_alternating_two_patterns =
+  abs (permEntropy 4 (take 400 (cycle [0, 1])) - log 2 / log 24) < 1e-3
+
+-- iid noise saturates ln(m!): finite-sample bias at n=2000, m=5 is
+-- ~0.03 in absolute H, so normalized stays well above 0.95
+prop_ks_iid_near_max :: Bool
+prop_ks_iid_near_max = permEntropy 5 (take 2000 lcgNoise) > 0.95
+
+-- rolling output: one entry per candle, NaN warm-up, and the last value
+-- matches the plain whole-window entropy
+prop_ks_rolling_matches_window :: Bool
+prop_ks_rolling_matches_window =
+  let xs = take 300 lcgNoise
+      win = 100
+      m = 4
+      r = rollingPermEntropy win m xs
+      ref = permEntropy m (drop (length xs - win) xs)
+  in length r == 300
+     && all isNaN (take (win - 1) r)
+     && not (isNaN (last r))
+     && abs (last r - ref) < 1e-12
+
+-- rolling over a short window tracks each window's entropy, not just the
+-- last one
+prop_ks_rolling_middle_matches :: Bool
+prop_ks_rolling_middle_matches =
+  let xs = take 260 lcgNoise
+      win = 60
+      m = 3
+      r = rollingPermEntropy win m xs
+      ok i = abs (r !! (i - 1) - permEntropy m (take win (drop (i - win) xs))) < 1e-12
+  in all ok [win, win + 40, win + 80, length xs]
+
+prop_ks_rolling_invalid :: Bool
+prop_ks_rolling_invalid =
+  let xs = take 100 lcgNoise
+      short = rollingPermEntropy 200 4 xs
+      badWin = rollingPermEntropy 2 5 xs
+      ys = take 60 lcgNoise
+      badM = rollingPermEntropy 50 99 ys
+      ref = permEntropy 7 (drop (60 - 50) ys)
+  in all isNaN short
+      && all isNaN badWin
+      && not (isNaN (last badM))
+      && abs (last badM - ref) < 1e-12
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -448,4 +514,10 @@ props =
   , ("fft_forecast_invalid", property prop_fft_forecast_invalid)
   , ("fft_best_finds_sinusoid", property prop_fft_best_finds_sinusoid)
   , ("fft_best_no_data", property prop_fft_best_no_data)
+  , ("ks_monotone_zero", property prop_ks_monotone_zero)
+  , ("ks_alternating_two_patterns", property prop_ks_alternating_two_patterns)
+  , ("ks_iid_near_max", property prop_ks_iid_near_max)
+  , ("ks_rolling_matches_window", property prop_ks_rolling_matches_window)
+  , ("ks_rolling_middle_matches", property prop_ks_rolling_middle_matches)
+  , ("ks_rolling_invalid", property prop_ks_rolling_invalid)
   ]

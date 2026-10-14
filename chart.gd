@@ -198,6 +198,8 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 		var w := "x%d" % ind.waves if ind.waves > 0 else ""
 		var sc := " (%.3f)" % ind.opt_score if ind.opt_score >= 0.0 else ""
 		return "FFT [%d..%d]+%d%s%s" % [ind.start, ind.end, ind.predict, w, sc]
+	if ind.kind == "KS":
+		return "KS (%d, m%d)" % [ind.period, ind.m]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -231,8 +233,12 @@ func _rebuild_menu() -> void:
 	var b_fft := Button.new()
 	b_fft.text = "add FFT"
 	b_fft.pressed.connect(_on_add_fft)
+	var b_ks := Button.new()
+	b_ks.text = "add KS"
+	b_ks.pressed.connect(_on_add_ks)
 	add_row.add_child(b_sma)
 	add_row.add_child(b_fft)
+	add_row.add_child(b_ks)
 	_menu_box.add_child(add_row)
 	if not data.series.is_empty():
 		_add_section("series")
@@ -303,6 +309,9 @@ func _build_indicator_row(i: int) -> void:
 		_fft_spins["predict"] = _add_spin(grid, "predict", ind.predict, _on_menu_fft_value.bind(i, "predict"))
 		_fft_spins["waves"] = _add_spin(grid, "waves", ind.waves, _on_menu_fft_value.bind(i, "waves"))
 		_add_spin(grid, "opt rmse %", _opt_rmse_pct, _on_menu_opt_weight)
+	elif ind.kind == "KS":
+		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
+		_add_spin(grid, "m", ind.m, _on_menu_ks_m.bind(i))
 	else:
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 	_menu_box.add_child(grid)
@@ -420,6 +429,18 @@ func _on_menu_fft_value(v: float, i: int, field: String) -> void:
 
 func _on_add_sma() -> void:
 	indicator_widget.add_indicator("SMA", 20)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_menu_ks_m(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].m = clampi(int(v), 2, 7)
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_add_ks() -> void:
+	indicator_widget.add_indicator("KS", 200)
 	_rebuild_menu()
 	_sync_indicator_hud()
 	_refresh()

@@ -14,6 +14,7 @@ library
                       Sim.TickGenH
                       Sim.Cli
                       Sim.Csv
+                      Sim.Entropy
                       Sim.Fft
                       Sim.Resume
     other-modules:    Sim.Internal

@@ -10,6 +10,7 @@ extern "C" double sim_progress(void);
 extern "C" void sim_cancel(void);
 extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double *out);
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
+extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -34,6 +35,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("progress"), &SimNative::progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("cancel"), &SimNative::cancel);
 		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves"), &SimNative::fft_forecast);
+		godot::ClassDB::bind_method(godot::D_METHOD("perm_entropy", "closes", "window", "m"), &SimNative::perm_entropy);
 	}
 
 public:
@@ -63,6 +65,16 @@ public:
 			return out;
 		out.resize((int)(closes.size() + predict));
 		int got = sim_fft_forecast(closes.ptr(), (int)closes.size(), (int)start, (int)end, (int)predict, (int)waves, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
+	}
+
+	godot::PackedFloat64Array perm_entropy(const godot::PackedFloat64Array &closes, int64_t window, int64_t m) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || window < 2 || m < 2)
+			return out;
+		out.resize((int)closes.size());
+		int got = sim_perm_entropy(closes.ptr(), (int)closes.size(), (int)window, (int)m, out.ptrw());
 		out.resize(got < 0 ? 0 : got);
 		return out;
 	}

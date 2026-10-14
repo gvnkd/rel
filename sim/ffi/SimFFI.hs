@@ -11,6 +11,7 @@ import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import Sim.Csv (csvRowsText, csvText, metaText, tickHeader, tickRowB, ticksPath)
+import Sim.Entropy (rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState, initState)
 import Sim.GenH (runSimH)
@@ -84,6 +85,24 @@ simFftBest ptr (CInt count) (CInt predict) (CInt pct) out
         else do
           pokeArray out [CDouble (fromIntegral win), CDouble (fromIntegral waves), CDouble sc]
           pure 1
+
+-- rolling normalized permutation entropy (KS proxy) over closes: writes
+-- `count` doubles into out (NaN until the window fills), returns count on
+-- success, 0 on invalid input
+foreign export ccall "sim_perm_entropy" simPermEntropy
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simPermEntropy :: Ptr CDouble -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simPermEntropy ptr (CInt count) (CInt win) (CInt m) out
+  | count <= 0 || win <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let vals = rollingPermEntropy (fromIntegral win) (fromIntegral m) (map (\(CDouble d) -> d) closes)
+      if length vals /= fromIntegral count
+        then pure 0
+        else do
+          pokeArray out (map CDouble vals)
+          pure (CInt (fromIntegral count))
 
 {-# NOINLINE progressRef #-}
 progressRef :: IORef (Int, Int)
