@@ -103,10 +103,21 @@ Values are blank during warm-up / outside the indicator's range.
 
 - **SMA** — simple moving average of closes over `period` candles,
   drawn on the price scale.
-- **FFT** — ridge-LS fit of the top spectral bins inside a draggable
-  window (dashed handle lines) plus a dashed extrapolation for `predict`
-  candles. `waves` caps the harmonic count; `opt` searches the best
-  window/waves for the given prediction length.
+- **FFT** — Fourier fit + forecast over a draggable window. Two dashed
+  vertical handle lines (`s:` / `e:`) mark the window; drag them to move
+  the edges, or enable `lock` to drag the whole range at a fixed width.
+  The solid light-colored curve inside the window is the ridge-LS fit of
+  the top spectral bins (frequencies snapped to exact DFT bins of the
+  window, low-passed at period ≥ 8 candles so per-candle noise is never
+  extrapolated); the dashed curve continues it for `predict` candles,
+  anchored at the fit's last point. `waves` caps the harmonic count
+  (0 = auto). `opt` runs a walk-forward search over (window, waves) for
+  the given `predict` length, scoring each candidate with the hybrid
+  objective `w·relRMSE + (1−w)·(1−direction accuracy)` where `w` is the
+  `opt rmse %` spin; the optimized window is placed so its prediction
+  overlaps the last 50 candles of real data, and the achieved score is
+  shown in the HUD, e.g. `FFT [1912..2950]+64x24 (0.031)` — read it as
+  in-sample, no forward guarantee.
 - **KS** — rolling permutation entropy (Bandt–Pompe) as a Kolmogorov-
   Sinai proxy, normalized to 0..1 and drawn over the full plot height
   (1 = noise-like, 0 = trending). `period` is the sliding window,
