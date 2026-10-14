@@ -276,6 +276,12 @@ func _build_indicator_row(i: int) -> void:
 	cb.button_pressed = ind.enabled
 	cb.toggled.connect(_on_menu_ind_toggle.bind(i))
 	row.add_child(cb)
+	if ind.kind == "FFT":
+		var lock := CheckBox.new()
+		lock.text = "lock"
+		lock.button_pressed = ind.locked
+		lock.toggled.connect(_on_menu_fft_lock.bind(i))
+		row.add_child(lock)
 	var del := Button.new()
 	del.text = "x"
 	del.tooltip_text = "delete"
@@ -336,6 +342,10 @@ func _on_menu_ind_toggle(on: bool, i: int) -> void:
 	indicator_widget.indicators[i].enabled = on
 	_sync_indicator_hud()
 	_refresh()
+
+func _on_menu_fft_lock(on: bool, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].locked = on
 
 func _on_menu_ind_delete(i: int) -> void:
 	indicator_widget.remove_indicator(i)
@@ -422,11 +432,25 @@ func _drag_fft_to(pos: Vector2) -> void:
 	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[_fft_drag[0]]
 	var i := maxi(0, int(round(view.x_to_index(pos.x))))
 	if _fft_drag[1] == 0:
-		ind.start = clampi(i - 1, 0, ind.end - IndicatorWidget.FFT_MIN_WINDOW)
+		var ns := clampi(i - 1, 0, ind.end - IndicatorWidget.FFT_MIN_WINDOW)
+		if ind.locked:
+			_shift_fft_window(ind, ns - ind.start)
+		else:
+			ind.start = ns
 	else:
-		ind.end = maxi(i, ind.start + IndicatorWidget.FFT_MIN_WINDOW)
+		var ne := maxi(i, ind.start + IndicatorWidget.FFT_MIN_WINDOW)
+		if ind.locked:
+			_shift_fft_window(ind, ne - ind.end)
+		else:
+			ind.end = ne
 	_sync_indicator_hud()
 	_refresh()
+
+# moves the whole FFT window by delta, clamping so start stays >= 0
+func _shift_fft_window(ind: IndicatorWidget.Indicator, delta: int) -> void:
+	var d := maxi(-ind.start, delta)
+	ind.start += d
+	ind.end += d
 
 
 func _process(delta: float) -> void:

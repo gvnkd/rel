@@ -9,6 +9,7 @@ class Indicator:
 	var end := 0
 	var predict := 50
 	var waves := 0
+	var locked := false
 	var fit := PackedFloat64Array()
 	var forecast := PackedFloat64Array()
 	var cache_key := ""
