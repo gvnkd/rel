@@ -6,9 +6,12 @@ import Data.ByteString.Builder (char8, hPutBuilder)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Foreign.C.String (CString, peekCString)
 import Foreign.C.Types (CDouble (..), CInt (..))
+import Foreign.Marshal.Array (peekArray, pokeArray)
+import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import Sim.Csv (csvText, metaText, tickHeader, tickRowB, ticksPath)
+import Sim.Fft (fftApprox)
 import Sim.GenH (runSimH)
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
@@ -29,6 +32,25 @@ foreign export ccall "sim_progress" simProgress :: IO CDouble
 
 -- request cancellation of the in-flight sim_generate (idempotent)
 foreign export ccall "sim_cancel" simCancel :: IO ()
+
+-- FFT fit + forecast over closes[start..end): writes (window length +
+-- predict) doubles — the ridge-LS fit over the window followed by the
+-- forecast — into out, returns the total count (0 on invalid input)
+foreign export ccall "sim_fft_forecast" simFftForecast
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simFftForecast :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simFftForecast ptr (CInt count) (CInt start) (CInt end) (CInt predict) (CInt waves) out
+  | count <= 0 || predict <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let (fit, fc) = fftApprox (fromIntegral waves) (map (\(CDouble d) -> d) closes) (fromIntegral start) (fromIntegral end) (fromIntegral predict)
+          allOut = fit ++ fc
+      if length fc /= fromIntegral predict
+        then pure 0
+        else do
+          pokeArray out (map CDouble allOut)
+          pure (CInt (fromIntegral (length allOut)))
 
 {-# NOINLINE progressRef #-}
 progressRef :: IORef (Int, Int)

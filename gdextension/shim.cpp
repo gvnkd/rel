@@ -1,11 +1,13 @@
 #include <godot_cpp/godot.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/packed_float64_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 
 extern "C" int sim_generate(const char *params, const char *out_path);
 extern "C" double sim_progress(void);
 extern "C" void sim_cancel(void);
+extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -28,6 +30,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("generate", "params", "out_path"), &SimNative::generate);
 		godot::ClassDB::bind_method(godot::D_METHOD("progress"), &SimNative::progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("cancel"), &SimNative::cancel);
+		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves"), &SimNative::fft_forecast);
 	}
 
 public:
@@ -43,6 +46,16 @@ public:
 
 	void cancel() {
 		sim_cancel();
+	}
+
+	godot::PackedFloat64Array fft_forecast(const godot::PackedFloat64Array &closes, int64_t start, int64_t end, int64_t predict, int64_t waves) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || predict < 1 || predict > 1000000)
+			return out;
+		out.resize((int)(closes.size() + predict));
+		int got = sim_fft_forecast(closes.ptr(), (int)closes.size(), (int)start, (int)end, (int)predict, (int)waves, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
 	}
 };
 

@@ -5,6 +5,16 @@ class Indicator:
 	var kind := "SMA"
 	var enabled := true
 	var period := 20
+	var start := 0
+	var end := 0
+	var predict := 50
+	var waves := 0
+	var fit := PackedFloat64Array()
+	var forecast := PackedFloat64Array()
+	var cache_key := ""
+
+const FFT_MIN_WINDOW := 16
+const HANDLE_TOL := 5.0
 
 const PERIODS: Array[int] = [5, 10, 20, 50, 100, 200]
 const IND_COLORS: Array[Color] = [
@@ -20,6 +30,15 @@ var view: ChartView
 var data: PlotData
 var enabled := true
 var indicators: Array[Indicator] = []
+var _sim: Object = null
+
+func _ensure_sim() -> bool:
+	if _sim != null:
+		return true
+	if not ClassDB.class_exists("SimNative"):
+		return false
+	_sim = ClassDB.instantiate("SimNative")
+	return _sim != null
 
 func _ready() -> void:
 	mouse_filter = MOUSE_FILTER_IGNORE
@@ -61,8 +80,15 @@ func _draw() -> void:
 		var ind: Indicator = indicators[k]
 		if not ind.enabled:
 			continue
+		if ind.kind == "FFT":
+			_draw_fft_handles(ind)
 		for s in data.series:
-			if not s.visible or s.candles.size() < ind.period:
+			if not s.visible:
+				continue
+			if ind.kind == "FFT":
+				_draw_fft(ind, s, k)
+				continue
+			if s.candles.size() < ind.period:
 				continue
 			var col := color_for(s, k)
 			var last := mini(i1, s.candles.size() - 1)
@@ -81,3 +107,89 @@ func _draw() -> void:
 					pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, view.price_to_y(sum / ind.period)))
 			if pts.size() >= 2:
 				draw_polyline(pts, col, 1.5)
+
+func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var n: int = s.candles.size()
+	if n < FFT_MIN_WINDOW:
+		return
+	var w := fft_window(ind, n)
+	var e_start := w.x
+	var e_end := w.y
+	if e_end - e_start < FFT_MIN_WINDOW or ind.predict < 1:
+		return
+	var key := "%d:%d:%d:%d:%d:%d" % [data.series.find(s), e_start, e_end, ind.predict, ind.waves, n]
+	if key != ind.cache_key:
+		if not _ensure_sim():
+			return
+		var closes := PackedFloat64Array()
+		closes.resize(e_end - e_start)
+		for i in range(e_end - e_start):
+			closes[i] = s.candles[e_start + i].close
+		var ret: Variant = _sim.call("fft_forecast", closes, 0, closes.size(), ind.predict, ind.waves)
+		var all: PackedFloat64Array = ret as PackedFloat64Array
+		if all.size() != closes.size() + ind.predict:
+			ind.fit = PackedFloat64Array()
+			ind.forecast = PackedFloat64Array()
+		else:
+			ind.fit = all.slice(0, closes.size())
+			ind.forecast = all.slice(closes.size())
+		ind.cache_key = key
+	var col := color_for(s, k)
+	if ind.fit.size() >= 2:
+		var fpts := PackedVector2Array()
+		for i in ind.fit.size():
+			fpts.append(Vector2(view.index_to_x(e_start + i) + view.px_per_index / 2.0, view.price_to_y(ind.fit[i])))
+		draw_polyline(fpts, col.lightened(0.55), 1.5)
+	if ind.forecast.is_empty():
+		return
+	var pts := PackedVector2Array()
+	pts.append(Vector2(view.index_to_x(e_end - 1) + view.px_per_index / 2.0, view.price_to_y(s.candles[e_end - 1].close)))
+	for j in ind.forecast.size():
+		pts.append(Vector2(view.index_to_x(e_end + j) + view.px_per_index / 2.0, view.price_to_y(ind.forecast[j])))
+	for j in range(pts.size() - 1):
+		draw_dashed_line(pts[j], pts[j + 1], col, 1.5, 4.0)
+
+# resolves the FFT window against a series length; 0 = auto (end = last
+# candle, start = end - 256)
+func fft_window(ind: Indicator, n: int) -> Vector2i:
+	var e_end := ind.end if ind.end > 0 else n
+	e_end = mini(e_end, n)
+	var e_start := ind.start if ind.start > 0 else maxi(0, e_end - 256)
+	e_start = clampi(e_start, 0, maxi(e_end - FFT_MIN_WINDOW, 0))
+	return Vector2i(e_start, e_end)
+
+func _handle_x(ind: Indicator, field: int, n: int) -> float:
+	var w := fft_window(ind, n)
+	var i := w.x if field == 0 else w.y - 1
+	return view.index_to_x(i) + view.px_per_index / 2.0
+
+func _draw_fft_handles(ind: Indicator) -> void:
+	var n := data.max_len()
+	if n < 1 or view == null:
+		return
+	var w := fft_window(ind, n)
+	var r := view.plot_rect
+	var font := ThemeDB.fallback_font
+	for field in 2:
+		var x := _handle_x(ind, field, n)
+		var i := w.x if field == 0 else w.y
+		var label := "s:%d" % i if field == 0 else "e:%d" % i
+		draw_dashed_line(Vector2(x, r.position.y), Vector2(x, r.end.y), Color(1, 1, 1, 0.35), 1.0, 4.0)
+		draw_string(font, Vector2(x + 4.0, r.position.y + 13.0), label, HORIZONTAL_ALIGNMENT_LEFT, 80.0, 12, Color(1, 1, 1, 0.6))
+
+# hit test for the draggable FFT window handles: returns
+# [indicator idx, field] or []
+func fft_handle_at(pos: Vector2) -> Array:
+	if not enabled or view == null:
+		return []
+	var r := view.plot_rect
+	if pos.y < r.position.y or pos.y > r.end.y:
+		return []
+	for k in indicators.size():
+		var ind: Indicator = indicators[k]
+		if not ind.enabled or ind.kind != "FFT":
+			continue
+		for field in 2:
+			if absf(pos.x - _handle_x(ind, field, data.max_len())) <= HANDLE_TOL:
+				return [k, field]
+	return []

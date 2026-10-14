@@ -6,6 +6,7 @@ import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
+import Sim.Fft (fftApprox)
 import Sim.Gen
 import Sim.TickGen (runSimTicks)
 import Sim.Types
@@ -207,6 +208,76 @@ validCandle c =
   && candleLow c <= min (candleOpen c) (candleClose c)
   && max (candleOpen c) (candleClose c) <= candleHigh c
 
+-- an exact harmonic over a power-of-two window must be continued almost
+-- exactly (FFT bin hits the frequency, LS refit recovers amplitude/phase)
+prop_fft_recovers_sinusoid :: Bool
+prop_fft_recovers_sinusoid =
+  let n = 256
+      f = 1 / 16 :: Double
+      sig t = 100 + 3 * cos (2 * pi * f * fromIntegral t)
+      series = [sig t | t <- [0 .. n - 1]]
+      (_, fc) = fftApprox 0 series 0 n 32
+      expect = [sig t | t <- [n .. n + 31]]
+  in length fc == 32 && maximum (map abs (zipWith (-) fc expect)) < 1e-6
+
+-- same, but the window sits at an offset inside a longer series
+prop_fft_recovers_sinusoid_offset :: Bool
+prop_fft_recovers_sinusoid_offset =
+  let n = 512
+      off = 100
+      f = 4 / 512 :: Double
+      sig t = 50 - 2 * sin (2 * pi * f * fromIntegral t)
+      series = [sig t | t <- [0 .. n - 1]]
+      (_, fc) = fftApprox 0 series off 356 16
+      expect = [sig t | t <- [356 .. 371]]
+  in length fc == 16 && maximum (map abs (zipWith (-) fc expect)) < 1e-6
+
+-- the in-window fit must reproduce the window itself
+prop_fft_fit_covers_window :: Bool
+prop_fft_fit_covers_window =
+  let n = 256
+      f = 1 / 16 :: Double
+      sig t = 100 + 3 * cos (2 * pi * f * fromIntegral t)
+      series = [sig t | t <- [0 .. n - 1]]
+      (fit, _) = fftApprox 0 series 0 n 32
+  in length fit == n && maximum (map abs (zipWith (-) fit series)) < 1e-6
+
+-- with waves=1 only the dominant bin is kept: a second, weaker harmonic
+-- must be projected out of the fit and forecast (bins are orthogonal
+-- over complete cycles)
+prop_fft_waves_limit :: Bool
+prop_fft_waves_limit =
+  let n = 512
+      f1 = 32 / 512 :: Double
+      f2 = 64 / 512 :: Double
+      sig t = 100 + 3 * cos (2 * pi * f1 * fromIntegral t) + 0.3 * cos (2 * pi * f2 * fromIntegral t)
+      main t = 100 + 3 * cos (2 * pi * f1 * fromIntegral t)
+      series = [sig t | t <- [0 .. n - 1]]
+      (fit, fc) = fftApprox 1 series 0 n 16
+      bad = maximum
+        (map abs (zipWith (-) fit (map main [0 .. n - 1]))
+           ++ map abs (zipWith (-) fc (map main [n .. n + 15])))
+  in bad < 1e-6
+
+-- length contract: full window -> (window, predict) points, short window
+-- or non-positive predict -> nothing
+prop_fft_forecast_length :: Int -> Int -> Int -> Property
+prop_fft_forecast_length total w p =
+  let total' = 16 + abs total `mod` 500
+      w' = abs w `mod` (total' + 1)
+      p' = abs p `mod` 100 + 1
+      series = map (sin . fromIntegral) [0 .. total' - 1]
+      (fit, fc) = fftApprox 0 series 0 w' p'
+  in (w' >= 16) ==> length fit == w' && length fc == p'
+
+prop_fft_forecast_invalid :: [Int] -> Bool
+prop_fft_forecast_invalid xs =
+  let series = map fromIntegral xs
+      (f1, c1) = fftApprox 0 series 0 100 0
+      (f2, c2) = fftApprox 0 series 0 5 10
+      (f3, c3) = fftApprox 0 series 0 100 (-3)
+  in null f1 && null c1 && null f2 && null c2 && null f3 && null c3
+
 main :: IO ()
 main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   [ property prop_no_crossed_book
@@ -223,4 +294,10 @@ main = mapM_ (quickCheckWith (stdArgs { maxSuccess = 500 }))
   , property prop_ticks_candles_match_runSim_percent
   , property prop_ticks_candles_match_runSim
   , property prop_ticks_book_snapshots
+  , property prop_fft_recovers_sinusoid
+  , property prop_fft_recovers_sinusoid_offset
+  , property prop_fft_fit_covers_window
+  , property prop_fft_waves_limit
+  , property prop_fft_forecast_length
+  , property prop_fft_forecast_invalid
   ]
