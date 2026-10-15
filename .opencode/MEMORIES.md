@@ -60,5 +60,5 @@ Order-book market sim. Redot (Godot fork) 26.2 = renderer + UI only; **Haskell (
 ## State / prefs
 
 - Master branch; commits only when Sergey asks (he says "commit"/"coomit"), push only when asked.
-- As of 2026-10-14: HEAD `c247211` (FFT: container menu, handles+lock, opt search, edge-weighted LS; KS entropy; resume) is local, NOT pushed; older `d17d4cc` note superseded.
+- As of 2026-10-15: HEAD `b1ee2c6` (sinus generator; on top of FFT/KS/resume stack) is local, NOT pushed.
 - Perf target: 100k candles × 1k orders ≈ 16.7s (mid-only baseline since 2026-10-13; was 11.7s under the removed opposite mode — mid reads both book sides per order, that gap is intrinsic). Regressions matter.
