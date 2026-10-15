@@ -15,6 +15,7 @@ import Sim.Gen
 import Sim.GenH (runSimH)
 import Sim.Csv (tickRow)
 import Sim.Resume (parseState, stateText)
+import Sim.Sinus (runSimSinus, sinusCandlesFrom, sinusPriceAt, sinusVolAt)
 import Sim.TickGen (runSimTicks)
 import Sim.TickGenH (runSimTicksH)
 import System.Exit (exitFailure, exitSuccess)
@@ -353,6 +354,81 @@ prop_fft_forecast_invalid xs =
       (f3, c3) = fftApprox 0 1 series 0 100 (-3)
   in null f1 && null c1 && null f2 && null c2 && null f3 && null c3
 
+-- sinus candles are always valid, strictly positive, and carry volume
+prop_sinus_candles_valid :: Int -> Int -> Int -> Int -> Bool
+prop_sinus_candles_valid period amp waves n =
+  let sp = sinusParams period amp waves n
+      cs = runSimSinus sp
+  in not (null cs)
+     && all (\c -> validCandle c
+                && unPrice (candleLow c) > 0
+                && unPrice (candleHigh c) > 0
+                && candleVol c > 0) cs
+
+-- with a single wave the closes repeat with the period (up to the 1-tick
+-- quantization of the sin evaluation)
+prop_sinus_periodicity :: Int -> Int -> Bool
+prop_sinus_periodicity period0 extra =
+  let per = 2 + abs period0 `mod` 100
+      n = per + abs extra `mod` 100
+      sp = (sinusParams period0 500 1 n) { spSinusPeriod = per }
+      cs = map (unPrice . candleClose) (runSimSinus sp)
+  in and [ abs (cs !! i - cs !! (i + per)) <= 1 | i <- [0 .. n - per - 1] ]
+
+-- closes track the composite formula within the quantization tick; the
+-- range stays inside [base - 2*amp, base + 2*amp]
+prop_sinus_matches_formula :: Int -> Int -> Int -> Int -> Bool
+prop_sinus_matches_formula period amp waves n =
+  let sp = sinusParams period amp waves n
+      cs = runSimSinus sp
+      base = fromIntegral (unPrice (spStartBid sp) + unPrice (spStartAsk sp)) / 2
+      ampTicks = min (base / 4) (base * fromIntegral (spSinusAmp sp) / 10000)
+      closeOk (i, c) =
+        abs (fromIntegral (unPrice (candleClose c)) - sinusPriceAt sp i) <= 1
+        && abs (fromIntegral (unPrice (candleClose c)) - base) <= 2 * ampTicks + 1
+      volOk (i, c) =
+        abs (fromIntegral (candleVol c) - sinusVolAt sp i) <= 1
+  in and (map closeOk (zip [0 ..] cs)) && and (map volOk (zip [0 ..] cs))
+
+-- volumes are periodic with the single-wave period and positive
+prop_sinus_volumes_periodic :: Int -> Int -> Bool
+prop_sinus_volumes_periodic period0 extra =
+  let per = 2 + abs period0 `mod` 100
+      n = per + abs extra `mod` 100
+      sp = (sinusParams period0 500 1 n) { spSinusPeriod = per }
+      vs = map candleVol (runSimSinus sp)
+  in all (> 0) vs
+     && and [ abs (vs !! i - vs !! (i + per)) <= 1 | i <- [0 .. n - per - 1] ]
+
+-- a resumed segment continues the exact sequence: the open of the first
+-- resumed candle chains the last close of the previous segment
+prop_sinus_segments_join :: Int -> Int -> Bool
+prop_sinus_segments_join n0 m0 =
+  let a = 1 + abs n0 `mod` 100
+      b = 1 + abs m0 `mod` 100
+      sp = (sinusParams 17 733 3 (a + b)) { spCandles = a + b }
+      whole = runSimSinus sp
+      joined = sinusCandlesFrom sp 0 a ++ sinusCandlesFrom sp a b
+  in whole == joined
+
+-- the sinus state snapshot round-trips with just params + done
+prop_sinus_state_roundtrip :: Int -> Bool
+prop_sinus_state_roundtrip n0 =
+  let sp = (sinusParams 23 611 2 50) { spCandles = 1 + abs n0 `mod` 100 }
+      done = abs n0 `mod` 50
+  in case parseState (stateText sp done (initState sp)) of
+       Left err -> error err
+       Right (sp', done', _gs) -> show sp == show sp' && done == done'
+
+sinusParams :: Int -> Int -> Int -> Int -> SimParams
+sinusParams period amp waves n = defaultParams
+  { spSinus = True
+  , spSinusPeriod = 2 + abs period `mod` 300
+  , spSinusAmp = abs amp `mod` 2000
+  , spSinusWaves = abs waves `mod` 6
+  , spCandles = 1 + abs n `mod` 200
+  }
+
 -- a resumed run continues the exact same sequence: two hooked segments
 -- (snapshotting the state in between) produce the same candles as one
 -- pure runSim of the combined length
@@ -537,6 +613,12 @@ props =
   , ("ticks_book_snapshots", property prop_ticks_book_snapshots)
   , ("resume_candles", property prop_resume_candles)
   , ("state_roundtrip", property prop_state_roundtrip)
+  , ("sinus_candles_valid", property prop_sinus_candles_valid)
+  , ("sinus_periodicity", property prop_sinus_periodicity)
+  , ("sinus_matches_formula", property prop_sinus_matches_formula)
+  , ("sinus_volumes_periodic", property prop_sinus_volumes_periodic)
+  , ("sinus_segments_join", property prop_sinus_segments_join)
+  , ("sinus_state_roundtrip", property prop_sinus_state_roundtrip)
   , ("resume_ticks", property prop_resume_ticks)
   , ("fft_recovers_sinusoid", property prop_fft_recovers_sinusoid)
   , ("fft_recovers_sinusoid_offset", property prop_fft_recovers_sinusoid_offset)

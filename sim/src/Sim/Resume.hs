@@ -14,7 +14,7 @@ module Sim.Resume
 import Data.List (intercalate)
 import qualified Data.Map.Strict as Map
 import Sim.Cli (applyArgs)
-import Sim.Gen (GenState (..))
+import Sim.Gen (GenState (..), initState)
 import Sim.Internal
 import Text.Read (readMaybe)
 
@@ -23,17 +23,25 @@ statePath path = case break (== '.') (reverse path) of
   (_, [])     -> path ++ ".state"
   (_, _ : rb) -> reverse rb ++ ".state"
 
+-- a sinus run has no live state: the sequence is closed-form, so the
+-- snapshot is just the params and the done count
 stateText :: SimParams -> Int -> GenState -> String
-stateText sp done gs = unlines $
-  [ "# rel sim state v1"
-  , "params=" ++ paramsString sp
-  , "done=" ++ show done
-  , "rng=" ++ show (gsRng gs)
-  , "anchor=" ++ show (unPrice (gsAnchor gs))
-  , "candle=" ++ candleString (gsCandle gs)
-  ]
-  ++ map (level "b") (Map.toDescList (bookBids (gsBook gs)))
-  ++ map (level "a") (Map.toAscList (bookAsks (gsBook gs)))
+stateText sp done gs
+  | spSinus sp = unlines
+      [ "# rel sim state v1"
+      , "params=" ++ paramsString sp
+      , "done=" ++ show done
+      ]
+  | otherwise = unlines $
+      [ "# rel sim state v1"
+      , "params=" ++ paramsString sp
+      , "done=" ++ show done
+      , "rng=" ++ show (gsRng gs)
+      , "anchor=" ++ show (unPrice (gsAnchor gs))
+      , "candle=" ++ candleString (gsCandle gs)
+      ]
+      ++ map (level "b") (Map.toDescList (bookBids (gsBook gs)))
+      ++ map (level "a") (Map.toAscList (bookAsks (gsBook gs)))
   where
     level s (p, v) = s ++ "=" ++ show (unPrice p) ++ "," ++ show (unVol v)
     candleString c = intercalate ","
@@ -62,6 +70,12 @@ paramsString sp = intercalate ";"
   , "clamp-rest=" ++ boolString (spClampRest sp)
   , "price-offset=" ++ offsetName (spPriceOffset sp)
   , "zero-floor=" ++ boolString (spZeroFloor sp)
+  , "sinus=" ++ boolString (spSinus sp)
+  , "sinus-period=" ++ show (spSinusPeriod sp)
+  , "sinus-amp=" ++ show (spSinusAmp sp)
+  , "sinus-waves=" ++ show (spSinusWaves sp)
+  , "sinus-vol-base=" ++ show (spSinusVolBase sp)
+  , "sinus-vol-amp=" ++ show (spSinusVolAmp sp)
   ]
 
 boolString :: Bool -> String
@@ -81,11 +95,14 @@ parseState content = do
   let ls = [ l | l@(c : _) <- lines content, c /= '#' ]
   sp   <- parseParams ls
   done <- parseKey "done" ls >>= readField "done"
-  rng  <- parseKey "rng" ls >>= readField "rng"
-  anch <- parseKey "anchor" ls >>= readField "anchor"
-  cnd  <- parseCandle =<< parseKey "candle" ls
-  book <- parseBook ls
-  pure (sp, done, GenState rng book cnd (Price anch))
+  if spSinus sp
+    then pure (sp, done, initState sp)
+    else do
+      rng  <- parseKey "rng" ls >>= readField "rng"
+      anch <- parseKey "anchor" ls >>= readField "anchor"
+      cnd  <- parseCandle =<< parseKey "candle" ls
+      book <- parseBook ls
+      pure (sp, done, GenState rng book cnd (Price anch))
   where
     readField :: Read a => String -> String -> Either String a
     readField k v = maybe (Left ("bad " ++ k ++ ": " ++ v)) Right (readMaybe v)

@@ -107,6 +107,12 @@ data SimParams = SimParams
   , spClampRest       :: !Bool
   , spPriceOffset     :: !PriceOffset
   , spZeroFloor       :: !Bool
+  , spSinus           :: !Bool
+  , spSinusPeriod     :: !Int
+  , spSinusAmp        :: !Int
+  , spSinusWaves      :: !Int
+  , spSinusVolBase    :: !Int
+  , spSinusVolAmp     :: !Int
   }
   deriving (Show)
 
@@ -130,6 +136,12 @@ defaultParams = SimParams
   , spClampRest       = False
   , spPriceOffset     = OffsetTicks
   , spZeroFloor       = False
+  , spSinus           = False
+  , spSinusPeriod     = 100
+  , spSinusAmp        = 500
+  , spSinusWaves      = 1
+  , spSinusVolBase    = 1000
+  , spSinusVolAmp     = 400
   }
 
 -- one row of the ticks export: a trade (tickVol > 0) or a book-only

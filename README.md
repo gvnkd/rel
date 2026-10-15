@@ -3,7 +3,8 @@
 Order-book market simulator. The Haskell package `rel-sim` (`sim/`) is the
 single source of truth for all business logic; Redot (Godot fork) is the
 renderer and UI only. One run produces OHLCV candles (and optionally a
-per-tick book-export sidecar) from a seeded order flow.
+per-tick book-export sidecar) from a seeded order flow — or, in sinus
+mode, from a closed-form harmonic signal with a known ground truth.
 
 ## Model
 
@@ -78,6 +79,35 @@ bit-identically.
   becomes one-sided (bids keep arriving, asks dry up) and the market tends
   to bounce off the floor rather than die. Without it, arithmetic offsets
   with a large `--tick-range` can print negative prices.
+
+### Sinus generator
+
+`--sinus on|off` (off) replaces the order-book flow with a pure sinus
+generator (`Sim.Sinus`): no book, no RNG — every candle is a closed-form
+function of its absolute index, so a run (or a resume) is reproducible
+trivially. Output is always the plain OHLCV csv; tick modes don't apply
+(a stale sidecar from an earlier same-name tick run is removed). Purpose:
+a ground-truth signal for validating indicators — FFT must recover the
+exact ladder frequencies, KS must read a clean cyclic series.
+
+- `--sinus-period N` (100) — wave-0 period in candles.
+- `--sinus-amp N` (500) — wave-0 amplitude in basis points of the start
+  mid. Clamped to a quarter of the base price, so the composite (whose
+  total swing is bounded by 2×amp) stays strictly positive; a 1-tick
+  floor backs that up.
+- `--sinus-waves N` (1) — harmonic count. Wave k has period
+  `max 2 (period/(k+1))` and amplitude `amp·0.5^k`, phases aligned: a
+  classic decaying harmonic ladder. Waves shorter than 8 candles fall
+  under the FFT indicator's hard low-pass — that boundary is deliberate.
+- `--sinus-vol-base N` (1000), `--sinus-vol-amp N` (400) — volumes follow
+  the same ladder a quarter cycle ahead (phase π/2, so volume peaks mid
+  price-move), floored at 1.
+
+Candle shape: opens chain closes; high/low = body ± a small fixed wick
+(`amp/20`, at least 1 tick) so wick-consuming indicators see non-trivial
+values. Resuming a sinus timeline continues the phase seamlessly (the
+first new candle's open chains the last written close). The UI exposes
+the same as a `sinus` checkbox plus five fields in the sim panel.
 
 ### Output
 

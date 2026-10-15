@@ -18,6 +18,11 @@ const PARAM_FIELDS := [
 	["buy-thresh", "buy thresh", "0.25"],
 	["sell-thresh", "sell thresh", "0.75"],
 	["book-depth", "book depth", "50"],
+	["sinus-period", "sinus period", "100"],
+	["sinus-amp", "sinus amp bp", "500"],
+	["sinus-waves", "sinus waves", "1"],
+	["sinus-vol-base", "sinus vol base", "1000"],
+	["sinus-vol-amp", "sinus vol amp", "400"],
 ]
 
 const MODES := ["candles", "tick-trades", "tick-steps"]
@@ -37,6 +42,7 @@ var mode_option: OptionButton
 var clamp_check: CheckBox
 var price_offset_option: OptionButton
 var zero_floor_check: CheckBox
+var sinus_check: CheckBox
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -98,6 +104,12 @@ func _build_ui() -> void:
 	grid.add_child(zero_floor_label)
 	zero_floor_check = CheckBox.new()
 	grid.add_child(zero_floor_check)
+
+	var sinus_label := Label.new()
+	sinus_label.text = "sinus"
+	grid.add_child(sinus_label)
+	sinus_check = CheckBox.new()
+	grid.add_child(sinus_check)
 
 	var gen_btn := Button.new()
 	gen_btn.text = "Generate"
@@ -201,6 +213,7 @@ func _params_string() -> String:
 	parts.append("clamp-rest=%s" % ("on" if clamp_check.button_pressed else "off"))
 	parts.append("price-offset=%s" % PRICE_OFFSETS[price_offset_option.selected])
 	parts.append("zero-floor=%s" % ("on" if zero_floor_check.button_pressed else "off"))
+	parts.append("sinus=%s" % ("on" if sinus_check.button_pressed else "off"))
 	return ";".join(parts)
 
 func _on_generate() -> void:

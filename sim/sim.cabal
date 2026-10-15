@@ -10,6 +10,7 @@ library
                       Sim.Engine
                       Sim.Gen
                       Sim.GenH
+                      Sim.Sinus
                       Sim.TickGen
                       Sim.TickGenH
                       Sim.Cli

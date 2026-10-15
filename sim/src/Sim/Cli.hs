@@ -40,6 +40,9 @@ applyArgs = go defaultParams
     go p ("--zero-floor" : v : rest) = case parseBool v of
       Just b  -> go p { spZeroFloor = b } rest
       Nothing -> Left ("invalid --zero-floor value (expected on|off): " ++ v)
+    go p ("--sinus" : v : rest) = case parseBool v of
+      Just b  -> go p { spSinus = b } rest
+      Nothing -> Left ("invalid --sinus value (expected on|off): " ++ v)
     go p ("--price-offset" : v : rest) = case parsePriceOffset v of
       Just o  -> go p { spPriceOffset = o } rest
       Nothing -> Left ("invalid --price-offset value (expected ticks|percent): " ++ v)
@@ -59,6 +62,11 @@ setters =
   , ("--start-vol",         \x s -> s { spStartVol = fromMaybeDefault s (mkVol x) })
   , ("--price-scale",       \x s -> s { spPriceScale = x })
   , ("--book-depth",        \x s -> s { spBookDepth = x })
+  , ("--sinus-period",      \x s -> s { spSinusPeriod = x })
+  , ("--sinus-amp",         \x s -> s { spSinusAmp = x })
+  , ("--sinus-waves",       \x s -> s { spSinusWaves = x })
+  , ("--sinus-vol-base",    \x s -> s { spSinusVolBase = x })
+  , ("--sinus-vol-amp",     \x s -> s { spSinusVolAmp = x })
   ]
 
 parseMode :: String -> Maybe SimMode
@@ -109,6 +117,15 @@ usage = unlines
   , "                         (default ticks)"
   , "  --zero-floor B         on | off — agents refuse to rest orders at a"
   , "                         non-positive price (default off)"
+  , "  --sinus B              on | off — pure sinus generator instead of the"
+  , "                         order-book flow: no book, no RNG (default off)"
+  , "  --sinus-period N       wave-0 period in candles (default 100)"
+  , "  --sinus-amp N          wave-0 amplitude, basis points of the start"
+  , "                         mid (default 500)"
+  , "  --sinus-waves N        harmonic count: wave k has period period/k"
+  , "                         and amplitude amp*0.5^k (default 1)"
+  , "  --sinus-vol-base N     base volume per candle (default 1000)"
+  , "  --sinus-vol-amp N      wave-0 volume amplitude (default 400)"
   , "output: CSV on stdout (open,high,low,close,vol); in tick modes the UI"
   , "  additionally writes <out>.ticks.csv next to the candles file"
   ]

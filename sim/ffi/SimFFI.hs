@@ -16,6 +16,7 @@ import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState, initState)
 import Sim.GenH (runSimH)
 import Sim.Resume (readState, statePath, writeState)
+import Sim.Sinus (runSimSinusH)
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (Candle, SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
 import System.Directory (doesFileExist, getFileSize, removeFile)
@@ -175,21 +176,28 @@ simContinue paramsPtr outPtr = do
 writeCsv :: FilePath -> SimParams -> IO ()
 writeCsv path p = do
   write (path ++ ".meta") (metaText p)
-  case spMode p of
-    ModeCandles -> do
-      -- a candles-mode run leaves no sidecar: drop a stale one from an
-      -- earlier same-name tick-mode run, or the UI would load it instead
+  if spSinus p
+    then do
+      -- sinus output is plain candles: drop a stale tick sidecar
       rm (ticksPath path)
-      (gs, cs) <- runSimH simHooks p (initState p)
+      cs <- runSimSinusH simHooks p 0
       write path (csvText p cs)
-      writeState (statePath path) p (length cs) gs
-    _           -> do
-      (gs, cs) <- withFile (ticksPath path) WriteMode $ \h -> do
-        hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
-        hPutStr h (tickHeader (spBookDepth p) ++ "\n")
-        runSimTicksH simHooks (emitTick h) p 0 (initState p)
-      write path (csvText p cs)
-      writeState (statePath path) p (length cs) gs
+      writeState (statePath path) p (length cs) (initState p)
+    else case spMode p of
+      ModeCandles -> do
+        -- a candles-mode run leaves no sidecar: drop a stale one from an
+        -- earlier same-name tick-mode run, or the UI would load it instead
+        rm (ticksPath path)
+        (gs, cs) <- runSimH simHooks p (initState p)
+        write path (csvText p cs)
+        writeState (statePath path) p (length cs) gs
+      _           -> do
+        (gs, cs) <- withFile (ticksPath path) WriteMode $ \h -> do
+          hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
+          hPutStr h (tickHeader (spBookDepth p) ++ "\n")
+          runSimTicksH simHooks (emitTick h) p 0 (initState p)
+        write path (csvText p cs)
+        writeState (statePath path) p (length cs) gs
   where
     rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
     write fp s = withFile fp WriteMode $ \h -> hPutStr h s
@@ -207,20 +215,26 @@ writeCsv path p = do
 -- state and how many candles were produced.
 appendCsv :: FilePath -> SimParams -> Int -> GenState -> IO (GenState, Int)
 appendCsv path p done gs0 = do
-  case spMode p of
-    ModeCandles -> do
+  if spSinus p
+    then do
       rm (ticksPath path)
-      (gs, cs) <- runSimH simHooks p gs0
+      cs <- runSimSinusH simHooks p done
       appendCandles path p cs
-      pure (gs, length cs)
-    _           -> do
-      exists <- doesFileExist sidecar
-      (gs, cs) <- withFile sidecar AppendMode $ \h -> do
-        hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
-        unless exists $ hPutStr h (tickHeader (spBookDepth p) ++ "\n")
-        runSimTicksH simHooks (emitTick h) p done gs0
-      appendCandles path p cs
-      pure (gs, length cs)
+      pure (gs0, length cs)
+    else case spMode p of
+      ModeCandles -> do
+        rm (ticksPath path)
+        (gs, cs) <- runSimH simHooks p gs0
+        appendCandles path p cs
+        pure (gs, length cs)
+      _           -> do
+        exists <- doesFileExist sidecar
+        (gs, cs) <- withFile sidecar AppendMode $ \h -> do
+          hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
+          unless exists $ hPutStr h (tickHeader (spBookDepth p) ++ "\n")
+          runSimTicksH simHooks (emitTick h) p done gs0
+        appendCandles path p cs
+        pure (gs, length cs)
   where
     sidecar = ticksPath path
     rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
@@ -253,13 +267,15 @@ readSidecarSize path = do
 -- undo a partially streamed sidecar after a cancellation: truncate back
 -- to the recorded size (or remove a file that did not exist before)
 restoreSidecar :: FilePath -> SimParams -> IO ()
-restoreSidecar path p = case spMode p of
-  ModeCandles -> pure ()
-  _           -> do
-    sz <- readIORef sidecarSizeRef
-    case sz of
-      Nothing -> rm sidecar
-      Just n  -> withFile sidecar AppendMode (`hSetFileSize` n)
+restoreSidecar path p
+  | spSinus p = pure ()
+  | otherwise = case spMode p of
+      ModeCandles -> pure ()
+      _           -> do
+        sz <- readIORef sidecarSizeRef
+        case sz of
+          Nothing -> rm sidecar
+          Just n  -> withFile sidecar AppendMode (`hSetFileSize` n)
   where
     sidecar = ticksPath path
     rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
@@ -270,7 +286,7 @@ cleanup path p = mapM_ rm (path : (path ++ ".meta") : sidecar)
   where
     sidecar = case spMode p of
       ModeCandles -> []
-      _           -> [ticksPath path]
+      _           -> [ticksPath path | not (spSinus p)]
     rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
 
 toArgs :: String -> [String]
