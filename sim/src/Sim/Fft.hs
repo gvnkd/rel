@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Sim.Fft (fftApprox, fftBest, fftForecast, solveLS, gram, gramW, corr, corrWV, rampMass) where
+module Sim.Fft (fftApprox, fftBest, fftForecast, solveLS, gram, gramW, corr, corrWV, rampMass, refinePeaks) where
 
 import Control.Monad (forM_, when)
 import Control.Monad.ST (ST, runST)
@@ -42,7 +42,7 @@ fftForecast waves edgeW series start end predict
 core :: Int -> Double -> [Double] -> Int -> Int -> Maybe (Int, Double, [(Double, (Double, Double))])
 core waves edgeW series start end
   | n < minWindow = Nothing
-  | otherwise = Just (n, mu, pairs)
+  | otherwise = Just (n, mu + c0, pairs)
   where
     len = length series
     lo = clamp 0 (len - 1) start
@@ -51,8 +51,25 @@ core waves edgeW series start end
     vys = VU.fromList (take n (drop lo series))
     mu = VU.sum vys / fromIntegral n
     vysC = VU.map (subtract mu) vys
-    freqs = topFreqs n vysC (resolveWaves waves n)
-    pairs = zip freqs (pairUp (solveLS n edgeW (VU.toList vysC) freqs))
+    k = resolveWaves waves n
+    peaks = topPeaks n vysC k
+    snapped = map fst peaks
+    refined = if k <= 16 then refinePeaks n vysC peaks else snapped
+    -- refined frequencies must win by a margin: a near-bin refinement
+    -- only absorbs harmonic leakage (small relative gain), while a
+    -- genuinely misplaced snap gains orders of magnitude -- so the
+    -- margin keeps exact-bin projections orthogonal without blocking
+    -- real corrections
+    freqs = if 10 * sseOf refined < 9 * sseOf snapped then refined else snapped
+    ys = VU.toList vysC
+    xf = solveLSI n edgeW ys freqs
+    (c0, pairs) = case xf of
+      (c : rest) -> (c, zip freqs (pairUp rest))
+      [] -> (0, [])
+    yy = VU.sum (VU.map (\v -> v * v) vysC)
+    sseOf fs =
+      let (g, b, x') = solveGBI n 1 ys fs
+      in yy - 2 * dotL b x' + quadL g x'
 
 -- walk-forward parameter search: for every (window, waves) candidate,
 -- roll the forecast origin across the series and score each anchor by
@@ -149,26 +166,41 @@ clamp :: Ord a => a -> a -> a -> a
 clamp lo hi = max lo . min hi
 
 -- top-k spectral bins (by magnitude) of the zero-padded window, snapped
--- to exact window DFT bins (f = q / n) and de-duplicated; the snapped
--- cos/sin columns are exactly orthogonal over the window, so the least
--- squares solve cannot produce runaway coefficients. A hard low-pass
--- drops bins with period under 8 candles: on candle data the upper
--- spectrum is per-candle noise, and fitting it makes the forecast jitter
--- instead of continuing the visible structure (iterative in-place
+-- to exact window DFT bins (f = q / n); the snapped cos/sin columns are
+-- exactly orthogonal over the window, so the least squares solve cannot
+-- produce runaway coefficients. Returns the snapped frequency paired
+-- with the zero-padded peak position (j / m, twice the resolution --
+-- snapping round(j * n / m) can land a full bin off the true peak when
+-- the padded peak sits near a bin edge). Picks are non-maximum
+-- suppressed within +-m/n padded bins so one strong wave's mainlobe
+-- straddle cannot starve weaker harmonics of the top-k slots. A hard
+-- low-pass drops bins with period under 8 candles: on candle data the
+-- upper spectrum is per-candle noise, and fitting it makes the forecast
+-- jitter instead of continuing the visible structure (iterative in-place
 -- unboxed FFT)
-topFreqs :: Int -> VU.Vector Double -> Int -> [Double]
-topFreqs n vys k =
+topPeaks :: Int -> VU.Vector Double -> Int -> [(Double, Double)]
+topPeaks n vys k =
   let m = nextPow2 n
       spec = fftV m vys
       bins = [ (j, magnitude (spec VU.! j)) | j <- [1 .. m `div` 2] ]
-      top = take k (sortOn (negate . snd) bins)
-      snapped = dedup [ round (fromIntegral j * fromIntegral n / fromIntegral m) | (j, _) <- top ]
-  in [ fromIntegral q / fromIntegral n | q <- snapped, q > 0, 2 * q < n, q <= n `div` 8 ]
+      ranked = sortOn (negate . snd) bins
+      chosen = pick [] [] ranked
+      snapped = dedup
+        [ (round (fromIntegral j * fromIntegral n / fromIntegral m), fp)
+        | (j, fp) <- chosen ]
+  in [ (fromIntegral q / fromIntegral n, fp)
+     | (q, fp) <- snapped, q > 0, 2 * q < n, q <= n `div` 8 ]
   where
+    rad = max 1 ((nextPow2 n + n - 1) `div` n)
+    pick _ acc [] = reverse acc
+    pick seen acc ((j, _) : rest)
+      | length acc >= k = reverse acc
+      | any (\t -> abs (t - j) <= rad) seen = pick seen acc rest
+      | otherwise = pick (j : seen) ((j, fromIntegral j / fromIntegral (nextPow2 n)) : acc) rest
     dedup = foldl' add []
-    add seen q
-      | q `elem` seen = seen
-      | otherwise = seen ++ [q]
+    add seen p@(q, _)
+      | any ((== q) . fst) seen = seen
+      | otherwise = seen ++ [p]
 
 fftV :: Int -> VU.Vector Double -> VU.Vector (Complex Double)
 fftV m vys = runST $ do
@@ -214,6 +246,107 @@ corr _ ys w = go 1 0 0 0 ys
 corrV :: VU.Vector Double -> Double -> (Double, Double)
 corrV vys w = corrWV (VU.length vys) vys 1 w
 
+-- correlations of the intercept-extended design [1, cos/sin pairs]: the
+-- head is the weighted sum of ys
+corrWI :: Int -> VU.Vector Double -> Double -> [Double] -> [Double]
+corrWI n vys edgeW ws = wsumY : concatMap (\w -> let (c, s) = corrWV n vys edgeW w in [c, s]) ws
+  where
+    h = max 2 (n `div` 128)
+    a = max 0 (edgeW - 1)
+    wt i =
+      let li = 1 - fromIntegral i / fromIntegral h
+          ri = 1 - fromIntegral (n - 1 - i) / fromIntegral h
+      in 1 + a * max 0 (max li ri)
+    wsumY = go 0 0
+      where
+        go !i !acc
+          | i >= n = acc
+          | otherwise = go (i + 1) (acc + wt i * vys VU.! i)
+
+-- refine the strongest detected bins by local energy maximization near
+-- the zero-padded peak position (within one window bin: the padded
+-- estimate is already within half a padded bin of the true frequency,
+-- and the snapped grid can sit a full bin off). The snapped grid is 1/n
+-- coarse, so a signal whose period does not divide the window lands up
+-- to half a bin off its true frequency and the fitted curve drifts out
+-- of phase toward the window edges (worst at frac(n/p) ~ 0.5). The top
+-- two bins are refined sequentially against the residual of the
+-- already-refined component; further bins stay snapped. A refined value
+-- colliding with another bin (closer than half a window bin) falls back
+-- to the snapped grid, keeping the near-orthogonal safety of the solve
+-- intact. Callers pick between snapped and refined by in-window SSE, so
+-- a noise-displaced refinement can never beat an exact snapped bin.
+refinePeaks :: Int -> VU.Vector Double -> [(Double, Double)] -> [Double]
+refinePeaks _ _ [] = []
+refinePeaks n vys peaks = go vys [] peaks
+  where
+    half = 0.5 / fromIntegral n
+    go _ done ps
+      | length done >= 2 = map fst ps
+    go resid done ((fs, fp) : rest) =
+      let cand = refineOne n resid fp
+          f = if any (\h -> abs (cand - h) < half) (done ++ map fst rest) then fs else cand
+      in f : go (subtractComp n resid f) (done ++ [f]) rest
+    go _ _ [] = []
+
+-- peak of the single-component LS energy within one window bin of the
+-- zero-padded peak position f0 (ternary search; the Dirichlet mainlobe
+-- is unimodal there). The objective is the explained energy of the
+-- sinusoid part under the intercept model -- centering the columns
+-- against the constant -- not the plain correlation energy c^2+s^2:
+-- off the exact bins the cos/sin columns are neither orthogonal nor
+-- equal-norm, and the raw-energy peak is displaced by up to ~0.1 bin at
+-- low frequencies
+refineOne :: Int -> VU.Vector Double -> Double -> Double
+refineOne n vys f0 = go (f0 - rad) (f0 + rad) 80
+  where
+    rad = 1 / fromIntegral n
+    ones = VU.replicate n 1
+    n' = fromIntegral n
+    e f =
+      let w = 2 * pi * f
+          (c1, s1) = corrV ones w
+          (rc, rs) = corrV ones (2 * w)
+          (bc, bs) = corrV vys w
+          sy = VU.sum vys
+          g11 = (n' + rc) / 2 - c1 * c1 / n'
+          g22 = (n' - rc) / 2 - s1 * s1 / n'
+          g12 = rs / 2 - c1 * s1 / n'
+          bc' = bc - c1 * sy / n'
+          bs' = bs - s1 * sy / n'
+          det = g11 * g22 - g12 * g12
+      in (bc' * bc' * g22 + bs' * bs' * g11 - 2 * bc' * bs' * g12) / det
+    go a b it
+      | it <= (0 :: Int) = (a + b) / 2
+      | otherwise =
+          let m1 = a + (b - a) / 3
+              m2 = b - (b - a) / 3
+          in if e m1 < e m2 then go m1 b (it - 1) else go a m2 (it - 1)
+
+-- remove the LS-fitted sinusoid part at frequency f from vys under the
+-- intercept model (centered 2x2 closed forms); the fitted intercept is
+-- left in the residual -- it is the shared DC, the next component's
+-- refinement handles it via the centered objective
+subtractComp :: Int -> VU.Vector Double -> Double -> VU.Vector Double
+subtractComp n vys f = VU.imap (\i y -> y - a * cos (w * t i) - b * sin (w * t i)) vys
+  where
+    w = 2 * pi * f
+    t i = fromIntegral i
+    ones = VU.replicate n 1
+    n' = fromIntegral n
+    (c1, s1) = corrV ones w
+    (rc, rs) = corrV ones (2 * w)
+    sy = VU.sum vys
+    g11 = (n' + rc) / 2 - c1 * c1 / n'
+    g22 = (n' - rc) / 2 - s1 * s1 / n'
+    g12 = rs / 2 - c1 * s1 / n'
+    (bc, bs) = corrV vys w
+    bc' = bc - c1 * sy / n'
+    bs' = bs - s1 * sy / n'
+    det = g11 * g22 - g12 * g12
+    a = (g22 * bc' - g12 * bs') / det
+    b = (g11 * bs' - g12 * bc') / det
+
 -- weighted variant: edgeW > 1 scales normalized ramps at both ends (the
 -- bump mass equals the window length, so edgeW reads as "one edge candle
 -- counts as ~edgeW bulk candles")
@@ -238,6 +371,52 @@ corrWV n vys edgeW w = go 0 1 0 0 0
 -- every entry an O(1) closed form via geometric and
 -- arithmetico-geometric sums. Frequencies are assumed on exact window
 -- DFT bins in production, but the kernels are phase-wrapped and total.
+-- weighted sums sum w_t cos(c t) / sum w_t sin(c t) over t = 0..n-1
+-- with weights 1 + (edgeW-1) * edge ramps (closed forms via the
+-- Dirichlet kernel and geometric / arithmetico-geometric sums, phases
+-- wrapped so multiples of 2*pi hit the guards instead of the sin(c/2)
+-- pole)
+wCos :: Int -> Double -> Double -> Double
+wCos n edgeW c0 = base + a * rampReal n h c
+  where
+    c = wrap c0
+    n' = fromIntegral n
+    h = max 2 (n `div` 128)
+    a = max 0 (edgeW - 1)
+    base
+      | abs c < 1e-12 = n'
+      | otherwise = sin (n' * c / 2) * cos ((n' - 1) * c / 2) / sin (c / 2)
+
+wSin :: Int -> Double -> Double -> Double
+wSin n edgeW c0 = base + a * rampImag n h c
+  where
+    c = wrap c0
+    n' = fromIntegral n
+    h = max 2 (n `div` 128)
+    a = max 0 (edgeW - 1)
+    base
+      | abs c < 1e-12 = 0
+      | otherwise = sin (n' * c / 2) * sin ((n' - 1) * c / 2) / sin (c / 2)
+
+-- reduce to (-pi, pi] so multiples of 2*pi hit the guards instead of
+-- the sin(x/2) pole
+wrap :: Double -> Double
+wrap x = x - 2 * pi * fromIntegral (round (x / (2 * pi)))
+
+rampReal :: Int -> Int -> Double -> Double
+rampReal n h c = realPart lc + realPart (mirror n c lc)
+  where
+    lc = leftRamp h n c
+
+rampImag :: Int -> Int -> Double -> Double
+rampImag n h c = imagPart lc + imagPart (mirror n c lc)
+  where
+    lc = leftRamp h n c
+
+-- right ramp = left ramp mirrored about the last candle
+mirror :: Int -> Double -> Complex Double -> Complex Double
+mirror n c lc = cis (c * fromIntegral (n - 1)) * conjugate lc
+
 gram :: Int -> [Double] -> [[Double]]
 gram n ws = gramW n 1 ws
 
@@ -245,15 +424,9 @@ gramW :: Int -> Double -> [Double] -> [[Double]]
 gramW n edgeW ws = [ [ entry i j | j <- [0 .. m - 1] ] | i <- [0 .. m - 1] ]
   where
     m = 2 * length ws
-    n' = fromIntegral n
-    -- almost point weights at both edges (a candle or two of falloff):
-    -- leverage at the boundary is 2*k*w0/sum(w), so with a rich basis
-    -- (high wave count) even moderate edgeW pins the endpoints, while a
-    -- wide ramp only spreads the weight over candles the smooth basis
-    -- cannot match anyway
-    h = max 2 (n `div` 128)
-    a = max 0 (edgeW - 1)
     w i = ws !! (i `div` 2)
+    cc c = wCos n edgeW c
+    ss c = wSin n edgeW c
     entry i j
       | i == j = if even i then cc 0 / 2 + cc (2 * wi) / 2 else cc 0 / 2 - cc (2 * wi) / 2
       | even i && even j = (cc (wi - wj) + cc (wi + wj)) / 2
@@ -263,32 +436,25 @@ gramW n edgeW ws = [ [ entry i j | j <- [0 .. m - 1] ] | i <- [0 .. m - 1] ]
       where
         wi = w i
         wj = w j
-    -- weighted sums: cc c = sum w_t cos(c t), ss c = sum w_t sin(c t);
-    -- the ramp sums are evaluated at the phase wrapped to (-pi, pi], so
-    -- multiples of 2*pi land on the c≈0 path instead of the sin(c/2) pole
-    cc c = d c + a * rampReal (wrap c)
-    ss c = s c + a * rampImag (wrap c)
-    d x0
-      | abs x < 1e-12 = n'
-      | otherwise = sin (n' * x / 2) * cos ((n' - 1) * x / 2) / sin (x / 2)
-      where
-        x = wrap x0
-    s x0
-      | abs x < 1e-12 = 0
-      | otherwise = sin (n' * x / 2) * sin ((n' - 1) * x / 2) / sin (x / 2)
-      where
-        x = wrap x0
-    -- reduce to (-pi, pi] so multiples of 2*pi hit the guards instead of
-    -- the sin(x/2) pole
-    wrap x = x - 2 * pi * fromIntegral (round (x / (2 * pi)))
-    rampReal c = realPart lc + realPart (mirror c lc)
-      where
-        lc = leftRamp h n c
-    rampImag c = imagPart lc + imagPart (mirror c lc)
-      where
-        lc = leftRamp h n c
-    -- right ramp = left ramp mirrored about the last candle
-    mirror c lc = cis (c * fromIntegral (n - 1)) * conjugate lc
+
+-- Gram of the intercept-extended design [1, cos/sin pairs]: the first
+-- row/column are the constant's sums (total weight, weighted cos/sin
+-- sums); the cos/sin block is gramW. Demeaning alone cannot replace the
+-- intercept -- the window mean is not in the span of the cos/sin
+-- columns, and without a constant column the low-frequency fits
+-- compromise toward the leftover DC instead of the true frequency
+gramWI :: Int -> Double -> [Double] -> [[Double]]
+gramWI n edgeW ws =
+  (constSum : [ colSum j | j <- [0 .. m - 1] ]) : [ (colSum i : row) | (i, row) <- zip [0 ..] g ]
+  where
+    m = 2 * length ws
+    g = gramW n edgeW ws
+    h = max 2 (n `div` 128)
+    a = max 0 (edgeW - 1)
+    constSum = fromIntegral n + a * rampMass h n
+    colSum j
+      | even j = wCos n edgeW (ws !! (j `div` 2))
+      | otherwise = wSin n edgeW (ws !! (j `div` 2))
 
 -- total mass of one linear ramp (1 - t/h on t = 0..m) times two ends
 rampMass :: Int -> Int -> Double
@@ -334,10 +500,38 @@ solveLS n edgeW ys freqs = x
     lmax = maximum (map abs evals)
     lam = (1e-6 * lmax) ^ 2
     coef (l, v)
-      | l > 1e-10 * lmax = dot v b * l / (l * l + lam)
+      | l > 1e-10 * lmax = dotL v b * l / (l * l + lam)
       | otherwise = 0
     x = [ sum [ v !! i * coef (l, v) | (l, v) <- zip evals evecs ] | i <- [0 .. length g - 1] ]
-    dot a c = sum (zipWith (*) a c)
+
+-- intercept-extended front end: coefficients [c0, a0, b0, ...]
+solveLSI :: Int -> Double -> [Double] -> [Double] -> [Double]
+solveLSI n edgeW ys freqs = x
+  where
+    (_, _, x) = solveGBI n edgeW ys freqs
+
+-- the intercept-extended fit: like solveGB but with a constant column
+-- first, so the coefficients are [c0, a0, b0, a1, b1, ...]
+solveGBI :: Int -> Double -> [Double] -> [Double] -> ([[Double]], [Double], [Double])
+solveGBI n edgeW ys freqs = (g, b, x)
+  where
+    ws = map (2 * pi *) freqs
+    g = gramWI n edgeW ws
+    vys = VU.fromList ys
+    b = corrWI n vys edgeW ws
+    (evals, evecs) = jacobi g
+    lmax = maximum (map abs evals)
+    lam = (1e-6 * lmax) ^ 2
+    coef (l, v)
+      | l > 1e-10 * lmax = dotL v b * l / (l * l + lam)
+      | otherwise = 0
+    x = [ sum [ v !! i * coef (l, v) | (l, v) <- zip evals evecs ] | i <- [0 .. length g - 1] ]
+
+dotL :: [Double] -> [Double] -> Double
+dotL a c = sum (zipWith (*) a c)
+
+quadL :: [[Double]] -> [Double] -> Double
+quadL g x = sum [ dotL (g !! i) x * (x !! i) | i <- [0 .. length x - 1] ]
 
 -- eigendecomposition of a small symmetric matrix (in-place Givens
 -- rotations); returns eigenvalues and the matching eigenvectors

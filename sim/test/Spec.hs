@@ -10,7 +10,7 @@ import qualified Data.Set as Set
 import Sim.Engine
 import Sim.Entropy (permEntropy, rollingPermEntropy)
 import qualified Data.Vector.Unboxed as VU
-import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, solveLS)
+import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, refinePeaks, solveLS)
 import Sim.Gen
 import Sim.GenH (runSimH)
 import Sim.Csv (tickRow)
@@ -335,6 +335,48 @@ prop_fft_waves_limit =
            ++ map abs (zipWith (-) fc (map main [n .. n + 15])))
   in bad < 1e-6
 
+-- a window holding a fractional number of cycles must still be fit and
+-- continued accurately: bin refinement recovers the true frequency even
+-- when the period does not divide the window (snapping alone drifts up
+-- to half a cycle out of phase, worst at the edges and in the forecast)
+prop_fft_recovers_sinusoid_fractional :: Int -> Int -> Bool
+prop_fft_recovers_sinusoid_fractional n0 p0 =
+  let n = 80 + abs n0 `mod` 120
+      p = 9 + abs p0 `mod` 40
+      sig t = 10000 + 100 * sin (2 * pi * fromIntegral t / fromIntegral p) :: Double
+      series = take (n + 24) [ fromIntegral (round (sig t)) | t <- [0 ..] ]
+      frac = fromIntegral n / fromIntegral p
+      off = frac - fromIntegral (floor frac)
+      intCyc = off < 0.02 || off > 0.98
+      (fit, fc) = fftApprox 1 1 series 0 n 16
+      fitErr = maximum (0 : [ abs (f - s) | (f, s) <- zip fit (map sig [0 .. n - 1]) ])
+      fcErr = maximum (0 : [ abs (f - s) | (f, s) <- zip fc (map sig [n .. n + 15]) ])
+  in intCyc || (fitErr < 5 && fcErr < 5)
+
+-- the same for the sum-of-waves generator signal: both harmonics must be
+-- found (non-maximum suppression keeps the strong wave's mainlobe from
+-- starving the weaker harmonic of the top-k picks) and tracked
+prop_fft_recovers_multiwave_fractional :: Int -> Bool
+prop_fft_recovers_multiwave_fractional n0 =
+  let n = 80 + abs n0 `mod` 120
+      sig t = 10000 + 100 * sin (2 * pi * fromIntegral t / 20) + 50 * sin (2 * pi * fromIntegral t / 10) :: Double
+      series = take (n + 24) [ fromIntegral (round (sig t)) | t <- [0 ..] ]
+      (fit, fc) = fftApprox 0 1 series 0 n 16
+      fitErr = maximum (0 : [ abs (f - s) | (f, s) <- zip fit (map sig [0 .. n - 1]) ])
+      fcErr = maximum (0 : [ abs (f - s) | (f, s) <- zip fc (map sig [n .. n + 15]) ])
+  in fitErr < 20 && fcErr < 30
+
+-- refinement is local: refined frequencies stay within one window bin of
+-- their anchor and never explode on adversarial data
+prop_fft_refine_local :: Int -> [Int] -> Bool
+prop_fft_refine_local n0 seeds =
+  let n = 16 + abs n0 `mod` 100
+      ys = VU.fromList (take n ([ fromIntegral (abs s `mod` 1000) | s <- seeds ] ++ repeat 0.5))
+      anchors = [ fromIntegral q / fromIntegral n | q <- [1 .. min 4 (n `div` 8)] ]
+      refined = refinePeaks n ys (zip anchors anchors)
+      close f g = abs (f - g) <= 1 / fromIntegral n + 1e-12
+  in length refined == length anchors && and (zipWith close refined anchors)
+
 -- length contract: full window -> (window, predict) points, short window
 -- or non-positive predict -> nothing
 prop_fft_forecast_length :: Int -> Int -> Int -> Bool
@@ -622,6 +664,9 @@ props =
   , ("resume_ticks", property prop_resume_ticks)
   , ("fft_recovers_sinusoid", property prop_fft_recovers_sinusoid)
   , ("fft_recovers_sinusoid_offset", property prop_fft_recovers_sinusoid_offset)
+  , ("fft_recovers_sinusoid_fractional", property prop_fft_recovers_sinusoid_fractional)
+  , ("fft_recovers_multiwave_fractional", property prop_fft_recovers_multiwave_fractional)
+  , ("fft_refine_local", property prop_fft_refine_local)
   , ("fft_fit_covers_window", property prop_fft_fit_covers_window)
   , ("fft_waves_limit", property prop_fft_waves_limit)
   , ("fft_gram_matches_bruteforce", property prop_fft_gram_matches_bruteforce)
