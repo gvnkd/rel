@@ -2,8 +2,7 @@ class_name CursorWidget
 extends Control
 
 const FONT_SIZE := 12
-const LINE_H := 16.0
-const BLOCK_W := 560.0
+const PAD := 8.0
 const EXTRA_COL := Color(0.7, 0.72, 0.75)
 
 var view: ChartView
@@ -21,6 +20,7 @@ func _draw() -> void:
 	if view == null or data == null:
 		return
 	var font := ThemeDB.fallback_font
+	var line_h := font.get_height(FONT_SIZE) + 4.0
 	var lines := []
 	for s in data.series:
 		if not s.visible or s.size() == 0:
@@ -59,13 +59,19 @@ func _draw() -> void:
 		extra.append("indicators: " + indicators_text)
 	if lines.is_empty() and extra.is_empty():
 		return
-	var x := view.plot_rect.end.x - BLOCK_W - 10.0
-	var y := view.plot_rect.position.y + 8.0
-	var h := (lines.size() + extra.size()) * LINE_H + 10.0
-	draw_rect(Rect2(x - 6.0, y - 4.0, BLOCK_W, h), Color(0.05, 0.06, 0.08, 0.75))
+	var block_w := PAD * 2.0
 	for item in lines:
-		draw_string(font, Vector2(x, y + 11.0), item[0], HORIZONTAL_ALIGNMENT_LEFT, BLOCK_W, FONT_SIZE, item[1])
-		y += LINE_H
+		block_w = maxf(block_w, font.get_string_size(item[0], HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE).x + PAD * 2.0)
 	for t in extra:
-		draw_string(font, Vector2(x, y + 11.0), t, HORIZONTAL_ALIGNMENT_LEFT, BLOCK_W, FONT_SIZE, EXTRA_COL)
-		y += LINE_H
+		block_w = maxf(block_w, font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SIZE).x + PAD * 2.0)
+	var x := view.plot_rect.end.x - block_w - 10.0
+	var y := view.plot_rect.position.y + 8.0
+	var h := (lines.size() + extra.size()) * line_h + PAD * 2.0 - 4.0
+	draw_rect(Rect2(x - PAD * 0.75, y - PAD * 0.5, block_w, h), Color(0.05, 0.06, 0.08, 0.75))
+	var text_w := block_w - PAD * 2.0
+	for item in lines:
+		draw_string(font, Vector2(x, y + font.get_ascent(FONT_SIZE) + 2.0), item[0], HORIZONTAL_ALIGNMENT_LEFT, text_w, FONT_SIZE, item[1])
+		y += line_h
+	for t in extra:
+		draw_string(font, Vector2(x, y + font.get_ascent(FONT_SIZE) + 2.0), t, HORIZONTAL_ALIGNMENT_LEFT, text_w, FONT_SIZE, EXTRA_COL)
+		y += line_h
