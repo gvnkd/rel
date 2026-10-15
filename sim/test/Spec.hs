@@ -8,7 +8,7 @@ import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Sim.Engine
-import Sim.Entropy (permEntropy, rollingPermEntropy)
+import Sim.Entropy (cecpOf, permEntropy, rollingCECP, rollingPermEntropy)
 import qualified Data.Vector.Unboxed as VU
 import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, refinePeaks, solveLS)
 import Sim.Gen
@@ -612,6 +612,85 @@ prop_ks_rolling_invalid =
       && not (isNaN (last badM))
       && abs (last badM - ref) < 1e-12
 
+-- closed-form JSD(P, U) used by Sim.Entropy (counts over k bins, T the
+-- window's pattern count) against the textbook H(M) - (H(P) + H(U)) / 2
+cecpJsd :: [Int] -> Double
+cecpJsd counts = log t / 2 + s / (2 * t) - hsum / t - log k / 2
+  where
+    k = fromIntegral (length counts)
+    t = fromIntegral (sum counts)
+    s = sum [fromIntegral c * log (fromIntegral c) | c <- counts, c > 0]
+    hsum = sum [m * log m | c <- counts, let m = (fromIntegral c + t / k) / 2]
+
+cecpJsdMax :: Int -> Double
+cecpJsdMax k = log 2 + log k' / 2 - (k' + 1) / (2 * k') * log (k' + 1)
+  where
+    k' = fromIntegral k
+
+jsdBrute :: [Double] -> Double
+jsdBrute ps = h ms - (h ps + log k) / 2
+  where
+    k = fromIntegral (length ps)
+    h xs = negate (sum [if x <= 0 then 0 else x * log x | x <- xs])
+    ms = map (\p -> (p + 1 / k) / 2) ps
+
+genCounts :: Gen [Int]
+genCounts = do
+  k <- chooseInt (2, 24)
+  cs <- vectorOf k (chooseInt (0, 100))
+  pure (if sum cs == 0 then 1 : cs else cs)
+
+-- the closed-form JSD must equal the brute-force definition on any
+-- histogram (including empty bins, where M still carries U's mass)
+prop_cecp_jsd_matches_bruteforce :: Property
+prop_cecp_jsd_matches_bruteforce = forAll genCounts $ \cs ->
+  let t = sum cs
+      ps = map (\c -> fromIntegral c / fromIntegral t) cs
+  in abs (cecpJsd cs - jsdBrute ps) < 1e-10
+
+-- the MPR normalizer JSD(delta, U) is attained by a one-hot histogram
+prop_cecp_jsdmax_is_delta :: Property
+prop_cecp_jsdmax_is_delta = forAll (chooseInt (2, 24)) $ \k ->
+  let cs = 37 : replicate (k - 1) 0
+  in abs (cecpJsd cs - cecpJsdMax k) < 1e-10
+
+-- a monotone series has a single ordinal pattern: H = 0 and C = 0
+prop_cecp_monotone_zero :: Bool
+prop_cecp_monotone_zero =
+  let (h, c) = cecpOf 5 [1 .. 400]
+  in h <= 1e-12 && c <= 1e-12
+
+-- iid noise: H near 1, C near 0 (pattern histogram near-uniform)
+prop_cecp_iid_noise_corner :: Bool
+prop_cecp_iid_noise_corner =
+  let (h, c) = cecpOf 5 (take 4000 lcgNoise)
+  in h > 0.95 && c < 0.05
+
+-- rolling CECP: one (H, C) pair per candle, NaN warm-up on both, last
+-- pair matches the direct window computation
+prop_cecp_rolling_matches_window :: Bool
+prop_cecp_rolling_matches_window =
+  let xs = take 300 lcgNoise
+      win = 100
+      m = 4
+      r = rollingCECP win m xs
+      (refH, refC) = cecpOf m (drop (length xs - win) xs)
+      ok (h, c) = not (isNaN h) && not (isNaN c) && h >= -1e-12 && h <= 1 + 1e-12 && c >= -1e-12 && c <= h + 1e-9
+  in length r == 300
+     && all (\(h, c) -> isNaN h && isNaN c) (take (win - 1) r)
+     && all ok (drop (win - 1) r)
+     && abs (fst (last r) - refH) < 1e-12
+     && abs (snd (last r) - refC) < 1e-12
+
+prop_cecp_rolling_invalid :: Bool
+prop_cecp_rolling_invalid =
+  let xs = take 100 lcgNoise
+      short = rollingCECP 200 4 xs
+      badWin = rollingCECP 2 5 xs
+  in length short == 100
+     && all (\(h, c) -> isNaN h && isNaN c) short
+     && all (\(h, c) -> isNaN h && isNaN c) badWin
+
 -- endpoint weighting must pin the fit to the first candle: with a spike
 -- at t=0 plain LS absorbs only a fraction of it, weighted LS (edgeW
 -- large) absorbs nearly all
@@ -683,4 +762,10 @@ props =
   , ("ks_rolling_matches_window", property prop_ks_rolling_matches_window)
   , ("ks_rolling_middle_matches", property prop_ks_rolling_middle_matches)
   , ("ks_rolling_invalid", property prop_ks_rolling_invalid)
+  , ("cecp_jsd_matches_bruteforce", prop_cecp_jsd_matches_bruteforce)
+  , ("cecp_jsdmax_is_delta", prop_cecp_jsdmax_is_delta)
+  , ("cecp_monotone_zero", property prop_cecp_monotone_zero)
+  , ("cecp_iid_noise_corner", property prop_cecp_iid_noise_corner)
+  , ("cecp_rolling_matches_window", property prop_cecp_rolling_matches_window)
+  , ("cecp_rolling_invalid", property prop_cecp_rolling_invalid)
   ]

@@ -22,6 +22,7 @@ class IndCache:
 	var s: Object = null
 	var vals := PackedFloat64Array()
 	var vals_off := 0
+	var vals2 := PackedFloat64Array()
 	var fit := PackedFloat64Array()
 	var forecast := PackedFloat64Array()
 	var cache_key := ""
@@ -43,6 +44,7 @@ var view: ChartView
 var data: PlotData
 var enabled := true
 var indicators: Array[Indicator] = []
+var vol_pane_h := 0.0
 var _sim: Object = null
 
 func _ensure_sim() -> bool:
@@ -94,6 +96,13 @@ func color_for(s: PlotData.Series, idx: int) -> Color:
 	var si := data.series.find(s)
 	return IND_COLORS[(idx + maxi(si, 0)) % IND_COLORS.size()]
 
+# plot rect excluding the volume pane at the bottom — the 0..1 overlays
+# (KS/TEMP/CECP) map into this so the volume widget (drawn on top) can't
+# cover them
+func overlay_rect() -> Rect2:
+	var r := view.plot_rect
+	return Rect2(r.position, Vector2(r.size.x, maxf(1.0, r.size.y - vol_pane_h)))
+
 func _draw() -> void:
 	if not enabled or view == null or data == null:
 		return
@@ -114,6 +123,12 @@ func _draw() -> void:
 				continue
 			if ind.kind == "KS":
 				_draw_ks(ind, s, k)
+				continue
+			if ind.kind == "TEMP":
+				_draw_ks(ind, s, k, true)
+				continue
+			if ind.kind == "CECP":
+				_draw_cecp(ind, s, k)
 				continue
 			if s.size() < ind.period:
 				continue
@@ -168,11 +183,13 @@ func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
 
 # rolling KS entropy (permutation entropy, normalized to 0..1) drawn as a
 # line over the full plot height: 1 = noise-like, near 0 = trending.
+# TEMP draws the same series inverted (1 - PE = the market "temperature":
+# structural order, low when the system crystallizes/herds).
 # Computed over the visible range plus a warm-up margin ahead of it (the
 # FFI gets a closes slice, not the whole series); the per-series cache
 # covers [vals_off, vals_off + vals.size()) and its key carries the store
 # window offset so a refill recomputes.
-func _draw_ks(ind: Indicator, s: PlotData.Series, k: int) -> void:
+func _draw_ks(ind: Indicator, s: PlotData.Series, k: int, invert := false) -> void:
 	var n: int = s.size()
 	if n < 2:
 		return
@@ -182,7 +199,7 @@ func _draw_ks(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	if not _ks_ensure(ind, s, i0, i1):
 		return
 	var c := _cache_for(ind, s)
-	var r := view.plot_rect
+	var r := overlay_rect()
 	var col := color_for(s, k)
 	var pts := PackedVector2Array()
 	for i in range(i0, i1 + 1):
@@ -191,9 +208,73 @@ func _draw_ks(ind: Indicator, s: PlotData.Series, k: int) -> void:
 		var v: float = c.vals[i - c.vals_off]
 		if is_nan(v):
 			continue
+		if invert:
+			v = 1.0 - v
 		pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, r.end.y - v * r.size.y))
 	if pts.size() >= 2:
 		draw_polyline(pts, col, 1.5)
+
+# Complexity-Entropy Causality Plane: the rolling (H, C) pairs mapped into
+# the plot rect as a phase plane (x = entropy, y = complexity, both
+# 0..1), not a time series. Draws the max-complexity boundary curve for
+# k = m! ordinal patterns plus the window's trajectory, older points more
+# transparent: periodic lives bottom-left, noise bottom-right, structured
+# data rides the ridge.
+func _draw_cecp(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var n: int = s.size()
+	if n < 2:
+		return
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := mini(int(ceil(ir.y)), n - 1)
+	if not _cecp_ensure(ind, s, i0, i1):
+		return
+	var c := _cache_for(ind, s)
+	var r := overlay_rect()
+	var col := color_for(s, k)
+	_draw_cecp_curve(ind.m, r)
+	var span := maxi(1, i1 - i0)
+	var prev := Vector2(-1, -1)
+	for i in range(i0, i1 + 1):
+		if i < c.vals_off or i - c.vals_off >= c.vals.size():
+			continue
+		var h: float = c.vals[i - c.vals_off]
+		var cc: float = c.vals2[i - c.vals_off]
+		if is_nan(h) or is_nan(cc):
+			continue
+		var age := float(i - i0) / span
+		var p := Vector2(r.position.x + clampf(h, 0.0, 1.0) * r.size.x, r.end.y - clampf(cc, 0.0, 1.0) * r.size.y)
+		if prev.x >= 0.0:
+			draw_line(prev, p, Color(col, 0.08 + 0.2 * age), 1.0)
+		prev = p
+		var dot := Color(col, 0.15 + 0.85 * age)
+		draw_circle(p, 3.5 if i == i1 else 2.0, dot)
+	var font := ThemeDB.fallback_font
+	var dim := Color(1, 1, 1, 0.35)
+	draw_string(font, r.position + Vector2(4, 13), "periodic", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
+	draw_string(font, Vector2(r.end.x - 44, r.position.y + 13), "random", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
+	draw_string(font, Vector2(r.position.x + r.size.x * 0.5 - 20, r.position.y + 13), "chaotic", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
+
+# max-complexity boundary of the CECP: the parametric curve for
+# distributions {p, (1-p)/(k-1), ...} (the ridge's upper envelope)
+func _draw_cecp_curve(m: int, r: Rect2) -> void:
+	var k := 1
+	for j in range(2, m + 1):
+		k *= j
+	if k < 2:
+		return
+	var lk := log(k)
+	var jmax := log(2.0) + lk / 2.0 - (k + 1.0) / (2.0 * k) * log(k + 1.0)
+	var pts := PackedVector2Array()
+	for j in range(129):
+		var p := lerpf(1.0 / k, 1.0, float(j) / 128.0)
+		var q := (1.0 - p) / (k - 1)
+		var hm := (p + 1.0 / k) / 2.0
+		var hq := (q + 1.0 / k) / 2.0
+		var h := (-p * log(p) - (1.0 - p) * log(q)) / lk
+		var jsd := -hm * log(hm) - (k - 1.0) * hq * log(hq) - (-p * log(p) - (1.0 - p) * log(q) + lk) / 2.0
+		pts.append(Vector2(r.position.x + clampf(h, 0.0, 1.0) * r.size.x, r.end.y - clampf(h * jsd / jmax, 0.0, 1.0) * r.size.y))
+	draw_polyline(pts, Color(1, 1, 1, 0.25), 1.0, true)
 
 # fills the per-series cache for [lo, i1] when its key is stale; false
 # when the value line cannot be computed (missing FFI, short series)
@@ -216,6 +297,37 @@ func _ks_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 	var vals: PackedFloat64Array = ret as PackedFloat64Array
 	if vals.size() == i1 - lo + 1:
 		c.vals = vals
+		c.vals_off = lo
+	else:
+		c.vals = PackedFloat64Array()
+	c.cache_key = key
+	return not c.vals.is_empty()
+
+# fills the per-series CECP cache for [lo, i1]; the FFI returns (H, C)
+# interleaved, split here into vals/vals2
+func _cecp_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 2:
+		return false
+	var lo := maxi(0, i0 - ind.period - 2)
+	var c := _cache_for(ind, s)
+	var key := "%d:%d:%d:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.m, n, s.win_off, lo, i1]
+	if key == c.cache_key:
+		return not c.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var closes := PackedFloat64Array()
+	closes.resize(i1 - lo + 1)
+	for i in range(lo, i1 + 1):
+		closes[i - lo] = s.candle_at(i).close
+	var ret: Variant = _sim.call("cecp", closes, ind.period, ind.m)
+	var all: PackedFloat64Array = ret as PackedFloat64Array
+	if all.size() == 2 * (i1 - lo + 1):
+		c.vals.resize(i1 - lo + 1)
+		c.vals2.resize(i1 - lo + 1)
+		for j in range(i1 - lo + 1):
+			c.vals[j] = all[2 * j]
+			c.vals2[j] = all[2 * j + 1]
 		c.vals_off = lo
 	else:
 		c.vals = PackedFloat64Array()
@@ -279,6 +391,23 @@ func value_at(ind: Indicator, s: PlotData.Series, i: int) -> Variant:
 				return null
 		var v: float = c.vals[i - c.vals_off]
 		return null if is_nan(v) else v
+	if ind.kind == "TEMP":
+		var c := _cache_for(ind, s)
+		if i < c.vals_off or i >= c.vals_off + c.vals.size():
+			if not _ks_ensure(ind, s, i, i):
+				return null
+		var v: float = c.vals[i - c.vals_off]
+		return null if is_nan(v) else 1.0 - v
+	if ind.kind == "CECP":
+		var c := _cache_for(ind, s)
+		if i < c.vals_off or i >= c.vals_off + c.vals.size():
+			if not _cecp_ensure(ind, s, i, i):
+				return null
+		var h: float = c.vals[i - c.vals_off]
+		var cc: float = c.vals2[i - c.vals_off]
+		if is_nan(h) or is_nan(cc):
+			return null
+		return [h, cc]
 	if ind.kind == "FFT":
 		var n: int = s.size()
 		if n < FFT_MIN_WINDOW:

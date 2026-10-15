@@ -11,6 +11,7 @@ extern "C" void sim_cancel(void);
 extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double edge_w, double *out);
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
+extern "C" int sim_cecp(const double *closes, int count, int window, int m, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -36,6 +37,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("cancel"), &SimNative::cancel);
 		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves", "edge_w"), &SimNative::fft_forecast);
 		godot::ClassDB::bind_method(godot::D_METHOD("perm_entropy", "closes", "window", "m"), &SimNative::perm_entropy);
+		godot::ClassDB::bind_method(godot::D_METHOD("cecp", "closes", "window", "m"), &SimNative::cecp);
 	}
 
 public:
@@ -75,6 +77,17 @@ public:
 			return out;
 		out.resize((int)closes.size());
 		int got = sim_perm_entropy(closes.ptr(), (int)closes.size(), (int)window, (int)m, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
+	}
+
+	// rolling Complexity-Entropy Causality Plane: (H, C) interleaved per candle
+	godot::PackedFloat64Array cecp(const godot::PackedFloat64Array &closes, int64_t window, int64_t m) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || window < 2 || m < 2)
+			return out;
+		out.resize(2 * (int)closes.size());
+		int got = sim_cecp(closes.ptr(), (int)closes.size(), (int)window, (int)m, out.ptrw());
 		out.resize(got < 0 ? 0 : got);
 		return out;
 	}

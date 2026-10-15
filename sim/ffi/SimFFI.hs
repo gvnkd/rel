@@ -11,7 +11,7 @@ import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import Sim.Csv (csvRowsText, csvText, metaText, tickHeader, tickRowB, ticksPath)
-import Sim.Entropy (rollingPermEntropy)
+import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState, initState)
 import Sim.GenH (runSimH)
@@ -105,6 +105,25 @@ simPermEntropy ptr (CInt count) (CInt win) (CInt m) out
         else do
           pokeArray out (map CDouble vals)
           pure (CInt (fromIntegral count))
+
+-- rolling Complexity-Entropy Causality Plane over closes: writes
+-- 2 * `count` doubles into out — (H, C) interleaved per candle, NaN until
+-- the window fills — returns 2 * count on success, 0 on invalid input
+foreign export ccall "sim_cecp" simCecp
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simCecp :: Ptr CDouble -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simCecp ptr (CInt count) (CInt win) (CInt m) out
+  | count <= 0 || win <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let pairs = rollingCECP (fromIntegral win) (fromIntegral m) (map (\(CDouble d) -> d) closes)
+          vals = concatMap (\(h, c) -> [CDouble h, CDouble c]) pairs
+      if length pairs /= fromIntegral count
+        then pure 0
+        else do
+          pokeArray out vals
+          pure (CInt (fromIntegral (length vals)))
 
 {-# NOINLINE progressRef #-}
 progressRef :: IORef (Int, Int)

@@ -1,17 +1,18 @@
 [gd_scene load_steps=11 format=3 uid="uid://cstjrpfbx0k33"]
 
 [ext_resource type="Script" uid="uid://7hei3gpwt2v2" path="res://chart.gd" id="1_0bwlf"]
-[ext_resource type="Script" path="res://sim_panel.gd" id="2_sim"]
-[ext_resource type="Script" path="res://tool_window.gd" id="2_win"]
-[ext_resource type="Script" path="res://grid_widget.gd" id="4_grid"]
-[ext_resource type="Script" path="res://series_widget.gd" id="5_series"]
-[ext_resource type="Script" path="res://indicator_widget.gd" id="6_ind"]
-[ext_resource type="Script" path="res://order_book_widget.gd" id="7_book"]
-[ext_resource type="Script" path="res://cross_widget.gd" id="8_cross"]
-[ext_resource type="Script" path="res://cursor_widget.gd" id="9_cursor"]
-[ext_resource type="Script" path="res://volume_widget.gd" id="10_vol"]
+[ext_resource type="Script" uid="uid://cw1fn5scussh4" path="res://sim_panel.gd" id="2_sim"]
+[ext_resource type="Script" uid="uid://c18nkcprwm2ut" path="res://tool_window.gd" id="2_win"]
+[ext_resource type="Script" uid="uid://dyt0jnmb4f64m" path="res://grid_widget.gd" id="4_grid"]
+[ext_resource type="Script" uid="uid://bw62fg1diihr6" path="res://series_widget.gd" id="5_series"]
+[ext_resource type="Script" uid="uid://re8u8s456rkx" path="res://indicator_widget.gd" id="6_ind"]
+[ext_resource type="Script" uid="uid://bmchdswdl24ya" path="res://order_book_widget.gd" id="7_book"]
+[ext_resource type="Script" uid="uid://chcgg54nkl8hh" path="res://cross_widget.gd" id="8_cross"]
+[ext_resource type="Script" uid="uid://bckq6f6x652w" path="res://cursor_widget.gd" id="9_cursor"]
+[ext_resource type="Script" uid="uid://b7hwbcxacj5w0" path="res://volume_widget.gd" id="10_vol"]
 
 [node name="Chart" type="Control"]
+layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -108,8 +109,8 @@ text = "Simulation"
 
 [node name="Spacer" type="Control" parent="SimWindow/Box/Bar"]
 layout_mode = 2
-mouse_filter = 1
 size_flags_horizontal = 3
+mouse_filter = 1
 
 [node name="Close" type="Button" parent="SimWindow/Box/Bar"]
 layout_mode = 2

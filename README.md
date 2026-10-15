@@ -125,11 +125,12 @@ the same as a `sinus` checkbox plus five fields in the sim panel.
 ## Chart indicators
 
 Indicators live in the right-click chart menu (`add SMA` / `add FFT` /
-`add KS`; per-indicator period/params, color, delete). The math runs in
-Haskell behind the FFI (`Sim.Fft`, `Sim.Entropy`), the widget only draws.
-The cursor tableau (top right) appends each enabled indicator's value at
-the hovered candle (or the replay head): `KS 0.871`, `SMA 1.02195`, etc.
-Values are blank during warm-up / outside the indicator's range.
+`add KS` / `add TEMP` / `add CECP`; per-indicator period/params, color,
+delete). The math runs in Haskell behind the FFI (`Sim.Fft`, `Sim.Entropy`),
+the widget only draws. The cursor tableau (top right) appends each enabled
+indicator's value at the hovered candle (or the replay head): `KS 0.871`,
+`Temp 0.412`, `CECP H0.812 C0.103`, `SMA 1.02195`, etc. Values are blank
+during warm-up / outside the indicator's range.
 
 - **SMA** — simple moving average of closes over `period` candles,
   drawn on the price scale.
@@ -156,12 +157,44 @@ Values are blank during warm-up / outside the indicator's range.
   shown in the HUD, e.g. `FFT [1912..2950]+64x24 (0.031)` — read it as
   in-sample, no forward guarantee.
 - **KS** — rolling permutation entropy (Bandt–Pompe) as a Kolmogorov-
-  Sinai proxy, normalized to 0..1 and drawn over the full plot height
-  (1 = noise-like, 0 = trending). `period` is the sliding window,
+  Sinai proxy, normalized to 0..1 and drawn over the price area above the
+  volume pane (1 = noise-like, 0 = trending). `period` is the sliding window,
   `m` (2–7, default 5) the ordinal-pattern length; NaN until the window
   fills. Caveat: short windows cannot saturate — e.g. period 100 with
   m=5 tops out around 0.87 (finite-sample, not a bug); use m=3 or a
   wider window to reach ~1 on noise.
+- **TEMP** — the market "temperature" analogy: `1 − KS` (structural
+  order). A drop means the system is ordering — traders synchronizing
+  (herding, crystallization); a rise means disorder/efficiency. Same
+  `period`/`m` params as KS; drawn over the price area above the volume
+  pane (1 = fully ordered/trending, 0 = noise-like).
+- **CECP** — Complexity-Entropy Causality Plane: the rolling
+  permutation entropy H (x axis) against the statistical complexity
+  C = H·JSD(P, uniform)/JSD(δ, uniform) (y axis), drawn as a phase
+  plane inside the plot rect (both axes 0..1), not a time series.
+  Periodic/trending data sits bottom-left, iid noise bottom-right,
+  structured or chaotic data rides the dashed max-complexity ridge
+  (parametric boundary for k = m! bins); the trajectory is age-faded,
+  newest point largest. Use it to watch an asset migrate between
+  regimes over time. Defaults: period 240, m=4. **Window must cover
+  m! bins well** — C is only meaningful when `period − m` ≫ m!;
+  e.g. period 100 / m=5 reads C ≈ 0.27 on pure noise (histogram
+  sparseness, not structure). NaN until the window fills.
+
+### CECP internals (developer notes)
+
+`rollingCECP` in `Sim.Entropy` shares the KS sliding-count loop: the
+pattern count per window is constant (`win − m + 1`), so besides
+`s = Σ c·ln c` (for H) one more sum `hsum = Σ g(c)` with
+`g(c) = m(c)·ln m(c)`, `m(c) = (c + T/k)/2` (the mass of `(P+U)/2` in
+each bin) is updated across the slide, giving the Jensen–Shannon
+divergence in closed form: `JSD = ln T/2 + s/(2T) − hsum/T − ln k/2`.
+The normalizer `JSD(δ, U) = ln 2 + ln k/2 − (k+1)/(2k)·ln(k+1)` is
+attained by a one-hot histogram. FFI `sim_cecp` returns (H, C)
+interleaved (2 doubles per candle); the widget splits them into the
+per-series cache (`vals`/`vals2`). QuickCheck props verify the closed
+form against a brute-force `H(M) − (H(P)+H(U))/2`, the delta
+normalizer, rolling-vs-window agreement, and `0 ≤ C ≤ H ≤ 1`.
 
 ### FFT internals (developer notes)
 

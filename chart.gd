@@ -179,6 +179,7 @@ func _sync_volume() -> void:
 		return
 	volume_widget.pane_h = vol_pane_h()
 	volume_widget.collapsed = vol_collapsed
+	indicator_widget.vol_pane_h = vol_pane_h()
 	_refresh()
 
 func _sync_mode_hud() -> void:
@@ -201,6 +202,10 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 		return "FFT [%d..%d]+%d%s%s" % [ind.start, ind.end, ind.predict, w, sc]
 	if ind.kind == "KS":
 		return "KS (%d, m%d)" % [ind.period, ind.m]
+	if ind.kind == "TEMP":
+		return "Temp (%d, m%d)" % [ind.period, ind.m]
+	if ind.kind == "CECP":
+		return "CECP (%d, m%d)" % [ind.period, ind.m]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -237,9 +242,17 @@ func _rebuild_menu() -> void:
 	var b_ks := Button.new()
 	b_ks.text = "add KS"
 	b_ks.pressed.connect(_on_add_ks)
+	var b_temp := Button.new()
+	b_temp.text = "add TEMP"
+	b_temp.pressed.connect(_on_add_temp)
+	var b_cecp := Button.new()
+	b_cecp.text = "add CECP"
+	b_cecp.pressed.connect(_on_add_cecp)
 	add_row.add_child(b_sma)
 	add_row.add_child(b_fft)
 	add_row.add_child(b_ks)
+	add_row.add_child(b_temp)
+	add_row.add_child(b_cecp)
 	_menu_box.add_child(add_row)
 	if not data.series.is_empty():
 		_add_section("series")
@@ -311,7 +324,7 @@ func _build_indicator_row(i: int) -> void:
 		_fft_spins["waves"] = _add_spin(grid, "waves", ind.waves, _on_menu_fft_value.bind(i, "waves"))
 		_fft_spins["edge w"] = _add_spin(grid, "edge w", ind.edge_w, _on_menu_fft_value.bind(i, "edge_w"), 1.0, 1000.0)
 		_add_spin(grid, "opt rmse %", _opt_rmse_pct, _on_menu_opt_weight)
-	elif ind.kind == "KS":
+	elif ind.kind == "KS" or ind.kind == "TEMP" or ind.kind == "CECP":
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 		_add_spin(grid, "m", ind.m, _on_menu_ks_m.bind(i))
 	else:
@@ -459,6 +472,23 @@ func _on_menu_ks_m(v: float, i: int) -> void:
 
 func _on_add_ks() -> void:
 	indicator_widget.add_indicator("KS", 200)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_add_temp() -> void:
+	indicator_widget.add_indicator("TEMP", 200)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_add_cecp() -> void:
+	# m=4 (24 bins) rather than the KS default m=5: C is only meaningful
+	# once the window covers m! bins, so smaller pattern alphabets need
+	# shorter windows for the same fidelity
+	indicator_widget.add_indicator("CECP", 240)
+	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[indicator_widget.indicators.size() - 1]
+	ind.m = 4
 	_rebuild_menu()
 	_sync_indicator_hud()
 	_refresh()

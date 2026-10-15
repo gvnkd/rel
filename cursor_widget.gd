@@ -1,7 +1,7 @@
 class_name CursorWidget
 extends Control
 
-const FONT_SIZE := 12
+const FONT_SIZE := 20
 const PAD := 8.0
 const EXTRA_COL := Color(0.7, 0.72, 0.75)
 
@@ -47,6 +47,10 @@ func _draw() -> void:
 					continue
 				if ind.kind == "KS":
 					txt += "  KS %.3f" % float(v)
+				elif ind.kind == "TEMP":
+					txt += "  Temp %.3f" % float(v)
+				elif ind.kind == "CECP":
+					txt += "  CECP H%.3f C%.3f" % [v[0], v[1]]
 				else:
 					txt += "  %s %s" % [ind.kind, view.fmt_price(float(v))]
 		lines.append([txt, s.col_pos])
