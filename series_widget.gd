@@ -23,9 +23,9 @@ func _draw() -> void:
 	var i0 := maxi(0, int(floor(ir.x)))
 	var i1 := int(ceil(ir.y))
 	for s in data.series:
-		if not s.visible or s.candles.is_empty():
+		if not s.visible or s.size() == 0:
 			continue
-		var last := mini(i1, s.candles.size() - 1)
+		var last := mini(i1, s.size() - 1)
 		if last < i0:
 			continue
 		match mode:
@@ -47,7 +47,7 @@ func _draw_candles(s, i0: int, i1: int) -> void:
 	var col_up: Color = s.body_up if s.body_up.a > 0.0 else s.col_pos
 	var col_down: Color = s.body_down if s.body_down.a > 0.0 else s.col_neg
 	for i in range(i0, i1 + 1):
-		var c: Candle = s.candles[i]
+		var c: Candle = s.candle_at(i)
 		var x := _slot_center(i)
 		var col: Color = col_up if c.close >= c.open else col_down
 		var wick_col: Color = col if s.wick.a == 0.0 else s.wick
@@ -61,7 +61,7 @@ func _draw_candles(s, i0: int, i1: int) -> void:
 func _draw_bars(s, i0: int, i1: int) -> void:
 	var tick := maxf(2.0, view.px_per_index * 0.35)
 	for i in range(i0, i1 + 1):
-		var c: Candle = s.candles[i]
+		var c: Candle = s.candle_at(i)
 		var x := _slot_center(i)
 		var col: Color = s.col_pos if c.close >= c.open else s.col_neg
 		draw_line(Vector2(x, view.price_to_y(c.high)), Vector2(x, view.price_to_y(c.low)), col, 1.0)
@@ -72,7 +72,7 @@ func _draw_line(s, i0: int, i1: int) -> void:
 	var pts := PackedVector2Array()
 	pts.resize(i1 - i0 + 1)
 	for i in range(i0, i1 + 1):
-		pts[i - i0] = Vector2(_slot_center(i), view.price_to_y(s.candles[i].close))
+		pts[i - i0] = Vector2(_slot_center(i), view.price_to_y(s.candle_at(i).close))
 	if pts.size() == 1:
 		draw_circle(pts[0], 1.5, s.col_pos)
 	else:
@@ -81,4 +81,4 @@ func _draw_line(s, i0: int, i1: int) -> void:
 func _draw_dots(s, i0: int, i1: int) -> void:
 	var rad := maxf(1.2, view.px_per_index * 0.18)
 	for i in range(i0, i1 + 1):
-		draw_circle(Vector2(_slot_center(i), view.price_to_y(s.candles[i].close)), rad, s.col_pos)
+		draw_circle(Vector2(_slot_center(i), view.price_to_y(s.candle_at(i).close)), rad, s.col_pos)

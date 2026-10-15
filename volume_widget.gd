@@ -45,23 +45,23 @@ func _draw() -> void:
 	var i1 := int(ceil(ir.y))
 	var vmax := 0.0
 	for s in data.series:
-		if not s.visible or s.candles.is_empty():
+		if not s.visible or s.size() == 0:
 			continue
-		var last := mini(i1, s.candles.size() - 1)
+		var last := mini(i1, s.size() - 1)
 		for i in range(maxi(i0, 0), last + 1):
-			vmax = maxf(vmax, s.candles[i].vol)
+			vmax = maxf(vmax, s.candle_at(i).vol)
 	if vmax <= 0.0:
 		return
 	var body := clampf(view.px_per_index * 0.7, 1.0, 30.0)
 	var max_h := pane_h - TOP_PAD
 	for s in data.series:
-		if not s.visible or s.candles.is_empty():
+		if not s.visible or s.size() == 0:
 			continue
-		var last := mini(i1, s.candles.size() - 1)
+		var last := mini(i1, s.size() - 1)
 		if last < i0:
 			continue
 		for i in range(i0, last + 1):
-			var c: Candle = s.candles[i]
+			var c: Candle = s.candle_at(i)
 			if c.vol <= 0:
 				continue
 			var x := view.index_to_x(i) + view.px_per_index / 2.0

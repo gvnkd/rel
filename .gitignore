@@ -12,3 +12,4 @@ result
 /addons/sim_native/bin/
 *.csv.import
 *.translation
+data/

@@ -339,6 +339,12 @@ func _build_series_row(i: int) -> void:
 	reset.tooltip_text = "reset colors"
 	reset.pressed.connect(_on_menu_series_reset.bind(i))
 	row.add_child(reset)
+	var tf_opt := OptionButton.new()
+	for tname in QuoteStore.TFS:
+		tf_opt.add_item(tname)
+	tf_opt.selected = maxi(0, QuoteStore.TFS.find(s.tf))
+	tf_opt.item_selected.connect(_on_menu_series_tf.bind(i))
+	row.add_child(tf_opt)
 	for k in indicator_widget.indicators.size():
 		var icb := _color_button(indicator_widget.color_for(s, k))
 		icb.color_changed.connect(_on_menu_ind_color.bind(i, k))
@@ -379,23 +385,31 @@ func _on_menu_fft_optimize(i: int) -> void:
 		return
 	var best_s: PlotData.Series = null
 	for s in data.series:
-		if best_s == null or s.candles.size() > best_s.candles.size():
+		if best_s == null or s.size() > best_s.size():
 			best_s = s
+	if best_s == null:
+		return
 	# the optimized window must leave at least 50 candles of real data
-	# overlapping the prediction
-	if best_s == null or best_s.candles.size() < IndicatorWidget.FFT_MIN_WINDOW + 50:
+	# overlapping the prediction; store-backed series are bounded by the
+	# cached window, not the full series
+	var w0 := 0
+	var w1 := best_s.size()
+	if best_s.store != null:
+		w0 = best_s.win_off
+		w1 = best_s.win_off + best_s.candles.size()
+	if w1 - w0 < IndicatorWidget.FFT_MIN_WINDOW + 50:
 		return
 	var closes := PackedFloat64Array()
-	closes.resize(best_s.candles.size())
-	for t in best_s.candles.size():
-		closes[t] = best_s.candles[t].close
+	closes.resize(w1 - w0)
+	for t in w1 - w0:
+		closes[t] = best_s.candle_at(w0 + t).close
 	var ret: Variant = indicator_widget._sim.call("fft_best", closes, ind.predict, _opt_rmse_pct)
 	var r: PackedFloat64Array = ret as PackedFloat64Array
 	if r.size() != 3:
 		return
 	ind.waves = int(r[1])
-	ind.end = best_s.candles.size() - 50
-	ind.start = maxi(0, ind.end - int(r[0]))
+	ind.end = w1 - 50
+	ind.start = maxi(w0, ind.end - int(r[0]))
 	ind.opt_score = r[2]
 	_rebuild_menu()
 	_sync_indicator_hud()
@@ -486,6 +500,30 @@ func _on_menu_series_reset(i: int) -> void:
 	_rebuild_menu()
 	_refresh()
 
+func _on_menu_series_tf(sel: int, idx: int) -> void:
+	if idx >= data.series.size():
+		return
+	var s: PlotData.Series = data.series[idx]
+	var tf: String = QuoteStore.TFS[sel]
+	if tf == s.tf:
+		return
+	if s.store != null:
+		if await _open_quotes(s, s.store_key, tf) != OK:
+			_set_load_status("timeframe failed: %s" % s.name)
+			return
+	else:
+		s.switch_tf(tf)
+	# the candle count changed by orders of magnitude — re-anchor the view
+	# to the new series or everything renders outside the visible range
+	head = mini(head, s.size())
+	data.head = head
+	_fit_view(s)
+	view.px_per_index = clampf(view.plot_rect.size.x / maxf(float(s.size()), 1.0), 1.0, 400.0)
+	view.follow = true
+	view.follow_tail(head)
+	_set_load_status("")
+	_refresh()
+
 func _begin_fft_drag(hit: Array) -> void:
 	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[hit[0]]
 	# materialize an auto end (0 = follow tail) so the drag works against
@@ -541,24 +579,91 @@ func _process(delta: float) -> void:
 func _refresh() -> void:
 	if grid == null:
 		return
+	_ensure_windows()
 	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget]:
 		w.queue_redraw()
+
+# sliding window refill for binary-backed (real quotes) series: keeps
+# `s.candles` covering the visible range (and the replay head) plus a pad
+const WIN_PAD := 4096
+
+func _ensure_windows() -> void:
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := int(ceil(ir.y))
+	for s in data.series:
+		if s.store == null or s.store.count == 0:
+			continue
+		var lo := maxi(0, i0 - WIN_PAD)
+		var hi := mini(s.store.count, max(i1, head) + WIN_PAD)
+		# FFT indicators read absolute index ranges that may be far outside
+		# the visible window — extend the cache to cover them
+		if indicator_widget != null:
+			for ind in indicator_widget.indicators:
+				if ind.enabled and ind.kind == "FFT":
+					var w := indicator_widget.fft_window(ind, s.size())
+					lo = mini(lo, w.x)
+					hi = maxi(hi, mini(w.y, s.store.count))
+		if not s.candles.is_empty() and s.win_off <= lo and hi <= s.win_off + s.candles.size():
+			continue
+		s.win_off = s.store.read_range(lo, hi, s.candles)
+
+func _set_load_status(msg: String) -> void:
+	cursor_widget.load_text = msg
+
+func _load_progress(p: float) -> void:
+	cursor_widget.load_text = "loading %s… %d%%" % [_load_name, int(p * 100)]
+
+var _load_name := ""
+
+# opens (or builds) the binary store for a real-quotes csv at `tf`,
+# converting the csv and aggregating parent timeframes on demand
+func _open_quotes(s: PlotData.Series, csv_path: String, tf: String) -> int:
+	if s.store == null:
+		s.store = QuoteStore.new()
+	s.store_key = csv_path
+	var conv := QuoteStore.new()
+	_load_name = csv_path.get_file()
+	_set_load_status("converting %s…" % _load_name)
+	var err: int = await conv.convert_csv_async(csv_path, _load_progress)
+	if err != OK:
+		return err
+	if tf != "1m":
+		var chain: Array[String] = []
+		var t := tf
+		while t != "1m":
+			chain.push_front(t)
+			t = QuoteStore._parent_tf(t)
+		for ct in chain:
+			_set_load_status("building %s…" % ct)
+			err = await conv.ensure_tf_async(csv_path, ct, _load_progress)
+			if err != OK:
+				return err
+	if not s.store.open(QuoteStore.cache_path(csv_path, tf)):
+		return ERR_CANT_OPEN
+	s.tf = tf
+	s.win_off = 0
+	s.candles.clear()
+	return OK
 
 func add_timeline(tl_name: String, path: String) -> int:
 	# a same-name timeline is a reload (e.g. after resuming generation):
 	# refresh its data in place, keeping user colors and indicators
 	for i in data.series.size():
 		if data.series[i].name == tl_name:
-			return _reload_series(i, path)
+			return await _reload_series(i, path)
 	var s := PlotDataScript.Series.new()
 	s.name = tl_name
 	var ticks_path := "%s.ticks.csv" % path.get_basename()
 	if FileAccess.file_exists(ticks_path):
 		var t := _load_ticks(ticks_path)
-		s.candles = t["candles"]
-		s.books = t["books"]
+		s.set_base(t["candles"], t["books"])
+	elif QuoteStore.sniff_csv(path) == "quotes":
+		if await _open_quotes(s, path, "1m") != OK:
+			_set_load_status("load failed: %s" % tl_name)
+			return -1
 	else:
-		s.candles = _load_candles(path)
+		s.set_base(_load_candles(path), [])
 	var idx: int = data.series.size()
 	var col: Color = PALETTE[idx % PALETTE.size()]
 	s.col_pos = col
@@ -566,12 +671,15 @@ func add_timeline(tl_name: String, path: String) -> int:
 	data.add_series(s)
 	if data.series.size() == 1:
 		_read_meta(path)
+		if s.store != null and s.store.decimals >= 0:
+			view.decimals = s.store.decimals
 		_fit_view(s)
 	view.follow = true
 	head = 0
 	data.head = head
 	playing = true
 	_update_book()
+	_set_load_status("")
 	_refresh()
 	return idx
 
@@ -580,16 +688,25 @@ func _reload_series(i: int, path: String) -> int:
 	var ticks_path := "%s.ticks.csv" % path.get_basename()
 	if FileAccess.file_exists(ticks_path):
 		var t := _load_ticks(ticks_path)
-		s.candles = t["candles"]
-		s.books = t["books"]
+		s.set_base(t["candles"], t["books"])
+	elif s.store != null:
+		if await _open_quotes(s, path, s.tf) != OK:
+			_set_load_status("reload failed: %s" % s.name)
+			return i
+	elif QuoteStore.sniff_csv(path) == "quotes":
+		if await _open_quotes(s, path, "1m") != OK:
+			_set_load_status("reload failed: %s" % s.name)
+			return i
 	else:
-		s.candles = _load_candles(path)
-		s.books = []
+		s.set_base(_load_candles(path), [])
 	_update_book()
 	_refresh()
 	return i
 
 func remove_timeline(idx: int) -> void:
+	var s: PlotData.Series = data.series[idx]
+	if s.store != null:
+		s.store.close()
 	data.series.remove_at(idx)
 	for i in data.series.size():
 		var col: Color = PALETTE[i % PALETTE.size()]
@@ -616,24 +733,30 @@ func _read_meta(path: String) -> void:
 			view.decimals = line.get_slice("=", 1).to_int()
 
 func _fit_view(s) -> void:
-	if s.candles.is_empty():
+	if s.size() == 0:
 		return
-	var lo: float = s.candles[0].low
-	var hi: float = s.candles[0].high
-	for c in s.candles:
-		lo = minf(lo, c.low)
-		hi = maxf(hi, c.high)
+	var lo: float
+	var hi: float
+	if s.store != null:
+		lo = s.store.min_low
+		hi = s.store.max_high
+	else:
+		lo = s.candles[0].low
+		hi = s.candles[0].high
+		for c in s.candles:
+			lo = minf(lo, c.low)
+			hi = maxf(hi, c.high)
 	view.fit_prices(lo, hi, view.plot_rect.size.y - vol_pane_h())
 
 func _update_book() -> void:
 	book_widget.clear()
 	for s in data.series:
-		if not s.visible or s.candles.is_empty():
+		if not s.visible or s.size() == 0:
 			continue
-		var n := s.candles.size()
+		var n := s.size()
 		var i := clampi(head - 1, 0, n - 1)
-		if not s.books.is_empty() and i < s.books.size():
-			var snap: Dictionary = s.books[i]
+		var snap: Variant = s.book_at(i)
+		if snap != null:
 			var sb: Array[Vector2] = snap["bids"]
 			var sa: Array[Vector2] = snap["asks"]
 			var mid := 0.0
@@ -645,12 +768,14 @@ func _update_book() -> void:
 				mid = sa[0].x
 			book_widget.set_book(sb, sa, mid)
 			return
-		var probe := mini(n, 100)
+		if s.store != null and (s.candles.is_empty() or i < s.win_off or i >= s.win_off + s.candles.size()):
+			return
+		var probe := mini(i + 1, 100)
 		var span_sum := 0.0
-		for k in range(n - probe, n):
-			span_sum += s.candles[k].high - s.candles[k].low
+		for k in range(i - probe + 1, i + 1):
+			span_sum += s.candle_at(k).high - s.candle_at(k).low
 		var step := maxf(span_sum / probe / 4.0, 1.0e-9)
-		book_widget.set_ladder(s.candles[n - 1].close, step)
+		book_widget.set_ladder(s.candle_at(i).close, step)
 		return
 
 func _on_timeline_added(tl_name: String, path: String) -> void:

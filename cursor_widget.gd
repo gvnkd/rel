@@ -12,6 +12,7 @@ var cross: CrossWidget
 var indicators: IndicatorWidget
 var mode_text := ""
 var indicators_text := ""
+var load_text := ""
 
 func _ready() -> void:
 	mouse_filter = MOUSE_FILTER_IGNORE
@@ -22,15 +23,17 @@ func _draw() -> void:
 	var font := ThemeDB.fallback_font
 	var lines := []
 	for s in data.series:
-		if not s.visible or s.candles.is_empty():
+		if not s.visible or s.size() == 0:
 			continue
-		var n := s.candles.size()
+		var n := s.size()
 		var i := n - 1
 		if cross != null and view.plot_rect.has_point(cross.mouse):
 			i = clampi(int(floor(view.x_to_index(cross.mouse.x))), 0, n - 1)
 		elif data.head >= 0:
 			i = clampi(data.head, 0, n - 1)
-		var c: Candle = s.candles[i]
+		if s.store != null:
+			i = clampi(i, s.win_off, s.win_off + s.candles.size() - 1)
+		var c: Candle = s.candle_at(i)
 		var txt := "%s  O %s  H %s  L %s  C %s  V %s" % [s.name,
 			view.fmt_price(c.open), view.fmt_price(c.high),
 			view.fmt_price(c.low), view.fmt_price(c.close),
@@ -48,6 +51,8 @@ func _draw() -> void:
 					txt += "  %s %s" % [ind.kind, view.fmt_price(float(v))]
 		lines.append([txt, s.col_pos])
 	var extra: Array[String] = []
+	if not load_text.is_empty():
+		extra.append(load_text)
 	if not mode_text.is_empty():
 		extra.append("mode: " + mode_text)
 	if not indicators_text.is_empty():
