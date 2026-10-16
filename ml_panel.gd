@@ -1,7 +1,6 @@
 class_name MlPanel
 extends Control
 
-signal equity_overlay(tl_name: String, path: String)
 signal session_selected(sess_seed: int)
 signal results_ready(run_dir: String, results: Dictionary)
 
@@ -237,17 +236,7 @@ func _refresh_table(live: Array) -> void:
 		plot_btn.disabled = not _results.has(sess_seed)
 		plot_btn.pressed.connect(_on_plot_pressed.bind(sess_seed))
 		row.add_child(plot_btn)
-		var chart_btn := Button.new()
-		chart_btn.text = "chart"
-		var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
-		chart_btn.disabled = not FileAccess.file_exists(eq)
-		chart_btn.pressed.connect(_on_chart_pressed.bind(sess_seed))
-		row.add_child(chart_btn)
 		_table.add_child(row)
 
 func _on_plot_pressed(sess_seed: int) -> void:
 	session_selected.emit(sess_seed)
-
-func _on_chart_pressed(sess_seed: int) -> void:
-	var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
-	equity_overlay.emit("eq_%s_%d" % [_train_name, sess_seed], eq)

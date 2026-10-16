@@ -95,8 +95,8 @@ mean/std only, then applied to all three segments.
   - `test_<seed>.csv` — per test step: `close,equity,pred` (price walk,
     equity curve, predicted class — everything the page's own plot
     widgets render)
-  - `equity_<seed>.csv` — equity as a candles csv (`o=h=l=c=equity`) so
-    the chart tab can overlay it too
+  - `equity_<seed>.csv` — equity as a candles csv (`o=h=l=c=equity`) for
+    external tooling; the page's own plots are the primary visualization
 
 ## Parallel sessions
 
