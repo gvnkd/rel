@@ -89,6 +89,8 @@
               export HOME=$TMPDIR
               redot --headless --path . --import
               redot --headless --path . --quit-after 2 chart.tscn
+              redot --headless --path . --quit-after 2 ml_page.tscn
+              redot --headless --path . --quit-after 2 main.tscn
               touch $out
             '';
       });
