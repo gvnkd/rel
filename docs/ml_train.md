@@ -89,8 +89,14 @@ mean/std only, then applied to all three segments.
   - `calmar` — `pnl / maxDD` (falls back to `pnl` when `maxDD ≈ 0`)
   - `accuracy` — fraction of correct next-move class predictions
   - `trades` — position changes
-- The equity curve is exported as `equity_<seed>.csv` (candles csv with
-  `o=h=l=c=equity`) so the chart can overlay it directly.
+- Artifacts per session (in the run directory):
+  - `ml_<seed>.json` — all metrics + artifact file names
+  - `hist_<seed>.csv` — validation Calmar per epoch (training curve)
+  - `test_<seed>.csv` — per test step: `close,equity,pred` (price walk,
+    equity curve, predicted class — everything the page's own plot
+    widgets render)
+  - `equity_<seed>.csv` — equity as a candles csv (`o=h=l=c=equity`) so
+    the chart tab can overlay it too
 
 ## Parallel sessions
 

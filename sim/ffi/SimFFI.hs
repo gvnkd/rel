@@ -573,38 +573,49 @@ runMlBatch p = do
       , MLT.thCancelled = readIORef mlCancelRef
       }
 
--- per-session artifacts: metrics json + the equity curve as a candles csv
--- (o=h=l=c=equity) so the chart can load it as a regular timeline
+-- per-session artifacts: metrics json, the equity curve as a candles csv
+-- (o=h=l=c=equity) so the chart can load it as a regular timeline, the
+-- validation-Calmar-per-epoch history, and the per-test-step series
+-- (close, equity, predicted class) for the ML page's own plot widgets
 writeMlResult :: FilePath -> MLT.SessionResult -> IO ()
 writeMlResult out sr = do
-  let met = MLT.srMetrics sr
+  let pr = MLT.srTest sr
+      met = MLT.prMetrics pr
       seed = MLT.srSeed sr
       eqPath = out ++ "/equity_" ++ show seed ++ ".csv"
       js = intercalate ","
         [ "\"seed\":" ++ show seed
         , "\"epochs\":" ++ show (MLT.srEpochs sr)
         , "\"bestEpoch\":" ++ show (MLT.srBestEpoch sr)
-        , "\"valCalmar\":" ++ show (MLT.srValCalmar sr)
+        , "\"valCalmar\":" ++ show (if VU.null (MLT.srHistory sr) then 0 else VU.maximum (MLT.srHistory sr))
         , "\"pnl\":" ++ show (MLT.mPnl met)
         , "\"maxDD\":" ++ show (MLT.mMaxDD met)
         , "\"calmar\":" ++ show (MLT.mCalmar met)
         , "\"accuracy\":" ++ show (MLT.mAccuracy met)
         , "\"trades\":" ++ show (MLT.mTrades met)
         , "\"equity\":\"equity_" ++ show seed ++ ".csv\""
+        , "\"hist\":\"hist_" ++ show seed ++ ".csv\""
+        , "\"test\":\"test_" ++ show seed ++ ".csv\""
         ]
   withFile (out ++ "/ml_" ++ show seed ++ ".json") WriteMode $ \h ->
     hPutStr h ("{" ++ js ++ "}\n")
-  withFile eqPath WriteMode $ \h ->
+  withFile eqPath WriteMode $ \h -> do
     hPutStr h "open,high,low,close,vol\n"
-  appendEquity eqPath (MLT.srEquity sr)
-
-appendEquity :: FilePath -> VU.Vector Double -> IO ()
-appendEquity path eq = withFile path AppendMode $ \h ->
-  hPutStr h (concatMap row (VU.toList eq))
+    hPutStr h (concatMap eqRow (VU.toList (MLT.prEquity pr)))
+  withFile (out ++ "/hist_" ++ show seed ++ ".csv") WriteMode $ \h -> do
+    hPutStr h "epoch,val_calmar\n"
+    hPutStr h (concatMap histRow (zip [(1 :: Int) ..] (VU.toList (MLT.srHistory sr))))
+  withFile (out ++ "/test_" ++ show seed ++ ".csv") WriteMode $ \h -> do
+    hPutStr h "close,equity,pred\n"
+    hPutStr h (concatMap testRow (zip3 (VU.toList (MLT.prCloses pr))
+                                       (VU.toList (MLT.prEquity pr))
+                                       (VU.toList (MLT.prPreds pr))))
   where
-    row e =
+    eqRow e =
       let s = printf "%.5f" e
       in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
+    histRow (e, v) = show e ++ "," ++ printf "%.6g" v ++ "\n"
+    testRow (c, e, p) = printf "%.5f,%.6g,%d\n" c e p
 
 parseMlParams :: String -> Either String MlParams
 parseMlParams s = do

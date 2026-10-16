@@ -209,7 +209,7 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 	if ind.kind == "CECP":
 		return "CECP (%d, m%d)" % [ind.period, ind.m]
 	if ind.kind == "OBVOL":
-		return "OBVOL %s%s" % ["snap" if ind.obvol_mode == 1 else "life", " b%g" % ind.bucket if ind.bucket > 0.0 else ""]
+		return "OBVOL %s%s" % ["snap" if ind.obvol_mode == 1 else "life", " b%.4f" % ind.bucket if ind.bucket > 0.0 else ""]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:

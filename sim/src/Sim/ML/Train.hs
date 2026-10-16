@@ -12,6 +12,7 @@ module Sim.ML.Train
   , TrainHooks (..)
   , defaultTrainHooks
   , Metrics (..)
+  , PolicyResult (..)
   , SessionResult (..)
   , MlData (..)
   , prepareData
@@ -72,13 +73,20 @@ data Metrics = Metrics
   , mTrades   :: !Int
   } deriving (Show)
 
+-- full result of a policy walk: metrics + per-step series for plotting
+data PolicyResult = PolicyResult
+  { prMetrics :: !Metrics
+  , prEquity  :: !(VU.Vector Double)
+  , prCloses  :: !(VU.Vector Double)  -- entry close per step
+  , prPreds   :: !(VU.Vector Int)     -- predicted class per step
+  } deriving (Show)
+
 data SessionResult = SessionResult
   { srSeed      :: !Word64
   , srEpochs    :: !Int
   , srBestEpoch :: !Int
-  , srValCalmar :: !Double
-  , srMetrics   :: !Metrics       -- test segment, best-on-val model
-  , srEquity    :: !(VU.Vector Double)
+  , srHistory   :: !(VU.Vector Double) -- validation Calmar per epoch
+  , srTest      :: !PolicyResult       -- test segment, best-on-val model
   } deriving (Show)
 
 -- preprocessed, normalized dataset ready for sessions
@@ -136,27 +144,29 @@ prepareData tp bars
 -- policy: predicted class at candle i -> position held over i -> i+1
 -- (0 = down -> short, 1 = flat, 2 = up -> long); PnL = position * next
 -- return - fee * |position change|. Returns metrics + the equity curve.
-evalPolicy :: Model -> Double -> MlData -> [Int] -> (Metrics, VU.Vector Double)
+evalPolicy :: Model -> Double -> MlData -> [Int] -> PolicyResult
 evalPolicy m fee md idxs =
   let steps = [ (i, predictClass m (mdRows md V.! i), mdLabels md VU.! i)
               | i <- idxs, VU.length (mdRows md V.! i) > 0 ]
       go _ acc [] = acc
-      go prevPos (eq, peak, pnl, dd, correct, total, trades, curve) ((i, cls, lab) : rest) =
+      go prevPos (eq, peak, pnl, dd, correct, total, trades, curve, closes, preds) ((i, cls, lab) : rest) =
         let pos = cls - 1
-            r = mdCloses md VU.! (i + 1) / mdCloses md VU.! i - 1
+            c = mdCloses md VU.! i
+            r = mdCloses md VU.! (i + 1) / c - 1
             step = fromIntegral pos * r - fee * fromIntegral (abs (pos - prevPos))
             eq' = eq + step
             peak' = max peak eq'
             dd' = max dd (peak' - eq')
             correct' = correct + (if cls == lab then 1 else 0)
             trades' = trades + (if pos /= prevPos then 1 else 0)
-        in go pos (eq', peak', pnl + step, dd', correct', total + 1, trades', eq' : curve) rest
-      (_eqF, _peakF, pnlF, ddF, correctF, totalF, tradesF, curveRev) =
-        go 0 (0, 0, 0, 0, 0, 0, 0, []) steps
+        in go pos (eq', peak', pnl + step, dd', correct', total + 1, trades', eq' : curve, c : closes, cls : preds) rest
+      (_eqF, _peakF, pnlF, ddF, correctF, totalF, tradesF, curveRev, closesRev, predsRev) =
+        go 0 (0, 0, 0, 0, 0, 0, 0, [], [], []) steps
       met = Metrics pnlF ddF (if ddF > 1e-12 then pnlF / ddF else pnlF)
                     (if totalF > 0 then fromIntegral correctF / fromIntegral totalF else 0)
                     tradesF
-  in (met, VU.fromList (reverse curveRev))
+  in PolicyResult met (VU.fromList (reverse curveRev))
+                    (VU.fromList (reverse closesRev)) (VU.fromList (reverse predsRev))
 
 -- one training session; returns Nothing when cancelled. Each epoch
 -- shuffles the train segment (splitmix, seeded per session — fully
@@ -168,9 +178,9 @@ trainSession hooks tp md seed = do
       sizes = featureSize (tpSpec tp) : tpHidden tp ++ [3]
       m0 = initModel g0 sizes
       rowsOf i = (mdRows md V.! i, mdLabels md VU.! i)
-      loop :: Model -> SMGen -> Int -> Maybe Model -> Double -> Int -> IO (Maybe SessionResult)
-      loop m g e bestM bestCalmar bestEp
-        | e > tpEpochs tp = finish bestM bestCalmar bestEp
+      loop :: Model -> SMGen -> Int -> Maybe Model -> Double -> Int -> [Double] -> IO (Maybe SessionResult)
+      loop m g e bestM bestCalmar bestEp hist
+        | e > tpEpochs tp = finish bestM bestEp hist
         | otherwise = do
             cancelled <- thCancelled hooks
             when cancelled (throwIO SimCancelled)
@@ -179,20 +189,20 @@ trainSession hooks tp md seed = do
                 m' = foldl'
                        (\mm idxs -> sgdStep (tpLR tp) mm (map rowsOf idxs))
                        m batches
-                (valMet, _) = evalPolicy m' (tpFee tp) md (mdVal md)
-                vc = mCalmar valMet
+                vc = mCalmar (prMetrics (evalPolicy m' (tpFee tp) md (mdVal md)))
             thProgress hooks e (tpEpochs tp)
             thBest hooks vc
             if vc > bestCalmar
-              then loop m' g1 (e + 1) (Just m') vc e
-              else loop m' g1 (e + 1) bestM bestCalmar bestEp
-      finish bestM bestCalmar bestEp =
+              then loop m' g1 (e + 1) (Just m') vc e (vc : hist)
+              else loop m' g1 (e + 1) bestM bestCalmar bestEp (vc : hist)
+      finish bestM bestEp hist =
         let mFinal = case bestM of
               Just bm -> bm
               Nothing -> m0
-            (met, eq) = evalPolicy mFinal (tpFee tp) md (mdTest md)
-        in pure (Just (SessionResult seed (tpEpochs tp) bestEp bestCalmar met eq))
-  loop m0 g0 1 Nothing (-1 / 0) 0
+            pr = evalPolicy mFinal (tpFee tp) md (mdTest md)
+        in pure (Just (SessionResult seed (tpEpochs tp) bestEp
+                          (VU.fromList (reverse hist)) pr))
+  loop m0 g0 1 Nothing (-1 / 0) 0 []
 
 -- deterministic Fisher-Yates-free shuffle: sort by a splitmix key
 shuffleIdx :: SMGen -> [Int] -> (SMGen, [Int])

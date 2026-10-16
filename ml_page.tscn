@@ -1,7 +1,8 @@
-[gd_scene load_steps=3 format=3 uid="uid://c8mlp2yav4tju"]
+[gd_scene load_steps=4 format=3 uid="uid://c8mlp2yav4tju"]
 
 [ext_resource type="Script" uid="uid://d3k8vmp2w1nqr" path="res://ml_page.gd" id="1_page"]
 [ext_resource type="Script" uid="uid://dq7ml2kpx8vfu" path="res://ml_panel.gd" id="2_panel"]
+[ext_resource type="Script" uid="uid://d8r4v0n3q2wpx" path="res://ml_plots.gd" id="3_plots"]
 
 [node name="MlPage" type="Control"]
 layout_mode = 3
@@ -29,7 +30,16 @@ layout_mode = 2
 size_flags_horizontal = 3
 script = ExtResource("2_panel")
 
-[node name="Docs" type="TextEdit" parent="Split"]
+[node name="Right" type="VSplitContainer" parent="Split"]
 layout_mode = 2
 size_flags_horizontal = 3
+
+[node name="Plots" type="Control" parent="Split/Right"]
+layout_mode = 2
+size_flags_vertical = 3
+script = ExtResource("3_plots")
+
+[node name="Docs" type="TextEdit" parent="Split/Right"]
+custom_minimum_size = Vector2(0, 120)
+layout_mode = 2
 editable = false

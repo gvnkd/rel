@@ -1,8 +1,9 @@
 class_name MlPanel
 extends Control
 
-signal timeline_added(tl_name: String, path: String)
 signal equity_overlay(tl_name: String, path: String)
+signal session_selected(sess_seed: int)
+signal results_ready(run_dir: String, results: Dictionary)
 
 const PARAM_FIELDS := [
 	["sessions", "sessions", "4"],
@@ -177,16 +178,17 @@ func _process(_delta: float) -> void:
 	set_process(false)
 	_train_btn.text = "Train"
 	_load_results()
+	results_ready.emit(ProjectSettings.globalize_path(_run_dir()), _results)
 	var parsed: Variant = JSON.parse_string(_sim.ml_sessions())
 	if parsed is Array:
 		_refresh_table(parsed)
 	var best := -INF
 	var best_seed := 0
-	for seed in _results:
-		var m: Dictionary = _results[seed]
+	for sess_seed in _results:
+		var m: Dictionary = _results[sess_seed]
 		if m["calmar"] > best:
 			best = m["calmar"]
-			best_seed = seed
+			best_seed = sess_seed
 	if best_seed > 0:
 		_update_status("done; best seed %d (calmar %.4f)" % [best_seed, best])
 	elif _cancel_requested:
@@ -197,23 +199,23 @@ func _process(_delta: float) -> void:
 
 func _load_results() -> void:
 	for k in _session_count:
-		var seed := _base_seed + k
-		var p := "%s/ml_%d.json" % [ProjectSettings.globalize_path(_run_dir()), seed]
+		var sess_seed := _base_seed + k
+		var p := "%s/ml_%d.json" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
 		if not FileAccess.file_exists(p):
 			continue
 		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(p))
 		if parsed is Dictionary:
-			_results[seed] = parsed
+			_results[sess_seed] = parsed
 
 func _refresh_table(live: Array) -> void:
 	for c in _table.get_children():
 		c.queue_free()
 	for entry in live:
 		var s: Dictionary = entry
-		var seed: int = s["seed"]
+		var sess_seed: int = s["seed"]
 		var row := HBoxContainer.new()
 		var lab := Label.new()
-		lab.text = "#%d" % seed
+		lab.text = "#%d" % sess_seed
 		lab.custom_minimum_size.x = 34
 		row.add_child(lab)
 		var prog := Label.new()
@@ -222,21 +224,30 @@ func _refresh_table(live: Array) -> void:
 		row.add_child(prog)
 		var info := Label.new()
 		info.size_flags_horizontal = SIZE_EXPAND_FILL
-		if _results.has(seed):
-			var m: Dictionary = _results[seed]
+		if _results.has(sess_seed):
+			var m: Dictionary = _results[sess_seed]
 			info.text = "calmar %.4f  acc %.4f  pnl %.4f (%d trades)" % [
 				m["calmar"], m["accuracy"], m["pnl"], m["trades"]]
 		else:
 			info.text = "%s  best %.4f" % [s["status"], s["best"]]
 		row.add_child(info)
+		var plot_btn := Button.new()
+		plot_btn.text = "plot"
+		plot_btn.tooltip_text = "show this session in the page plots"
+		plot_btn.disabled = not _results.has(sess_seed)
+		plot_btn.pressed.connect(_on_plot_pressed.bind(sess_seed))
+		row.add_child(plot_btn)
 		var chart_btn := Button.new()
 		chart_btn.text = "chart"
-		var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), seed]
+		var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
 		chart_btn.disabled = not FileAccess.file_exists(eq)
-		chart_btn.pressed.connect(_on_chart_pressed.bind(seed))
+		chart_btn.pressed.connect(_on_chart_pressed.bind(sess_seed))
 		row.add_child(chart_btn)
 		_table.add_child(row)
 
-func _on_chart_pressed(seed: int) -> void:
-	var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), seed]
-	equity_overlay.emit("eq_%s_%d" % [_train_name, seed], eq)
+func _on_plot_pressed(sess_seed: int) -> void:
+	session_selected.emit(sess_seed)
+
+func _on_chart_pressed(sess_seed: int) -> void:
+	var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
+	equity_overlay.emit("eq_%s_%d" % [_train_name, sess_seed], eq)

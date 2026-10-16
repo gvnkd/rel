@@ -1006,12 +1006,15 @@ prop_ml_policy_always_long =
       Right md = MLT.prepareData tp bars
       fi = MLD.featureSize (MLT.tpSpec tp)
       long = MLM.Model [ MLM.Layer fi 3 (VU.replicate (fi * 3) 0) (VU.fromList [0, 0, 5]) ]
-      (met, eq) = MLT.evalPolicy long (MLT.tpFee tp) md (MLT.mdTest md)
+      pr = MLT.evalPolicy long (MLT.tpFee tp) md (MLT.mdTest md)
+      met = MLT.prMetrics pr
   in MLT.mPnl met > 0
      && MLT.mMaxDD met == 0
      && MLT.mCalmar met == MLT.mPnl met
      && MLT.mTrades met == 1
-     && VU.length eq == length (MLT.mdTest md)
+     && VU.length (MLT.prEquity pr) == length (MLT.mdTest md)
+     && VU.length (MLT.prCloses pr) == length (MLT.mdTest md)
+     && VU.all (== 2) (MLT.prPreds pr)
 
 -- end-to-end session on predictable (sinus) bars must beat chance by a
 -- wide margin; fixed seed, deterministic
@@ -1023,12 +1026,13 @@ prop_ml_session_learns_sinus =
   in case res of
        Nothing -> False
        Just sr ->
-         let m = MLT.srMetrics sr
+         let m = MLT.prMetrics (MLT.srTest sr)
          in MLT.srBestEpoch sr > 0
             && MLT.mAccuracy m > 0.6
             && MLT.mAccuracy m <= 1
             && MLT.mPnl m /= 0
-            && VU.length (MLT.srEquity sr) == length (MLT.mdTest md)
+            && VU.length (MLT.srHistory sr) == MLT.tpEpochs tp
+            && VU.length (MLT.prEquity (MLT.srTest sr)) == length (MLT.mdTest md)
 
 main :: IO ()
 main = do
