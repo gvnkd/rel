@@ -324,8 +324,17 @@ func _draw_obvol(ind: Indicator, s: PlotData.Series, k: int) -> void:
 		var y := view.price_to_y(c.segs[t * 5 + 1])
 		if y < r.position.y or y > r.end.y:
 			continue
-		var x0 := maxf(view.index_to_x(int(c.segs[t * 5 + 2])), r.position.x)
-		var x1 := minf(view.index_to_x(int(c.segs[t * 5 + 3]) + 1), r.end.x)
+		# runs span candle center to candle center (the convention other
+		# indicator lines use); a single-candle run draws its full cell so
+		# one-candle pulses stay visible
+		var hw := view.px_per_index / 2.0
+		var x0 := view.index_to_x(int(c.segs[t * 5 + 2])) + hw
+		var x1 := view.index_to_x(int(c.segs[t * 5 + 3])) + hw
+		if x1 <= x0:
+			x0 -= hw
+			x1 += hw
+		x0 = maxf(x0, r.position.x)
+		x1 = minf(x1, r.end.x)
 		if x1 <= x0:
 			continue
 		var col: Color = OBVOL_BID_COL if int(c.segs[t * 5]) == 0 else OBVOL_ASK_COL
