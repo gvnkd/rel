@@ -2,12 +2,14 @@ class_name MlPanel
 extends Control
 
 signal timeline_added(tl_name: String, path: String)
+signal equity_overlay(tl_name: String, path: String)
 
 const PARAM_FIELDS := [
 	["sessions", "sessions", "4"],
 	["seed", "seed base", "1"],
 	["epochs", "epochs", "50"],
 	["lr", "learn rate", "0.05"],
+	["batch", "mini-batch", "256"],
 	["hidden", "hidden layers", "16"],
 	["trainpct", "train %", "0.6"],
 	["valpct", "val %", "0.2"],
@@ -33,6 +35,7 @@ var _results := {}
 var _poll_ms := -1
 var _base_seed := 1
 var _session_count := 0
+var _cancel_requested := false
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -62,7 +65,7 @@ func _build_ui() -> void:
 	var data_row := HBoxContainer.new()
 	_data_edit = LineEdit.new()
 	_data_edit.size_flags_horizontal = SIZE_EXPAND_FILL
-	_data_edit.placeholder_text = "candles csv (sim or real quotes)"
+	_data_edit.placeholder_text = "candles csv or .rbin store"
 	data_row.add_child(_data_edit)
 	var browse := Button.new()
 	browse.text = "..."
@@ -101,7 +104,7 @@ func _build_ui() -> void:
 	_dialog = FileDialog.new()
 	_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	_dialog.access = FileDialog.ACCESS_FILESYSTEM
-	_dialog.filters = PackedStringArray(["*.csv ; CSV candles"])
+	_dialog.filters = PackedStringArray(["*.csv ; CSV candles", "*.rbin ; Binary candles"])
 	_dialog.file_selected.connect(_on_data_picked)
 	add_child(_dialog)
 
@@ -131,6 +134,7 @@ func _params_string() -> String:
 func _on_train() -> void:
 	if _thread != null:
 		_sim.ml_cancel()
+		_cancel_requested = true
 		_update_status("cancelling…")
 		return
 	if not sim_available:
@@ -145,13 +149,11 @@ func _on_train() -> void:
 	_session_count = maxi(1, fields["sessions"].text.to_int())
 	_results = {}
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(_run_dir()))
-	_train_btn.disabled = true
 	_train_btn.text = "Cancel"
 	_thread = Thread.new()
 	var start_err: int = _thread.start(Callable(_sim, "ml_train").bind(_params_string()))
 	if start_err != OK:
 		_thread = null
-		_train_btn.disabled = false
 		_train_btn.text = "Train"
 		_update_status("failed to start training thread (code %d)" % start_err)
 		return
@@ -173,7 +175,6 @@ func _process(_delta: float) -> void:
 	_thread.wait_to_finish()
 	_thread = null
 	set_process(false)
-	_train_btn.disabled = false
 	_train_btn.text = "Train"
 	_load_results()
 	var parsed: Variant = JSON.parse_string(_sim.ml_sessions())
@@ -188,8 +189,11 @@ func _process(_delta: float) -> void:
 			best_seed = seed
 	if best_seed > 0:
 		_update_status("done; best seed %d (calmar %.4f)" % [best_seed, best])
+	elif _cancel_requested:
+		_update_status("cancelled")
 	else:
 		_update_status("done (no session produced a result)")
+	_cancel_requested = false
 
 func _load_results() -> void:
 	for k in _session_count:
@@ -235,4 +239,4 @@ func _refresh_table(live: Array) -> void:
 
 func _on_chart_pressed(seed: int) -> void:
 	var eq := "%s/equity_%d.csv" % [ProjectSettings.globalize_path(_run_dir()), seed]
-	timeline_added.emit("eq_%s_%d" % [_train_name, seed], eq)
+	equity_overlay.emit("eq_%s_%d" % [_train_name, seed], eq)

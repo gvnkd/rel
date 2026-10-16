@@ -19,7 +19,22 @@ module Sim.ML.Model
   ) where
 
 import qualified Data.Vector.Unboxed as VU
+import Data.Vector.Unboxed (unsafeIndex)
 import System.Random.SplitMix (SMGen, nextWord64)
+
+-- bounds-check-free indexing: every vector length is consistent by
+-- construction (initModel/sgdStep preserve layouts), and the QC suite
+-- (numeric gradient check, policy props) guards correctness
+u :: VU.Vector Double -> Int -> Double
+u = unsafeIndex
+
+-- strict sum over f 0..n-1 with no list allocation — the hot inner loop
+sumN :: (Int -> Double) -> Int -> Double
+sumN f n = go 0 0.0
+  where
+    go i acc
+      | i >= n    = acc
+      | otherwise = let acc' = acc + f i in acc' `seq` go (i + 1) acc'
 
 data Layer = Layer
   { lIn  :: !Int
@@ -98,19 +113,21 @@ gradOne m x y =
   let acts = forward m x
       probs = last acts
       dOut = VU.imap (\j p -> p - (if j == y then 1 else 0)) probs
-      go _ [] _ = []
-      go da (l : ls) (inp : inps) =
-        let gw = VU.generate (lIn l * lOut l) $ \k ->
-                   let (i, j) = k `divMod` lOut l
-                   in (if i < VU.length inp then inp VU.! i else 0) * (da VU.! j)
-            gb = da
+      goLayer da l inp =
+        let o = lOut l
+            gw = VU.generate (lIn l * o) $ \k ->
+                   let (i, j) = k `divMod` o
+                   in u inp i * u da j
             dprev = VU.generate (lIn l) $ \i ->
-              sum [ (lW l VU.! (i * lOut l + j)) * (da VU.! j)
-                  | j <- [0 .. lOut l - 1] ]
-            dzPrev
-              | null ls   = VU.empty
-              | otherwise = VU.imap (\i v -> v * (1 - let a = if i < VU.length inp then inp VU.! i else 0 in a * a)) dprev
-        in LayerGrad gw gb : go dzPrev ls inps
+                      sumN (\j -> u (lW l) (i * o + j) * u da j) o
+            dzPrev = VU.imap (\i v -> v * (1 - let a = u inp i in a * a)) dprev
+        in (LayerGrad gw da, dzPrev)
+      go _ [] [] = []
+      go da [l] [inp] = [fst (goLayer da l inp)]
+      go da (l : ls) (inp : inps) =
+        let (g, dzPrev) = goLayer da l inp
+        in g : go dzPrev ls inps
+      go _ _ _ = []
   -- grads come out output-layer-first; return them aligned with mLayers
   in reverse (go dOut (reverse (mLayers m)) (reverse (init acts)))
 
@@ -134,10 +151,10 @@ sgdStep lr m samples =
 
 -- layer output: out_j = sum_i x_i * w(i,j) + b_j
 affine :: Layer -> VU.Vector Double -> VU.Vector Double
-affine l x = VU.generate (lOut l) $ \j ->
-  (if j < VU.length (lB l) then lB l VU.! j else 0)
-    + sum [ (if i < VU.length x then x VU.! i else 0) * (lW l VU.! (i * lOut l + j))
-          | i <- [0 .. lIn l - 1] ]
+affine l x = VU.generate o $ \j ->
+  sumN (\i -> u x i * u (lW l) (i * o + j)) (lIn l) + u (lB l) j
+  where
+    o = lOut l
 
 softmax :: VU.Vector Double -> VU.Vector Double
 softmax z

@@ -1,6 +1,8 @@
 module Main (main) where
 
 import Data.Bits (shiftL, shiftR, xor)
+import qualified Data.ByteString as B
+import Data.ByteString.Builder (doubleLE, toLazyByteString, word32LE, word64LE)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sort, sortOn)
 import Data.Maybe (fromJust, listToMaybe)
@@ -872,6 +874,29 @@ prop_ml_parse_bars_garbage :: Bool
 prop_ml_parse_bars_garbage =
   MLD.parseBars "open,high,low,close,vol\n" == Left "no parseable candle rows"
 
+-- hand-built RELQ/RELS binaries roundtrip through the ML loader
+prop_ml_parse_bars_binary :: Bool
+prop_ml_parse_bars_binary =
+  let bars = [MLD.Bar 1.1 1.2 1.0 1.15 100, MLD.Bar 1.15 1.3 1.1 1.25 200, MLD.Bar 1.25 1.25 1.2 1.22 0]
+      rec b = word64LE 0 <> doubleLE (MLD.barO b) <> doubleLE (MLD.barH b)
+              <> doubleLE (MLD.barL b) <> doubleLE (MLD.barC b)
+              <> word64LE (round (MLD.barV b))
+      relq = B.concat [B.toStrict (toLazyByteString hdr), B.toStrict (toLazyByteString body)]
+        where
+          hdr = word32LE 0x514C4552 <> word32LE 1 <> word32LE 1 <> word32LE 1
+                <> word64LE 3 <> doubleLE 1.0 <> doubleLE 1.3 <> word32LE 5
+                <> word32LE 0 <> word32LE 0 <> word32LE 0 <> word32LE 0 <> word32LE 0
+          body = mconcat (map rec bars)
+      rels = B.concat [B.toStrict (toLazyByteString hdr), B.toStrict (toLazyByteString body)]
+        where
+          hdr = word32LE 0x534C4552 <> word32LE 1 <> word32LE 0 <> word32LE 5
+                <> word64LE 3 <> word64LE 0 <> word64LE 0 <> word64LE 0
+                <> doubleLE 1.0 <> doubleLE 1.3
+          body = mconcat (map rec bars)
+  in MLD.parseBarsBinary relq == Right bars
+     && MLD.parseBarsBinary rels == Right bars
+     && MLD.parseBarsBinary (B.drop 1 relq) == Left "bad magic"
+
 prop_ml_features_rows_valid :: Bool
 prop_ml_features_rows_valid =
   let spec = MLD.defaultFeatureSpec
@@ -1074,6 +1099,7 @@ props =
   , ("ml_parse_bars_sim_csv", property prop_ml_parse_bars_sim_csv)
   , ("ml_parse_bars_timestamped", property prop_ml_parse_bars_timestamped)
   , ("ml_parse_bars_garbage", property prop_ml_parse_bars_garbage)
+  , ("ml_parse_bars_binary", property prop_ml_parse_bars_binary)
   , ("ml_features_rows_valid", property prop_ml_features_rows_valid)
   , ("ml_features_ks", property prop_ml_features_ks)
   , ("ml_prepare_splits_and_norm", property prop_ml_prepare_splits_and_norm)

@@ -10,11 +10,19 @@ module Sim.ML.Data
   , defaultFeatureSpec
   , featureSize
   , parseBars
+  , loadBars
+  , parseBarsBinary
   , FeatureSet (..)
   , buildFeatures
   ) where
 
+import Data.Bits (shiftL, (.|.))
 import Data.Char (isSpace)
+import Data.List (foldl')
+import Data.Word (Word32, Word64)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BC8
+import GHC.Float (castWord64ToDouble)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import Sim.Entropy (rollingPermEntropy)
@@ -155,6 +163,54 @@ stdOf sr sr2 w i =
   let m = (sr VU.! i - sr VU.! (i - w)) / fromIntegral w
       m2 = (sr2 VU.! i - sr2 VU.! (i - w)) / fromIntegral w
   in sqrt (max 0 (m2 - m * m))
+
+-- --- binary candles (.rbin) -----------------------------------------------
+--
+-- both store formats share the record layout (48B LE): time u64,
+-- open/high/low/close f64, vol u64. RELQ ("RELQ") = real-quotes store:
+-- magic u32@0, version u32@4, has_time u32@8, tf_minutes u32@12,
+-- count u64@16, min_low f64@24, max_high f64@32, decimals s32@40.
+-- RELS ("RELS") = sim full export: magic u32@0, version u32@4,
+-- flags u32@8, decimals s32@12, candle_count u64@16, then book_depth /
+-- level_rows / vev_count u64s and min_low/max_high f64 — we take the
+-- candles and stop reading before the books/levels/vev blocks.
+
+magicRelQ, magicRelS :: Word32
+magicRelQ = 0x514C4552
+magicRelS = 0x534C4552
+
+-- sniff the magic and parse accordingly: binary for .rbin stores, csv
+-- (sim or real-quotes text) otherwise
+loadBars :: FilePath -> IO (Either String [Bar])
+loadBars path = do
+  bs <- B.readFile path
+  if B.length bs >= 68 && (getU32 bs 0 == magicRelQ || getU32 bs 0 == magicRelS)
+    then pure (parseBarsBinary bs)
+    else pure (parseBars (BC8.unpack bs))
+
+parseBarsBinary :: B.ByteString -> Either String [Bar]
+parseBarsBinary bs
+  | B.length bs < 64              = Left "binary too short"
+  | getU32 bs 0 /= magicRelQ && getU32 bs 0 /= magicRelS = Left "bad magic"
+  | getU32 bs 4 /= 1              = Left "unsupported binary version"
+  | B.length bs < 64 + n * recLen = Left "truncated candle records"
+  | otherwise = Right (map recAt [0 .. n - 1])
+  where
+    n = fromIntegral (getU64 bs 16)
+    recLen = 48
+    recAt k =
+      let o = 64 + k * recLen
+      in Bar (getF64 bs (o + 8)) (getF64 bs (o + 16)) (getF64 bs (o + 24))
+             (getF64 bs (o + 32)) (fromIntegral (getU64 bs (o + 40)))
+
+getU32 :: B.ByteString -> Int -> Word32
+getU32 bs o = foldl' (.|.) 0 [fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 3]]
+
+getU64 :: B.ByteString -> Int -> Word64
+getU64 bs o = foldl' (.|.) 0 [fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 7]]
+
+getF64 :: B.ByteString -> Int -> Double
+getF64 bs o = castWord64ToDouble (getU64 bs o)
 
 splitCommas :: String -> [String]
 splitCommas s = case break (== ',') s of

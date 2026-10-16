@@ -67,6 +67,7 @@ func _ready() -> void:
 	sim_panel.timeline_removed.connect(_on_timeline_removed)
 	sim_panel.timeline_toggled.connect(_on_timeline_toggled)
 	ml_panel.timeline_added.connect(_on_timeline_added)
+	ml_panel.equity_overlay.connect(_on_equity_overlay)
 	_menu = PopupPanel.new()
 	var panel := PanelContainer.new()
 	_menu_box = VBoxContainer.new()
@@ -1162,6 +1163,21 @@ func _update_book() -> void:
 
 func _on_timeline_added(tl_name: String, path: String) -> void:
 	add_timeline(tl_name, path)
+
+# equity overlay from the ML panel: the curve's y-range (small PnL-like
+# numbers) is far off the price scale, so fit the view to it and stop
+# playback — it is a finished curve, not a live tail
+func _on_equity_overlay(tl_name: String, path: String) -> void:
+	var idx := await add_timeline(tl_name, path)
+	if idx < 0:
+		return
+	_fit_view(data.series[idx])
+	view.follow = false
+	playing = false
+	head = maxi(0, data.series[idx].size() - 1)
+	data.head = head
+	_update_book()
+	_refresh()
 
 func _on_timeline_removed(idx: int) -> void:
 	remove_timeline(idx)

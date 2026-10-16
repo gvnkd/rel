@@ -422,12 +422,14 @@ cleanup path p = mapM_ rm (path : (path ++ ".meta") : sidecar)
 -- equity curve in candles csv format, plottable by the chart).
 --
 -- params (key=value pairs separated by ';'):
---   data=<csv path>      candles csv (sim or real-quotes format) — required
+--   data=<path>          candles csv (sim or real-quotes format) or a
+--                        binary .rbin store (RELQ/RELS) — required
 --   out=<dir>            results directory — required
 --   sessions=N           parallel sessions, seeds seed..seed+N-1 (default 4)
 --   seed=N               base seed (default 1)
 --   epochs=N             (default 50)
 --   lr=D                 learning rate (default 0.05)
+--   batch=N              mini-batch size (default 256)
 --   hidden="16,8"        hidden layer sizes (default "16")
 --   trainpct=D           train segment fraction (default 0.6)
 --   valpct=D             validation segment fraction (default 0.2)
@@ -525,8 +527,8 @@ simMlTrain paramsPtr = do
 
 runMlBatch :: MlParams -> IO ()
 runMlBatch p = do
-  content <- readFile (mlpData p)
-  bars <- case MLD.parseBars content of
+  parsed <- MLD.loadBars (mlpData p)
+  bars <- case parsed of
     Left err -> ioError (userError err)
     Right bs -> pure bs
   md <- case MLT.prepareData (mlpTrain p) bars of
@@ -614,6 +616,7 @@ parseMlParams s = do
   seedBase <- readK "seed" (1 :: Word64)
   epochs   <- readK "epochs" 50
   lr       <- readKD "lr" 0.05
+  batch    <- readK "batch" 256
   hidden   <- parseInts "hidden" [16] "16"
   trainPct <- readKD "trainpct" 0.6
   valPct   <- readKD "valpct" 0.2
@@ -636,7 +639,7 @@ parseMlParams s = do
         , MLD.fsKsM = ksM
         , MLD.fsLabelEps = labelEps
         }
-  pure (MlParams dataPath outDir sessions seedBase (MLT.TrainParams epochs lr hidden trainPct valPct fee spec))
+  pure (MlParams dataPath outDir sessions seedBase (MLT.TrainParams epochs lr batch hidden trainPct valPct fee spec))
   where
     kv = kvPairs s
     readK :: Read a => String -> a -> Either String a
