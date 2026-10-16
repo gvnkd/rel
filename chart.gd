@@ -206,6 +206,8 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 		return "Temp (%d, m%d)" % [ind.period, ind.m]
 	if ind.kind == "CECP":
 		return "CECP (%d, m%d)" % [ind.period, ind.m]
+	if ind.kind == "OBVOL":
+		return "OBVOL %s%s" % ["snap" if ind.obvol_mode == 1 else "life", " b%g" % ind.bucket if ind.bucket > 0.0 else ""]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -248,11 +250,15 @@ func _rebuild_menu() -> void:
 	var b_cecp := Button.new()
 	b_cecp.text = "add CECP"
 	b_cecp.pressed.connect(_on_add_cecp)
+	var b_obvol := Button.new()
+	b_obvol.text = "add OBVOL"
+	b_obvol.pressed.connect(_on_add_obvol)
 	add_row.add_child(b_sma)
 	add_row.add_child(b_fft)
 	add_row.add_child(b_ks)
 	add_row.add_child(b_temp)
 	add_row.add_child(b_cecp)
+	add_row.add_child(b_obvol)
 	_menu_box.add_child(add_row)
 	if not data.series.is_empty():
 		_add_section("series")
@@ -309,6 +315,13 @@ func _build_indicator_row(i: int) -> void:
 		opt.tooltip_text = "search best window/waves for the prediction length"
 		opt.pressed.connect(_on_menu_fft_optimize.bind(i))
 		row.add_child(opt)
+	if ind.kind == "OBVOL":
+		var mode := OptionButton.new()
+		mode.add_item("life")
+		mode.add_item("snap")
+		mode.selected = ind.obvol_mode
+		mode.item_selected.connect(_on_menu_obvol_mode.bind(i))
+		row.add_child(mode)
 	var del := Button.new()
 	del.text = "x"
 	del.tooltip_text = "delete"
@@ -327,9 +340,12 @@ func _build_indicator_row(i: int) -> void:
 	elif ind.kind == "KS" or ind.kind == "TEMP" or ind.kind == "CECP":
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 		_add_spin(grid, "m", ind.m, _on_menu_ks_m.bind(i))
+	elif ind.kind == "OBVOL":
+		_add_spin(grid, "bucket", ind.bucket, _on_menu_obvol_bucket.bind(i), 0.00001)
 	else:
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
-	_menu_box.add_child(grid)
+	if grid.get_child_count() > 0:
+		_menu_box.add_child(grid)
 
 func _build_series_row(i: int) -> void:
 	var s: PlotData.Series = data.series[i]
@@ -470,6 +486,18 @@ func _on_menu_ks_m(v: float, i: int) -> void:
 		_sync_indicator_hud()
 		_refresh()
 
+func _on_menu_obvol_bucket(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].bucket = maxf(0.0, v)
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_obvol_mode(idx: int, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].obvol_mode = idx
+		_sync_indicator_hud()
+		_refresh()
+
 func _on_add_ks() -> void:
 	indicator_widget.add_indicator("KS", 200)
 	_rebuild_menu()
@@ -489,6 +517,12 @@ func _on_add_cecp() -> void:
 	indicator_widget.add_indicator("CECP", 240)
 	var ind: IndicatorWidget.Indicator = indicator_widget.indicators[indicator_widget.indicators.size() - 1]
 	ind.m = 4
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_add_obvol() -> void:
+	indicator_widget.add_indicator("OBVOL", 0)
 	_rebuild_menu()
 	_sync_indicator_hud()
 	_refresh()
@@ -687,13 +721,14 @@ func add_timeline(tl_name: String, path: String) -> int:
 	var ticks_path := "%s.ticks.csv" % path.get_basename()
 	if FileAccess.file_exists(ticks_path):
 		var t := _load_ticks(ticks_path)
-		s.set_base(t["candles"], t["books"])
+		s.set_base(t["candles"], t["books"], t["levels"])
+		s.levels_path = t["vev_path"]
 	elif QuoteStore.sniff_csv(path) == "quotes":
 		if await _open_quotes(s, path, "1m") != OK:
 			_set_load_status("load failed: %s" % tl_name)
 			return -1
 	else:
-		s.set_base(_load_candles(path), [])
+		s.set_base(_load_candles(path), [], PackedFloat64Array())
 	var idx: int = data.series.size()
 	var col: Color = PALETTE[idx % PALETTE.size()]
 	s.col_pos = col
@@ -718,17 +753,23 @@ func _reload_series(i: int, path: String) -> int:
 	var ticks_path := "%s.ticks.csv" % path.get_basename()
 	if FileAccess.file_exists(ticks_path):
 		var t := _load_ticks(ticks_path)
-		s.set_base(t["candles"], t["books"])
+		s.set_base(t["candles"], t["books"], t["levels"])
+		s.levels_path = t["vev_path"]
 	elif s.store != null:
+		s.levels = PackedFloat64Array()
+		s.levels_path = ""
 		if await _open_quotes(s, path, s.tf) != OK:
 			_set_load_status("reload failed: %s" % s.name)
 			return i
 	elif QuoteStore.sniff_csv(path) == "quotes":
+		s.levels = PackedFloat64Array()
+		s.levels_path = ""
 		if await _open_quotes(s, path, "1m") != OK:
 			_set_load_status("reload failed: %s" % s.name)
 			return i
 	else:
-		s.set_base(_load_candles(path), [])
+		s.set_base(_load_candles(path), [], PackedFloat64Array())
+		s.levels_path = ""
 	_update_book()
 	_refresh()
 	return i
@@ -879,7 +920,38 @@ func _load_ticks(path: String) -> Dictionary:
 		asks = _levels(parts, 5)
 	if c != null:
 		books.append({ "bids": bids, "asks": asks })
-	return { "candles": candles, "books": books }
+	# the levels sidecar is named after the CANDLES file (foo.levels.csv),
+	# not the ticks file — strip ".ticks.csv", not just the extension
+	var base := path
+	if base.ends_with(".ticks.csv"):
+		base = base.substr(0, base.length() - ".ticks.csv".length())
+	return { "candles": candles, "books": books, "levels": _load_levels(base + ".levels.csv"), "vev_path": base + ".vev" }
+
+# level-lifetime sidecar for the OBVOL indicator: one row per continuous
+# (side, price) existence: c0,c1,side,price,peak,ev0,evn (the last two
+# address volume-change records in the .vev binary sidecar; absent on
+# exports written before the event export existed). Stored flat (7
+# floats/row) — the indicator iterates it per window slide
+func _load_levels(path: String) -> PackedFloat64Array:
+	var out := PackedFloat64Array()
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return out
+	f.get_line()
+	while not f.eof_reached():
+		var line := f.get_line().strip_edges()
+		if line.is_empty():
+			continue
+		var parts := line.split(",")
+		if parts.size() < 5:
+			continue
+		var ev0 := 0.0
+		var evn := 0.0
+		if parts.size() >= 7:
+			ev0 = parts[5].to_float()
+			evn = parts[6].to_float()
+		out.append_array([parts[0].to_float(), parts[1].to_float(), parts[2].to_float(), parts[3].to_float(), parts[4].to_float(), ev0, evn])
+	return out
 
 func _levels(parts: PackedStringArray, offset: int) -> Array[Vector2]:
 	var out: Array[Vector2] = []

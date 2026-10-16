@@ -19,31 +19,39 @@ import qualified Data.Map.Strict as Map
 import Sim.Engine
 import Sim.Gen (GenState (..))
 import Sim.Internal
+import Sim.Lvl
 import System.Random.SplitMix (nextWord64)
 
 -- hooked tick-mode driver with streaming export: tick rows are emitted
 -- through the sink as produced (constant memory -- the list-based
 -- Sim.TickGen.runSimTicks materializes every tick and stays for the
 -- test suite); candle order and row order are identical to the
--- list-based export. Starts from the given state (use initState for a
--- fresh run) and the given candle index (0 for a fresh run, the number
--- of candles already written when resuming); returns the final state
--- and the candles.
-runSimTicksH :: SimHooks -> (Tick -> IO ()) -> SimParams -> Int -> GenState -> IO (GenState, [Candle])
-runSimTicksH hooks sink sp ci0 gs0 = go (spCandles sp) ci0 gs0 []
+-- list-based export. Level lifetimes (Sim.Lvl) stream through lvlSink
+-- as (segment, events) pairs when they close; still-open levels are
+-- flushed at the end (c1 = last candle index). Starts from the given
+-- state (use initState for a fresh run) and the given candle index (0
+-- for a fresh run, the number of candles already written when
+-- resuming); tr0 seeds open level lifetimes (trFromBook at the start
+-- index, with the event counter continued for resumes). Returns the
+-- final state, the candles, and the total event count.
+runSimTicksH :: SimHooks -> (Tick -> IO ()) -> ((LvlSeg, [LvlEv]) -> IO ()) -> SimParams -> Int -> GenState -> LvlTr -> IO (GenState, [Candle], Int)
+runSimTicksH hooks sink lvlSink sp ci0 gs0 tr0 = go (spCandles sp) ci0 gs0 tr0 []
   where
     total = spCandles sp
-    go 0 _ gs cs = pure (gs, reverse cs)
-    go k ci gs cs = do
+    go 0 ci gs tr cs = do
+      let flushed = if ci > 0 then trCloseAll (ci - 1) tr else []
+      mapM_ lvlSink flushed
+      pure (gs, reverse cs, trTotalEv tr + sum (map (length . snd) flushed))
+    go k ci gs tr cs = do
       cancelled <- hookCancelled hooks
       when cancelled (throwIO SimCancelled)
-      gs' <- runBatch sink sp ci gs
+      (gs', tr') <- runBatch sink lvlSink sp ci gs tr
       let c      = gsCandle gs'
           rolled = gs' { gsCandle = emptyCandle }
       hookProgress hooks (total - k + 1) total
       if isEmptyCandle c
-        then go (k - 1) ci rolled cs
-        else go (k - 1) (ci + 1) rolled (c : cs)
+        then go (k - 1) ci rolled tr' cs
+        else go (k - 1) (ci + 1) rolled tr' (c : cs)
 
 -- --- duplicated from Sim.TickGen (see module header) ---------------------
 
@@ -51,32 +59,35 @@ runSimTicksH hooks sink sp ci0 gs0 = go (spCandles sp) ci0 gs0 []
 -- order, then the end-of-candle book-only marker (the list-based
 -- runBatch returns the same steps most-recent-first with the marker
 -- head; the driver reverses that, so emitting steps forward + marker
--- last reproduces its row order exactly)
-runBatch :: (Tick -> IO ()) -> SimParams -> Int -> GenState -> IO GenState
-runBatch sink sp ci gs0 =
+-- last reproduces its row order exactly). Closed level segments stream
+-- with their events through lvlSink
+runBatch :: (Tick -> IO ()) -> ((LvlSeg, [LvlEv]) -> IO ()) -> SimParams -> Int -> GenState -> LvlTr -> IO (GenState, LvlTr)
+runBatch sink lvlSink sp ci gs0 tr0 =
   let (n, gsR) = rollCount sp gs0
-  in go (mkPriceFun sp) n gsR >>= finish
+  in go (mkPriceFun sp) n gsR tr0 >>= finish
   where
-    go _ 0 gs = pure gs
-    go pf k gs = do
-      let (gs', ticks) = runStep pf sp ci gs
+    go _ 0 gs tr = pure (gs, tr)
+    go pf k gs tr = do
+      let (gs', ticks, tr', pairs) = runStep pf sp ci gs tr
       mapM_ sink ticks
-      go pf (k - 1) gs'
-    finish gs = do
+      mapM_ lvlSink pairs
+      go pf (k - 1) gs' tr'
+    finish (gs, tr) = do
       let book = gsBook gs
       sink (Tick ci (Price 0) 0 (snapBids book) (snapAsks book))
-      pure gs
+      pure (gs, tr)
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))
 
 -- one order flow step as tick rows: a row per trade with the book right
 -- after that trade; when nothing traded, a single book-only row for the
--- placed order in ModeTickSteps, no row in ModeTickTrades
-runStep :: PriceFun -> SimParams -> Int -> GenState -> (GenState, [Tick])
-runStep pf sp ci gs =
+-- placed order in ModeTickSteps, no row in ModeTickTrades. Also threads
+-- the level tracker like Sim.TickGen.runStep
+runStep :: PriceFun -> SimParams -> Int -> GenState -> LvlTr -> (GenState, [Tick], LvlTr, [(LvlSeg, [LvlEv])])
+runStep pf sp ci gs tr =
   let (mOrder, gs') = rollOrder pf sp gs
   in case mOrder of
-       Nothing -> (gs', [])
+       Nothing -> (gs', [], tr, [])
        Just order ->
          let book1 = placeOrder order (gsBook gs')
              trail = matchTrail book1
@@ -91,11 +102,19 @@ runStep pf sp ci gs =
              gs'' = gs' { gsBook = book', gsCandle = c', gsAnchor = anchor' }
              tradeTicks = [ Tick ci (tradePrice t) (unVol (tradeVol t)) (snapBids b) (snapAsks b)
                          | (b, t) <- trail ]
+             tr1 = trRest ci (orderSide order) (orderPrice order) (unVol (orderVol order)) tr
+             pres = book1 : map fst trail
+             (tr2, pairs) = foldl' consume (tr1, []) (zip pres trades)
+             consume (t, ss) (pre, ttrade) = case (bestBid pre, bestAsk pre) of
+               (Just (bp, _), Just (ap, _)) ->
+                 let (t', ps') = trConsume ci bp ap (unVol (tradeVol ttrade)) t
+                 in (t', ss ++ ps')
+               _ -> (t, ss)
          in case trades of
-             [] | spMode sp == ModeTickSteps ->
-                    (gs'', [Tick ci (Price 0) 0 (snapBids book1) (snapAsks book1)])
-                | otherwise -> (gs'', [])
-             _ -> (gs'', tradeTicks)
+              [] | spMode sp == ModeTickSteps ->
+                     (gs'', [Tick ci (Price 0) 0 (snapBids book1) (snapAsks book1)], tr2, [])
+                 | otherwise -> (gs'', [], tr2, [])
+              _ -> (gs'', tradeTicks, tr2, pairs)
   where
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))

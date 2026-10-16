@@ -5,6 +5,11 @@ class Series:
 	var name := ""
 	var candles: Array[Candle] = []
 	var books: Array = []
+	# OBVOL level lifetimes (sim tick-mode only): flat 7 floats per row
+	# (c0, c1, side, price, peak, ev0, evn) in base (1m) candle indices;
+	# ev0/evn address volume-change records in `levels_path` (.vev sidecar)
+	var levels := PackedFloat64Array()
+	var levels_path := ""
 	var col_pos := Color.YELLOW_GREEN
 	var col_neg := Color.WEB_GREEN
 	var body_up := Color.TRANSPARENT
@@ -56,9 +61,10 @@ class Series:
 			return store.count if tf == "1m" else -1
 		return _base.size()
 
-	func set_base(base: Array[Candle], base_books: Array) -> void:
+	func set_base(base: Array[Candle], base_books: Array, base_levels: PackedFloat64Array) -> void:
 		_base = base
 		_base_books = base_books
+		levels = base_levels
 		_agg.clear()
 		candles = _base
 		books = _base_books

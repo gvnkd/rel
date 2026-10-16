@@ -13,6 +13,13 @@ class Indicator:
 	var m := 5
 	var locked := false
 	var opt_score := -1.0
+	# OBVOL: price bucket size in display units; 0 = exact price levels.
+	# Volumes resting at prices closer than this merge into one line
+	var bucket := 0.0
+	# OBVOL source mode: 0 = lifetimes sidecar (true placement→dissolution),
+	# 1 = per-candle book snapshots (top book-depth levels only — a level
+	# leaving the ladder window reads as dissolved)
+	var obvol_mode := 0
 	# per-series result caches (keyed by series instance id in `caches`) —
 	# indicator math is computed per series, so one shared vals/fit field
 	# would let the last-drawn series overwrite the others
@@ -25,10 +32,27 @@ class IndCache:
 	var vals2 := PackedFloat64Array()
 	var fit := PackedFloat64Array()
 	var forecast := PackedFloat64Array()
+	# OBVOL: flat segment list, 5 doubles each (side, price, i0, i1, alpha)
+	var segs := PackedFloat64Array()
 	var cache_key := ""
 
 const FFT_MIN_WINDOW := 16
 const HANDLE_TOL := 5.0
+
+# order-book volume levels (sim tick-mode series only): alpha quantized
+# into buckets, capped so candles underneath stay readable
+const OBVOL_PRICE_SCALE := 100000.0
+const OBVOL_ALPHA_Q := 16
+const OBVOL_MAX_ALPHA := 0.6
+const OBVOL_BID_COL := Color(0.30, 0.80, 0.45)
+const OBVOL_ASK_COL := Color(0.90, 0.40, 0.35)
+# group-key side bit: key = side * OBVOL_SIDE_BIT + price key (bucket
+# index or 5-decimal price); price keys stay well under 2^40
+const OBVOL_SIDE_BIT := 1099511627776
+# cache range padding: the cached segment set covers the visible range
+# plus a margin rounded to whole blocks, so pans/zooms inside the margin
+# reuse it instead of rebuilding per frame
+const OBVOL_PAD := 512
 
 const PERIODS: Array[int] = [5, 10, 20, 50, 100, 200]
 const IND_COLORS: Array[Color] = [
@@ -129,6 +153,9 @@ func _draw() -> void:
 				continue
 			if ind.kind == "CECP":
 				_draw_cecp(ind, s, k)
+				continue
+			if ind.kind == "OBVOL":
+				_draw_obvol(ind, s, k)
 				continue
 			if s.size() < ind.period:
 				continue
@@ -276,6 +303,280 @@ func _draw_cecp_curve(m: int, r: Rect2) -> void:
 		pts.append(Vector2(r.position.x + clampf(h, 0.0, 1.0) * r.size.x, r.end.y - clampf(h * jsd / jmax, 0.0, 1.0) * r.size.y))
 	draw_polyline(pts, Color(1, 1, 1, 0.25), 1.0, true)
 
+# order-book volume levels: one horizontal segment per continuous (side,
+# price) level lifetime from the levels sidecar — placement candle to
+# full dissolution, no matter how far price wanders from the top of the
+# ladder; opacity = peak volume relative to the range max. Levels use
+# fixed bid/ask hues — the per-series indicator color would collapse the
+# two sides into one.
+func _draw_obvol(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := mini(int(ceil(ir.y)), s.size() - 1)
+	if i1 < i0 or not _obvol_ensure(ind, s, i0, i1):
+		return
+	var c := _cache_for(ind, s)
+	var r := view.plot_rect
+	var n := c.segs.size() / 5
+	for t in n:
+		if c.segs[t * 5 + 3] < i0 or c.segs[t * 5 + 2] > i1:
+			continue
+		var y := view.price_to_y(c.segs[t * 5 + 1])
+		if y < r.position.y or y > r.end.y:
+			continue
+		var x0 := maxf(view.index_to_x(int(c.segs[t * 5 + 2])), r.position.x)
+		var x1 := minf(view.index_to_x(int(c.segs[t * 5 + 3]) + 1), r.end.x)
+		if x1 <= x0:
+			continue
+		var col: Color = OBVOL_BID_COL if int(c.segs[t * 5]) == 0 else OBVOL_ASK_COL
+		col.a = c.segs[t * 5 + 4] * OBVOL_MAX_ALPHA
+		draw_line(Vector2(x0, y), Vector2(x1, y), col, 1.0 + 2.5 * c.segs[t * 5 + 4])
+
+# fills the per-series segment cache for [i0, i1] when its key is stale.
+# The cache covers a block-rounded padded range so minor view changes
+# reuse it; false when the mode's data is unavailable (non-tick series,
+# real quotes)
+func _obvol_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 1 or i1 < i0:
+		return false
+	var blk := OBVOL_PAD
+	var lo := maxi(0, i0 / blk * blk - blk)
+	var hi := mini(n - 1, i1 / blk * blk + blk)
+	var c := _cache_for(ind, s)
+	var key := "%d:%d:%d:%s:%d:%d:%f:%d" % [data.series.find(s), n, s.win_off, s.tf, lo, hi, ind.bucket, ind.obvol_mode]
+	if key == c.cache_key:
+		return not c.segs.is_empty()
+	if ind.obvol_mode == 1:
+		return _obvol_ensure_snap(ind, s, lo, hi, c, key)
+	return _obvol_ensure_life(ind, s, lo, hi, c, key)
+
+# lifetime mode: source is the levels sidecar (Sim.Lvl) — one row per
+# continuous level lifetime, so a resting level stays drawn until fully
+# lifetime mode: source is the levels sidecar (Sim.Lvl) — one row per
+# continuous level lifetime, so a resting level stays drawn until fully
+# consumed no matter how far price wanders from the top of the ladder.
+# Each lifetime's volume-change events (rests bump, partial fills reduce)
+# are read from the .vev binary sidecar and the line is split into runs
+# per volume level: opacity AND width track the resting volume over
+# time. Old exports without events fall back to one constant-alpha piece
+# per merged lifetime. Single pass over the flat rows with hash grouping
+# (no global sort)
+func _obvol_ensure_life(ind: Indicator, s: PlotData.Series, lo: int, hi: int, c: IndCache, key: String) -> bool:
+	if s.levels.is_empty():
+		c.segs = PackedFloat64Array()
+		c.cache_key = key
+		return false
+	# level rows are stored in base (1m) candle indices; map them to the
+	# current timeframe like PlotData.Series.book_at does
+	var g := 1
+	if s.tf != "1m":
+		g = QuoteStore.TF_MINUTES[s.tf]
+	# group rows by (side, bucket): integer hash key, no sort; members
+	# are [c0, c1, ev0, evn, px, peak] in the grouped timeframe
+	var groups := {}
+	for j in range(0, s.levels.size(), 7):
+		var c0g: int = int(s.levels[j]) / g
+		var c1g: int = int(s.levels[j + 1]) / g
+		if c1g < lo or c0g > hi:
+			continue
+		var side := int(s.levels[j + 2])
+		var px := s.levels[j + 3]
+		var pk: int
+		if ind.bucket > 0.0:
+			# epsilon guards float representation at bucket boundaries
+			# (1.2 / 0.0001 = 11999.999... would floor one bucket low)
+			pk = int(floor(px / ind.bucket + 1e-6))
+			px = pk * ind.bucket
+		else:
+			pk = int(round(px * OBVOL_PRICE_SCALE))
+		var gk := OBVOL_SIDE_BIT * side + pk
+		var arr: Variant = groups.get(gk)
+		if arr == null:
+			arr = []
+			groups[gk] = arr
+		arr.append([c0g, c1g, int(s.levels[j + 5]), int(s.levels[j + 6]), px, s.levels[j + 4]])
+	if groups.is_empty():
+		c.segs = PackedFloat64Array()
+		c.cache_key = key
+		return false
+	var vf: FileAccess = null
+	if s.levels_path != "" and FileAccess.file_exists(s.levels_path):
+		vf = FileAccess.open(s.levels_path, FileAccess.READ)
+	# render pieces: [side, px, a, b, vol]
+	var pieces: Array = []
+	for gk in groups:
+		var arr: Array = groups[gk]
+		var side: float = 1.0 if gk >= OBVOL_SIDE_BIT else 0.0
+		var events: Array = []
+		var has_ev := vf != null
+		if has_ev:
+			for mi in arr.size():
+				var evs := _vev_read(vf, int(arr[mi][2]), int(arr[mi][3]))
+				if evs.is_empty() and int(arr[mi][3]) > 0:
+					has_ev = false
+					break
+				for e in evs:
+					events.append([int(e[0]) / g, e[1], mi])
+		if has_ev and not events.is_empty():
+			events.sort()
+			# combined volume of the bucket over its span: walk the
+			# merged event stream; a new run starts whenever the summed
+			# volume changes (quantized into alpha buckets at emit)
+			var g0: int = arr[0][0]
+			var g1: int = arr[0][1]
+			for m in arr:
+				g0 = mini(g0, int(m[0]))
+				g1 = maxi(g1, int(m[1]))
+			var last: Array = []
+			last.resize(arr.size())
+			for k in last.size():
+				last[k] = 0.0
+			var prev_comb := -1.0
+			var run_a := g0
+			for e in events:
+				last[e[2]] = e[1]
+				var comb := 0.0
+				for v in last:
+					comb += v
+				if prev_comb < 0.0:
+					prev_comb = comb
+					run_a = int(e[0])
+				elif comb != prev_comb:
+					if prev_comb > 0.0 and int(e[0]) - 1 >= run_a:
+						pieces.append([side, float(arr[0][4]), run_a, int(e[0]) - 1, prev_comb])
+					prev_comb = comb
+					run_a = int(e[0])
+			if prev_comb > 0.0 and g1 >= run_a:
+				pieces.append([side, float(arr[0][4]), run_a, g1, prev_comb])
+		else:
+			# no events (old export or missing sidecar): merge spans with
+			# summed peaks into one constant-density piece each
+			if arr.size() > 1:
+				arr.sort()
+			var merged: Array = []
+			var cur: Array = []
+			for e in arr:
+				if not cur.is_empty() and int(e[0]) <= int(cur[1]) + 1:
+					cur[1] = maxi(int(cur[1]), int(e[1]))
+					cur[5] = float(cur[5]) + float(e[5])
+				else:
+					cur = e
+					merged.append(cur)
+			for m in merged:
+				pieces.append([side, float(m[4]), int(m[0]), int(m[1]), float(m[5])])
+	if vf != null:
+		vf.close()
+	if pieces.is_empty():
+		c.segs = PackedFloat64Array()
+		c.cache_key = key
+		return false
+	var vmax := 0.0
+	for p in pieces:
+		vmax = maxf(vmax, float(p[4]))
+	if vmax <= 0.0:
+		c.segs = PackedFloat64Array()
+		c.cache_key = key
+		return false
+	var segs := PackedFloat64Array()
+	for p in pieces:
+		var aq := clampi(int(ceili(float(p[4]) / vmax * OBVOL_ALPHA_Q)), 1, OBVOL_ALPHA_Q)
+		segs.append_array([float(p[0]), float(p[1]), float(p[2]), float(p[3]), float(aq) / OBVOL_ALPHA_Q])
+	c.segs = segs
+	c.cache_key = key
+	return not c.segs.is_empty()
+
+# read evn 20-byte records (candle u32, side u32, price u32, volume u64)
+# starting at record ev0 of the .vev sidecar; returns [candle, vol] pairs
+func _vev_read(vf: FileAccess, ev0: int, evn: int) -> Array:
+	var out: Array = []
+	if vf == null or evn <= 0:
+		return out
+	vf.seek(16 + ev0 * 20)
+	var buf := vf.get_buffer(evn * 20)
+	if buf.size() < evn * 20:
+		return out
+	var sp := StreamPeerBuffer.new()
+	sp.big_endian = false
+	sp.data_array = buf
+	for i in evn:
+		var ec := sp.get_u32()
+		sp.get_u32()
+		sp.get_u32()
+		var ev := sp.get_u64()
+		out.append([ec, ev])
+	return out
+
+# snapshot mode (the original OBVOL): level presence derived from the
+# per-candle book snapshots — a level draws from the first snapshot it
+# appears in until the first it is missing from. Only the top book-depth
+# levels exist in the sidecar, so a level that price walks away from
+# drops out while still in the book
+func _obvol_ensure_snap(ind: Indicator, s: PlotData.Series, lo: int, hi: int, c: IndCache, key: String) -> bool:
+	if s.books.is_empty():
+		c.segs = PackedFloat64Array()
+		c.cache_key = key
+		return false
+	var vmax := 0.0
+	for i in range(lo, hi + 1):
+		var book: Variant = s.book_at(i)
+		if book == null:
+			continue
+		for lv: Vector2 in book["bids"]:
+			vmax = maxf(vmax, lv.y)
+		for lv: Vector2 in book["asks"]:
+			vmax = maxf(vmax, lv.y)
+	if vmax <= 0.0:
+		c.segs = PackedFloat64Array()
+		c.cache_key = key
+		return false
+	var pieces: Array = []
+	var open := {}
+	var seen := {}
+	for i in range(lo, hi + 1):
+		var book: Variant = s.book_at(i)
+		seen.clear()
+		if book != null:
+			for side in 2:
+				var lvls: Array = book["bids"] if side == 0 else book["asks"]
+				for lv: Vector2 in lvls:
+					var px := lv.x
+					var pk: int
+					if ind.bucket > 0.0:
+						pk = int(floor(px / ind.bucket + 1e-6))
+						px = pk * ind.bucket
+					else:
+						pk = int(round(px * OBVOL_PRICE_SCALE))
+					var gk := OBVOL_SIDE_BIT * side + pk
+					seen[gk] = true
+					if open.has(gk):
+						var o: Array = open[gk]
+						if int(o[1]) == i - 1:
+							# contiguous presence: extend, the run keeps the
+							# largest volume seen (alpha at emit)
+							o[1] = i
+							o[2] = maxf(float(o[2]), lv.y)
+							continue
+						_obvol_close(pieces, gk, o)
+					open[gk] = [i, i, lv.y, px]
+		for gk: int in open.keys():
+			if not seen.has(gk):
+				_obvol_close(pieces, gk, open[gk])
+				open.erase(gk)
+	for gk: int in open.keys():
+		_obvol_close(pieces, gk, open[gk])
+	var segs := PackedFloat64Array()
+	for p in pieces:
+		var aq := clampi(int(ceili(float(p[4]) / vmax * OBVOL_ALPHA_Q)), 1, OBVOL_ALPHA_Q)
+		segs.append_array([float(p[0]), float(p[1]), float(p[2]), float(p[3]), float(aq) / OBVOL_ALPHA_Q])
+	c.segs = segs
+	c.cache_key = key
+	return not c.segs.is_empty()
+
+# append a snapshot-mode run: [side, px, a, b, maxvol]
+func _obvol_close(pieces: Array, gk: int, o: Array) -> void:
+	pieces.append([1.0 if gk >= OBVOL_SIDE_BIT else 0.0, float(o[3]), int(o[0]), int(o[1]), float(o[2])])
+
 # fills the per-series cache for [lo, i1] when its key is stale; false
 # when the value line cannot be computed (missing FFI, short series)
 func _ks_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
@@ -408,6 +709,17 @@ func value_at(ind: Indicator, s: PlotData.Series, i: int) -> Variant:
 		if is_nan(h) or is_nan(cc):
 			return null
 		return [h, cc]
+	if ind.kind == "OBVOL":
+		var book: Variant = s.book_at(i)
+		if book == null:
+			return null
+		var b := 0.0
+		var a := 0.0
+		for lv: Vector2 in book["bids"]:
+			b += lv.y
+		for lv: Vector2 in book["asks"]:
+			a += lv.y
+		return [b, a]
 	if ind.kind == "FFT":
 		var n: int = s.size()
 		if n < FFT_MIN_WINDOW:

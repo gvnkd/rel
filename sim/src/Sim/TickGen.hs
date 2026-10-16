@@ -17,71 +17,97 @@ import qualified Data.Map.Strict as Map
 import Sim.Engine
 import Sim.Gen (GenState (..), initState)
 import Sim.Internal
+import Sim.Lvl
 import System.Random.SplitMix (nextWord64)
 
 -- candles (compacted, same as runSim) plus the tick export:
 -- in ModeTickTrades one row per trade, in ModeTickSteps additionally one
 -- row per placed order that did not trade; every candle ends with a
 -- book-only marker row carrying the exact end-of-candle book.
+-- Additionally the level-lifetime export (Sim.Lvl): one (segment, events)
+-- pair per continuous (side, price) existence, in close order; each
+-- segment's events are contiguous in the flat event list (lvEv0/lvEvN are
+-- indices into it). Open segments flush at the end.
 -- per-candle tick lists are collected as chunks and concatenated once
 -- at the end: `ts ++ reverse ticks` per candle is quadratic overall.
-runSimTicks :: SimParams -> ([Candle], [Tick])
-runSimTicks sp = go (spCandles sp) 0 (initState sp) [] []
+runSimTicks :: SimParams -> ([Candle], [Tick], [(LvlSeg, [LvlEv])], Int)
+runSimTicks sp =
+  let (cs, tss, pss, tr, n) = go (spCandles sp) 0 (initState sp) tr0 [] [] [] 0
+      closed = concat (reverse pss)
+      flushed = trCloseAll (max 0 (n - 1)) tr
+  in ( reverse cs
+     , concat (reverse tss)
+     , closed ++ flushed
+     , trTotalEv tr + sum (map (length . snd) flushed)
+     )
   where
-    go 0 _ _ cs tss = (reverse cs, concat (reverse tss))
-    go k ci gs cs tss =
-      let (gs', ticks) = runBatch sp ci gs
+    -- the seed book (start bid/ask) opens its level lifetimes at candle 0
+    tr0 = trFromBook 0 0 (gsBook (initState sp))
+    go 0 _ _ tr cs tss pss n = (cs, tss, pss, tr, n)
+    go k ci gs tr cs tss pss n =
+      let (gs', ticks, tr', pairs) = runBatch sp ci gs tr
           c            = gsCandle gs'
           rolled       = gs' { gsCandle = emptyCandle }
       in if isEmptyCandle c
-           then go (k - 1) ci rolled cs tss
-           else go (k - 1) (ci + 1) rolled (c : cs) (reverse ticks : tss)
+           then go (k - 1) ci rolled tr' cs tss (pairs : pss) n
+           else go (k - 1) (ci + 1) rolled tr' (c : cs) (reverse ticks : tss) (pairs : pss) (n + 1)
 
 -- run one candle batch; ticks are returned most-recent-first, the head
 -- being the end-of-candle marker
-runBatch :: SimParams -> Int -> GenState -> (GenState, [Tick])
-runBatch sp ci gs0 =
+runBatch :: SimParams -> Int -> GenState -> LvlTr -> (GenState, [Tick], LvlTr, [(LvlSeg, [LvlEv])])
+runBatch sp ci gs0 tr0 =
   let (n, gsR) = rollCount sp gs0
-  in finish (go (mkPriceFun sp) n gsR [])
+  in finish (go (mkPriceFun sp) n gsR tr0 [] [])
   where
-    go _ 0 gs acc = (gs, acc)
-    go pf k gs acc =
-      let (gs', ticks) = runStep pf sp ci gs
-      in go pf (k - 1) gs' (ticks : acc)
-    finish (gs, acc) =
+    go _ 0 gs tr acc pacc = (gs, acc, tr, pacc)
+    go pf k gs tr acc pacc =
+      let (gs', ticks, tr', pairs) = runStep pf sp ci gs tr
+      in go pf (k - 1) gs' tr' (ticks : acc) (pairs : pacc)
+    finish (gs, acc, tr, pacc) =
       let book = gsBook gs
           marker = Tick ci (Price 0) 0 (snapBids book) (snapAsks book)
-      in (gs, marker : concatMap reverse acc)
+      in (gs, marker : concatMap reverse acc, tr, concat (reverse pacc))
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))
 
 -- one order flow step as tick rows: a row per trade with the book right
 -- after that trade; when nothing traded, a single book-only row for the
--- placed order in ModeTickSteps, no row in ModeTickTrades
-runStep :: PriceFun -> SimParams -> Int -> GenState -> (GenState, [Tick])
-runStep pf sp ci gs =
+-- placed order in ModeTickSteps, no row in ModeTickTrades.
+-- Also threads the level tracker: the placed volume rests at its price,
+-- then every match consumes the same amount from the best bid and the
+-- best ask level (pre-match top of book, from the trail)
+runStep :: PriceFun -> SimParams -> Int -> GenState -> LvlTr -> (GenState, [Tick], LvlTr, [(LvlSeg, [LvlEv])])
+runStep pf sp ci gs tr =
   let (mOrder, gs') = rollOrder pf sp gs
   in case mOrder of
-       Nothing -> (gs', [])
+       Nothing -> (gs', [], tr, [])
        Just order ->
-          let book1 = placeOrder order (gsBook gs')
-              trail = matchTrail book1
-              book' = case trail of
-                []      -> book1
-                matches -> fst (last matches)
-              trades = map snd trail
-              c' = foldl' (\c t -> updateCandle (tradePrice t) (unVol (tradeVol t)) c) (gsCandle gs') trades
-              anchor' = case trades of
-                []      -> gsAnchor gs'
-                _       -> tradePrice (last trades)
-              gs'' = gs' { gsBook = book', gsCandle = c', gsAnchor = anchor' }
-              tradeTicks = [ Tick ci (tradePrice t) (unVol (tradeVol t)) (snapBids b) (snapAsks b)
-                          | (b, t) <- trail ]
+         let book1 = placeOrder order (gsBook gs')
+             trail = matchTrail book1
+             book' = case trail of
+               []      -> book1
+               matches -> fst (last matches)
+             trades = map snd trail
+             c' = foldl' (\c t -> updateCandle (tradePrice t) (unVol (tradeVol t)) c) (gsCandle gs') trades
+             anchor' = case trades of
+               []      -> gsAnchor gs'
+               _       -> tradePrice (last trades)
+             gs'' = gs' { gsBook = book', gsCandle = c', gsAnchor = anchor' }
+             tradeTicks = [ Tick ci (tradePrice t) (unVol (tradeVol t)) (snapBids b) (snapAsks b)
+                         | (b, t) <- trail ]
+             tr1 = trRest ci (orderSide order) (orderPrice order) (unVol (orderVol order)) tr
+             pres = book1 : map fst trail
+             (tr2, pairs) = foldl' consume (tr1, []) (zip pres trades)
+             consume (t, ss) (pre, ttrade) = case (bestBid pre, bestAsk pre) of
+               (Just (bp, _), Just (ap, _)) ->
+                 let (t', ps') = trConsume ci bp ap (unVol (tradeVol ttrade)) t
+                 in (t', ss ++ ps')
+               _ -> (t, ss)
          in case trades of
               [] | spMode sp == ModeTickSteps ->
-                     (gs'', [Tick ci (Price 0) 0 (snapBids book1) (snapAsks book1)])
-                 | otherwise -> (gs'', [])
-              _ -> (gs'', tradeTicks)
+                     (gs'', [Tick ci (Price 0) 0 (snapBids book1) (snapAsks book1)], tr2, [])
+                 | otherwise -> (gs'', [], tr2, [])
+              _ -> (gs'', tradeTicks, tr2, pairs)
   where
     snapBids book = take (spBookDepth sp) (Map.toDescList (bookBids book))
     snapAsks book = take (spBookDepth sp) (Map.toAscList (bookAsks book))

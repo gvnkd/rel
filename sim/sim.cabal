@@ -15,6 +15,7 @@ library
                       Sim.TickGenH
                       Sim.Cli
                       Sim.Csv
+                      Sim.Lvl
                       Sim.Entropy
                       Sim.Fft
                       Sim.Resume

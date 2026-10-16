@@ -7,11 +7,18 @@ module Sim.Csv
   , tickRow
   , tickRowB
   , ticksPath
+  , lvlHeader
+  , lvlRowB
+  , levelsPath
+  , vevHeader
+  , vevRecB
+  , vevPath
   , metaText
   ) where
 
-import Data.ByteString.Builder (Builder, char8, intDec)
+import Data.ByteString.Builder (Builder, char8, intDec, string8, word32LE, word64LE)
 import Data.List (intercalate, zipWith4)
+import Sim.Lvl (LvlEv (..), LvlSeg (..))
 import Sim.Types
 import Text.Printf (printf)
 
@@ -66,26 +73,29 @@ tickRow scale d t =
 -- avoids float formatting entirely
 tickRowB :: Int -> Int -> Tick -> Builder
 tickRowB scale d t =
-  intDec (tickCandle t) <> char8 ',' <> priceB (tickPrice t) <> char8 ',' <> intDec (tickVol t)
+  intDec (tickCandle t) <> char8 ',' <> priceB scale (tickPrice t) <> char8 ',' <> intDec (tickVol t)
     <> mconcat (zipWith4 level bidPs bidVs askPs askVs)
   where
     level bp bv ap av =
-      char8 ',' <> priceB (Price bp) <> char8 ',' <> intDec bv
-        <> char8 ',' <> priceB (Price ap) <> char8 ',' <> intDec av
+      char8 ',' <> priceB scale (Price bp) <> char8 ',' <> intDec bv
+        <> char8 ',' <> priceB scale (Price ap) <> char8 ',' <> intDec av
     bidPs = pad (map (unPrice . fst) (tickBids t))
     bidVs = pad (map (unVol . snd) (tickBids t))
     askPs = pad (map (unPrice . fst) (tickAsks t))
     askVs = pad (map (unVol . snd) (tickAsks t))
     pad xs = take d xs ++ replicate (d - length xs) 0
 
+-- integer price formatting: prices are p / 10^decimals exactly, so the
+-- integer is formatted directly — identical to printf "%.5f" of the
+-- double and avoids float formatting entirely
+priceB :: Int -> Price -> Builder
+priceB scale (Price p) =
+  (if p < 0 then char8 '-' else mempty)
+    <> intDec w <> char8 '.' <> padDec decimals frac
+  where
+    w = abs p `div` scale
+    frac = abs p `mod` scale
     decimals = decimalsOf scale
-
-    priceB (Price p) =
-      (if p < 0 then char8 '-' else mempty)
-        <> intDec w <> char8 '.' <> padDec decimals frac
-      where
-        w = abs p `div` scale
-        frac = abs p `mod` scale
 
     -- zero-pad a fraction to `digits` columns
     padDec digits v = go (digits - digitCount v) <> intDec v
@@ -98,10 +108,55 @@ tickRowB scale d t =
         loop n x | x < 10    = n + 1
                  | otherwise = loop (n + 1) (x `div` 10)
 
+-- one row per continuous level lifetime (Sim.Lvl): first/last candle of
+-- the existence, side (0 = bid, 1 = ask), price, peak resting volume,
+-- and the volume-change event range (record indices into the .vev
+-- sidecar; evn 0 on rows written before the event export existed)
+lvlHeader :: String
+lvlHeader = "c0,c1,side,price,peak,ev0,evn"
+
+lvlRowB :: Int -> LvlSeg -> Builder
+lvlRowB scale (LvlSeg c0 c1 side px peak ev0 evn) =
+  intDec c0 <> char8 ',' <> intDec c1 <> char8 ','
+    <> intDec (sideCode side) <> char8 ','
+    <> priceB scale px <> char8 ',' <> intDec peak
+    <> char8 ',' <> intDec ev0 <> char8 ',' <> intDec evn
+  where
+    sideCode Bid = 0
+    sideCode Ask = 1
+
+-- volume-change event sidecar for OBVOL dynamics: fixed 20-byte
+-- records — candle u32 LE, side u32 LE (0 = bid, 1 = ask), integer
+-- price u32 LE, absolute level volume u64 LE. Header: magic "RELV" +
+-- version u32 + record count u64 (patched when the file is complete).
+-- Each lifetime's events are contiguous (see Sim.Lvl), so the UI reads
+-- them by seeking to ev0 * 20 + 16
+vevHeader :: Builder
+vevHeader = string8 "RELV" <> word32LE 1 <> word64LE 0
+
+vevRecB :: LvlEv -> Builder
+vevRecB (LvlEv c side (Price px) vol) =
+  word32LE (fromIntegral c)
+    <> word32LE (sideCode side)
+    <> word32LE (fromIntegral px)
+    <> word64LE (fromIntegral vol)
+  where
+    sideCode Bid = 0
+    sideCode Ask = 1
+
+vevPath :: FilePath -> FilePath
+vevPath path = sidecarPath "vev" path
+
 ticksPath :: FilePath -> FilePath
-ticksPath path = case break (== '.') (reverse path) of
-  (_, [])     -> path ++ ".ticks.csv"
-  (_, _ : rb) -> reverse rb ++ ".ticks.csv"
+ticksPath path = sidecarPath "ticks.csv" path
+
+levelsPath :: FilePath -> FilePath
+levelsPath path = sidecarPath "levels.csv" path
+
+sidecarPath :: String -> FilePath -> FilePath
+sidecarPath ext path = case break (== '.') (reverse path) of
+  (_, [])     -> path ++ "." ++ ext
+  (_, _ : rb) -> reverse rb ++ "." ++ ext
 
 priceFloat :: Int -> Price -> Double
 priceFloat scale (Price p) = fromIntegral p / fromIntegral scale

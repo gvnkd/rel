@@ -2,7 +2,7 @@ module Main (main) where
 
 import Data.Bits (shiftL, shiftR, xor)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (sort)
+import Data.List (sort, sortOn)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
@@ -14,6 +14,7 @@ import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, ramp
 import Sim.Gen
 import Sim.GenH (runSimH)
 import Sim.Csv (tickRow)
+import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import Sim.Resume (parseState, stateText)
 import Sim.Sinus (runSimSinus, sinusCandlesFrom, sinusPriceAt, sinusVolAt)
 import Sim.TickGen (runSimTicks)
@@ -173,7 +174,7 @@ prop_ticks_candles_match_runSim_percent seed mode clamp =
         , spPriceOffset = OffsetPercent
         , spZeroFloor = True
         }
-      (cs, _ts) = runSimTicks sp
+      (cs, _ts, _ps, _ev) = runSimTicks sp
   in property $ cs == runSim sp
 
 prop_ticks_candles_match_runSim :: Word64 -> SimMode -> Bool -> Property
@@ -186,13 +187,13 @@ prop_ticks_candles_match_runSim seed mode clamp =
         , spMode = mode
         , spClampRest = clamp
         }
-      (cs, _ts) = runSimTicks sp
+      (cs, _ts, _ps, _ev) = runSimTicks sp
   in property $ cs == runSim sp
 
 prop_ticks_book_snapshots :: Word64 -> SimMode -> Property
 prop_ticks_book_snapshots seed mode =
   let sp = defaultParams { spSeed = seed, spCandles = 20, spOrdersLo = 50, spOrdersHi = 50, spMode = mode, spBookDepth = 10 }
-      (cs, ts) = runSimTicks sp
+      (cs, ts, _ps, _ev) = runSimTicks sp
       lastVol i = case [tickVol t | t <- ts, tickCandle t == i] of
         [] -> -1
         vs -> last vs
@@ -209,6 +210,120 @@ sortedLevels t =
      && askPs == sort askPs
      && length bidPs <= 10 && length askPs <= 10
      && all (> 0) vols
+
+-- level-lifetime tracker (Sim.Lvl): events mirroring what the tick
+-- drivers observe — Rest opens/bumps an open level, Match consumes the
+-- same amount from the best bid and the best ask level
+data LvlFlowEv = LRest Int Side Price Int | LMatch Int Price Price Int
+  deriving (Show)
+
+newtype LvlFlow = LvlFlow [LvlFlowEv]
+  deriving (Show)
+
+instance Arbitrary LvlFlow where
+  arbitrary = LvlFlow <$> listOf1 genEv
+    where
+      genEv = oneof
+        [ LRest <$> chooseInt (0, 20) <*> genSide <*> genPrice <*> chooseInt (1, 20)
+        , LMatch <$> chooseInt (0, 20) <*> genPrice <*> genPrice <*> chooseInt (1, 20)
+        ]
+
+evCi :: LvlFlowEv -> Int
+evCi (LRest ci _ _ _)  = ci
+evCi (LMatch ci _ _ _) = ci
+
+-- drive the Sim.Lvl tracker over a flow; open levels flush at the end
+-- with c1 = the flush index, same as the tick drivers do
+lvlTrack :: [LvlFlowEv] -> LvlTr -> Int -> [(LvlSeg, [LvlEv])]
+lvlTrack evs tr0 flushCi = go evs tr0 []
+  where
+    go [] tr acc = reverse acc ++ trCloseAll flushCi tr
+    go (e : rest) tr acc = case e of
+      LRest ci side p v ->
+        go rest (trRest ci side p v tr) acc
+      LMatch ci bp ap v ->
+        let (tr', pairs) = trConsume ci bp ap v tr
+        in go rest tr' (reverse pairs ++ acc)
+
+-- reference model replicating the tracker exactly, including the
+-- close-time event-range assignment (segment ev0/evn must match)
+lvlModel :: [LvlFlowEv] -> Int -> [(LvlSeg, [LvlEv])]
+lvlModel evs flushCi =
+  let (m, ne, closed) = foldl' step (Map.empty, 0, []) evs
+      open = goOpen ne
+        -- toAscList sorts by (Side, Price): Bid group first, then Ask —
+        -- the same flush order as trCloseAll
+        [ (side, p, x) | ((side, p), x) <- Map.toAscList m ]
+  in closed ++ open
+  where
+    step (m, ne, closed) e = case e of
+      LRest ci side p v -> case Map.lookup (side, p) m of
+        Nothing ->
+          ( Map.insert (side, p) (v, v, ci, [LvlEv ci side p v]) m
+          , ne
+          , closed
+          )
+        Just (c, pk, st, buf) ->
+          let c' = c + v
+          in ( Map.insert (side, p) (c', max pk c', st, LvlEv ci side p c' : buf) m
+             , ne
+             , closed
+             )
+      LMatch ci bp ap v ->
+        let (m1, ne1, c1) = eat ci v m ne Bid bp
+            (m2, ne2, c2) = eat ci v m1 ne1 Ask ap
+        in (m2, ne2, closed ++ c1 ++ c2)
+    eat ci v mm ne side p = case Map.lookup (side, p) mm of
+      Nothing -> (mm, ne, [])
+      Just (c, pk, st, buf)
+        | c <= v    ->
+            ( Map.delete (side, p) mm
+            , ne + length buf
+            , [(LvlSeg st ci side p pk ne (length buf), reverse buf)]
+            )
+        | otherwise ->
+            let c' = c - v
+            in ( Map.insert (side, p) (c', max pk c', st, LvlEv ci side p c' : buf) mm
+               , ne
+               , []
+               )
+    goOpen _ [] = []
+    goOpen n ((side, p, (_, pk, st, buf)) : rest) =
+      (LvlSeg st flushCi side p pk n (length buf), reverse buf) : goOpen (n + length buf) rest
+
+prop_lvl_tracker_matches_model :: LvlFlow -> Bool
+prop_lvl_tracker_matches_model (LvlFlow evs) =
+  let flushCi = maximum (map evCi evs)
+  in lvlTrack evs emptyTr flushCi == lvlModel evs flushCi
+
+-- segments from a tick run: in-bounds, positive peaks, and per (side,
+-- price) lifetimes never overlap (a new one starts only after the
+-- previous one closed)
+prop_lvl_segments_coherent :: Word64 -> SimMode -> Bool
+prop_lvl_segments_coherent seed mode =
+  let sp = defaultParams { spSeed = seed, spCandles = 20, spOrdersLo = 50, spOrdersHi = 50, spMode = mode, spBookDepth = 5 }
+      (_cs, _ts, ps, _ev) = runSimTicks sp
+      ls = map fst ps
+      byLevel = Map.fromListWith (++) [ ((lvSide s, lvPx s), [s]) | s <- ls ]
+      ordered segs =
+        let ss = sortOn (\s -> (lvC0 s, lvC1 s)) segs
+        in and (zipWith (\a b -> lvC0 b >= lvC1 a) ss (drop 1 ss))
+  in all (\s -> lvC0 s >= 0 && lvC0 s <= lvC1 s && lvC1 s < spCandles sp && lvPeak s > 0) ls
+     && all ordered (Map.elems byLevel)
+
+-- each segment's event range covers exactly its records, and the ranges
+-- tile the event stream [0, nEv) as a set (list order is close order —
+-- the end-of-run flush appends still-open lifetimes opened early)
+prop_lvl_events_flat_consistent :: Word64 -> SimMode -> Bool
+prop_lvl_events_flat_consistent seed mode =
+  let sp = defaultParams { spSeed = seed, spCandles = 20, spOrdersLo = 50, spOrdersHi = 50, spMode = mode, spBookDepth = 5 }
+      (_cs, _ts, ps, nEv) = runSimTicks sp
+      rangesOk = all (\(s, es) -> lvEvN s == length es) ps
+      sorted = sortOn fst [ (lvEv0 s, lvEvN s) | (s, _) <- ps ]
+      tile = all (\(a, b) -> fst b == fst a + snd a) (zip sorted (drop 1 sorted))
+  in rangesOk && (null sorted || fst (head sorted) == 0)
+     && tile
+     && sum (map snd sorted) == nEv
 
 instance Arbitrary SimMode where
   arbitrary = elements [ModeCandles, ModeTickTrades, ModeTickSteps]
@@ -519,17 +634,19 @@ prop_resume_ticks seed mode = ioProperty $ do
         , spMode = mode
         , spBookDepth = 5
         }
-      (_, tsAll) = runSimTicks sp
+      (_, tsAll, _psAll, _evAll) = runSimTicks sp
       rows = map (tickRow 100000 5)
+      lb0 = trFromBook 0 0 (gsBook (initState sp))
   ref <- newIORef []
-  (gs1, cs1) <- runSimTicksH defaultHooks (collect ref) sp { spCandles = 20 } 0 (initState sp)
+  (gs1, cs1, _n1) <- runSimTicksH defaultHooks (collect ref) ignoreLvl sp { spCandles = 20 } 0 (initState sp) lb0
   ts1 <- reverse <$> readIORef ref
   writeIORef ref []
-  (_gs2, _cs2) <- runSimTicksH defaultHooks (collect ref) sp { spCandles = 20 } (length cs1) gs1
+  (_gs2, _cs2, _n2) <- runSimTicksH defaultHooks (collect ref) ignoreLvl sp { spCandles = 20 } (length cs1) gs1 (trFromBook 0 (length cs1) (gsBook gs1))
   ts2 <- reverse <$> readIORef ref
   pure (rows (ts1 ++ ts2) == rows tsAll)
   where
     collect ref t = modifyIORef' ref (t :)
+    ignoreLvl _ = pure ()
 
 -- the walk-forward search must find near-perfect parameters for an exact
 -- harmonic (its forecast is essentially exact, so the hybrid score ~ 0)
@@ -732,6 +849,9 @@ props =
   , ("ticks_candles_match_runSim_percent", property prop_ticks_candles_match_runSim_percent)
   , ("ticks_candles_match_runSim", property prop_ticks_candles_match_runSim)
   , ("ticks_book_snapshots", property prop_ticks_book_snapshots)
+  , ("lvl_tracker_matches_model", property prop_lvl_tracker_matches_model)
+  , ("lvl_segments_coherent", property prop_lvl_segments_coherent)
+  , ("lvl_events_flat_consistent", property prop_lvl_events_flat_consistent)
   , ("resume_candles", property prop_resume_candles)
   , ("state_roundtrip", property prop_state_roundtrip)
   , ("sinus_candles_valid", property prop_sinus_candles_valid)

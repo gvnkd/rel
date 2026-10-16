@@ -51,6 +51,8 @@ func _draw() -> void:
 					txt += "  Temp %.3f" % float(v)
 				elif ind.kind == "CECP":
 					txt += "  CECP H%.3f C%.3f" % [v[0], v[1]]
+				elif ind.kind == "OBVOL":
+					txt += "  OBVOL B%s A%s" % [VolumeWidget.fmt_vol(int(v[0])), VolumeWidget.fmt_vol(int(v[1]))]
 				else:
 					txt += "  %s %s" % [ind.kind, view.fmt_price(float(v))]
 		lines.append([txt, s.col_pos])
