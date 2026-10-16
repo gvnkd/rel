@@ -1,12 +1,16 @@
 module SimFFI where
 
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, catch, fromException, ioError, try)
-import Control.Monad (unless)
+import Control.Monad (forM, unless, when)
 import qualified Data.ByteString as B
 import Data.ByteString.Builder (char8, hPutBuilder, word64LE)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (intercalate)
+import qualified Data.Vector.Unboxed as VU
 import Data.Word (Word64)
-import Foreign.C.String (CString, peekCString)
+import Foreign.C.String (CString, newCString, peekCString)
 import Foreign.C.Types (CDouble (..), CInt (..))
 import Foreign.Marshal.Array (peekArray, pokeArray)
 import Foreign.Ptr (Ptr)
@@ -18,13 +22,16 @@ import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..), initState)
 import Sim.GenH (runSimH)
 import Sim.Lvl (LvlEv, LvlSeg, trFromBook)
+import qualified Sim.ML.Data as MLD
+import qualified Sim.ML.Train as MLT
 import Sim.Resume (readState, statePath, writeState)
 import Sim.Sinus (runSimSinusH)
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (Candle, SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
-import System.Directory (doesFileExist, getFileSize, removeFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize, removeFile)
 import System.IO (BufferMode (BlockBuffering), Handle, IOMode (AppendMode, ReadWriteMode, WriteMode), SeekMode (AbsoluteSeek, SeekFromEnd), hPutStr, hSeek, hSetBuffering, hSetFileSize, withFile)
-import System.IO.Error (isDoesNotExistError)
+import System.IO.Error (isDoesNotExistError, userError)
+import Text.Printf (printf)
 
 -- params are "key=value" pairs separated by ';', keys as in the CLI
 -- without the leading "--" (e.g. "candles=1000;seed=7")
@@ -404,6 +411,254 @@ cleanup path p = mapM_ rm (path : (path ++ ".meta") : sidecar)
       ModeCandles -> []
       _           -> [ticksPath path | not (spSinus p)] ++ [levelsPath path | not (spSinus p)] ++ [vevPath path | not (spSinus p)]
     rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
+
+-- --- ML training FFI -------------------------------------------------------
+
+-- start a batch of parallel training sessions on one dataset. The call
+-- BLOCKS until all sessions finish (run it on a worker thread); progress
+-- is polled via sim_ml_progress and the per-session table via
+-- sim_ml_sessions. Each session trains on seed base+k and writes
+-- <out>/ml_<seed>.json (metrics) and <out>/equity_<seed>.csv (the test
+-- equity curve in candles csv format, plottable by the chart).
+--
+-- params (key=value pairs separated by ';'):
+--   data=<csv path>      candles csv (sim or real-quotes format) — required
+--   out=<dir>            results directory — required
+--   sessions=N           parallel sessions, seeds seed..seed+N-1 (default 4)
+--   seed=N               base seed (default 1)
+--   epochs=N             (default 50)
+--   lr=D                 learning rate (default 0.05)
+--   hidden="16,8"        hidden layer sizes (default "16")
+--   trainpct=D           train segment fraction (default 0.6)
+--   valpct=D             validation segment fraction (default 0.2)
+--   fee=D                per position change, fraction (default 0.0002)
+--   lags="1,5,20"        feature return lags
+--   volwin=N             realized vol window (default 20)
+--   rangewin=N           range-envelope window (default 20)
+--   smawin=N             SMA distance window (default 20)
+--   volsma=N             volume SMA window (default 20)
+--   kswin=N              permutation entropy window (0 = off, default 0)
+--   ksm=N                ordinal pattern length (default 5)
+--   labeleps=D           |next return| below = flat class (default 1e-5)
+--
+-- returns 0 on success (all sessions completed, some may be cancelled),
+-- 1 on bad params, 2 on data/IO failure
+foreign export ccall "sim_ml_train" simMlTrain :: CString -> IO CInt
+
+-- overall batch progress 0..1 (sum of epoch fractions across sessions)
+foreign export ccall "sim_ml_progress" simMlProgress :: IO CDouble
+
+-- live session table as a JSON array string (caller frees nothing; the
+-- buffer is freshly allocated per call and owned by the caller — the
+-- shim copies it into a godot::String and frees it)
+foreign export ccall "sim_ml_sessions" simMlSessions :: IO CString
+
+-- request cancellation of the in-flight batch (idempotent)
+foreign export ccall "sim_ml_cancel" simMlCancel :: IO ()
+
+data MlSessionState = MlSessionState
+  { msSeed   :: !Word64
+  , msEpoch  :: !(IORef Int)
+  , msEpochs :: !Int
+  , msBest   :: !(IORef Double)
+  , msStatus :: !(IORef String)
+  }
+
+data MlParams = MlParams
+  { mlpData     :: !FilePath
+  , mlpOut      :: !FilePath
+  , mlpSessions :: !Int
+  , mlpSeedBase :: !Word64
+  , mlpTrain    :: !MLT.TrainParams
+  }
+
+{-# NOINLINE mlProgressRef #-}
+mlProgressRef :: IORef (Int, Int)
+mlProgressRef = unsafePerformIO (newIORef (0, 0))
+
+{-# NOINLINE mlCancelRef #-}
+mlCancelRef :: IORef Bool
+mlCancelRef = unsafePerformIO (newIORef False)
+
+{-# NOINLINE mlSessionsRef #-}
+mlSessionsRef :: IORef [MlSessionState]
+mlSessionsRef = unsafePerformIO (newIORef [])
+
+simMlProgress :: IO CDouble
+simMlProgress = do
+  (done, total) <- readIORef mlProgressRef
+  pure (CDouble (if total <= 0 then 0 else fromIntegral done / fromIntegral total))
+
+simMlCancel :: IO ()
+simMlCancel = writeIORef mlCancelRef True
+
+simMlSessions :: IO CString
+simMlSessions = do
+  ss <- readIORef mlSessionsRef
+  parts <- mapM sessionJson ss
+  newCString ("[" ++ intercalate "," parts ++ "]")
+  where
+    sessionJson st = do
+      e <- readIORef (msEpoch st)
+      b <- readIORef (msBest st)
+      s <- readIORef (msStatus st)
+      let b' = if isInfinite b || isNaN b then 0 else b
+      pure $ "{\"seed\":" ++ show (msSeed st)
+          ++ ",\"epoch\":" ++ show e
+          ++ ",\"epochs\":" ++ show (msEpochs st)
+          ++ ",\"best\":" ++ show b'
+          ++ ",\"status\":\"" ++ s ++ "\"}"
+
+simMlTrain :: CString -> IO CInt
+simMlTrain paramsPtr = do
+  paramsStr <- peekCString paramsPtr
+  case parseMlParams paramsStr of
+    Left _  -> pure 1
+    Right p -> do
+      writeIORef mlCancelRef False
+      result <- try (runMlBatch p) :: IO (Either SomeException ())
+      case result of
+        Left err
+          | Just SimCancelled <- fromException err -> pure 3
+          | otherwise                            -> pure 2
+        Right _ -> pure 0
+
+runMlBatch :: MlParams -> IO ()
+runMlBatch p = do
+  content <- readFile (mlpData p)
+  bars <- case MLD.parseBars content of
+    Left err -> ioError (userError err)
+    Right bs -> pure bs
+  md <- case MLT.prepareData (mlpTrain p) bars of
+    Left err -> ioError (userError err)
+    Right d  -> pure d
+  createDirectoryIfMissing True (mlpOut p)
+  let epochs = MLT.tpEpochs (mlpTrain p)
+      n = max 1 (mlpSessions p)
+  stRefs <- forM [0 .. n - 1] $ \k -> do
+    e <- newIORef 0
+    b <- newIORef (-1 / 0)
+    s <- newIORef "run"
+    pure (MlSessionState (mlpSeedBase p + fromIntegral k) e epochs b s)
+  writeIORef mlSessionsRef stRefs
+  writeIORef mlProgressRef (0, n * epochs)
+  doneRef <- newIORef 0
+  barrier <- newEmptyMVar
+  _ <- forM stRefs $ \st -> forkIO $ do
+    r <- try (MLT.trainSession (mlHooks st) (mlpTrain p) md (msSeed st))
+    case r of
+      Left err -> writeIORef (msStatus st)
+        (case fromException err of
+           Just SimCancelled -> "cancelled"
+           _                 -> "error")
+      Right Nothing -> writeIORef (msStatus st) "cancelled"
+      Right (Just sr) -> do
+        writeIORef (msStatus st) "done"
+        writeMlResult (mlpOut p) sr
+    finished <- atomicModifyIORef' doneRef (\d -> (d + 1, d + 1))
+    when (finished == n) (putMVar barrier ())
+  takeMVar barrier
+  pure ()
+  where
+    mlHooks st = MLT.TrainHooks
+      { MLT.thProgress = \e _ -> do
+          writeIORef (msEpoch st) e
+          _ <- atomicModifyIORef' mlProgressRef (\(d, t) -> ((d + 1, t), ()))
+          pure ()
+      , MLT.thBest = \vc -> do
+          best <- readIORef (msBest st)
+          when (vc > best) (writeIORef (msBest st) vc)
+      , MLT.thCancelled = readIORef mlCancelRef
+      }
+
+-- per-session artifacts: metrics json + the equity curve as a candles csv
+-- (o=h=l=c=equity) so the chart can load it as a regular timeline
+writeMlResult :: FilePath -> MLT.SessionResult -> IO ()
+writeMlResult out sr = do
+  let met = MLT.srMetrics sr
+      seed = MLT.srSeed sr
+      eqPath = out ++ "/equity_" ++ show seed ++ ".csv"
+      js = intercalate ","
+        [ "\"seed\":" ++ show seed
+        , "\"epochs\":" ++ show (MLT.srEpochs sr)
+        , "\"bestEpoch\":" ++ show (MLT.srBestEpoch sr)
+        , "\"valCalmar\":" ++ show (MLT.srValCalmar sr)
+        , "\"pnl\":" ++ show (MLT.mPnl met)
+        , "\"maxDD\":" ++ show (MLT.mMaxDD met)
+        , "\"calmar\":" ++ show (MLT.mCalmar met)
+        , "\"accuracy\":" ++ show (MLT.mAccuracy met)
+        , "\"trades\":" ++ show (MLT.mTrades met)
+        , "\"equity\":\"equity_" ++ show seed ++ ".csv\""
+        ]
+  withFile (out ++ "/ml_" ++ show seed ++ ".json") WriteMode $ \h ->
+    hPutStr h ("{" ++ js ++ "}\n")
+  withFile eqPath WriteMode $ \h ->
+    hPutStr h "open,high,low,close,vol\n"
+  appendEquity eqPath (MLT.srEquity sr)
+
+appendEquity :: FilePath -> VU.Vector Double -> IO ()
+appendEquity path eq = withFile path AppendMode $ \h ->
+  hPutStr h (concatMap row (VU.toList eq))
+  where
+    row e =
+      let s = printf "%.5f" e
+      in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
+
+parseMlParams :: String -> Either String MlParams
+parseMlParams s = do
+  let kv = kvPairs s
+      look k = lookup k kv
+  dataPath <- maybe (Left "missing data=") Right (look "data")
+  outDir   <- maybe (Left "missing out=") Right (look "out")
+  sessions <- readK "sessions" 4
+  seedBase <- readK "seed" (1 :: Word64)
+  epochs   <- readK "epochs" 50
+  lr       <- readKD "lr" 0.05
+  hidden   <- parseInts "hidden" [16] "16"
+  trainPct <- readKD "trainpct" 0.6
+  valPct   <- readKD "valpct" 0.2
+  fee      <- readKD "fee" 0.0002
+  lags     <- parseInts "lags" [1, 5, 20] "1,5,20"
+  volWin   <- readK "volwin" 20
+  rangeWin <- readK "rangewin" 20
+  smaWin   <- readK "smawin" 20
+  volSma   <- readK "volsma" 20
+  ksWin    <- readK "kswin" 0
+  ksM      <- readK "ksm" 5
+  labelEps <- readKD "labeleps" 1e-5
+  let spec = MLD.defaultFeatureSpec
+        { MLD.fsLags = lags
+        , MLD.fsVolWin = volWin
+        , MLD.fsRangeWin = rangeWin
+        , MLD.fsSmaWin = smaWin
+        , MLD.fsVolSmaWin = volSma
+        , MLD.fsKsWin = ksWin
+        , MLD.fsKsM = ksM
+        , MLD.fsLabelEps = labelEps
+        }
+  pure (MlParams dataPath outDir sessions seedBase (MLT.TrainParams epochs lr hidden trainPct valPct fee spec))
+  where
+    kv = kvPairs s
+    readK :: Read a => String -> a -> Either String a
+    readK k d = maybe (Right d) (readTK k) (lookup k kv)
+    readKD :: String -> Double -> Either String Double
+    readKD k d = maybe (Right d) (readTK k) (lookup k kv)
+    readTK :: Read a => String -> String -> Either String a
+    readTK k v = maybe (Left ("bad " ++ k)) Right (readV v)
+    parseInts :: String -> [Int] -> String -> Either String [Int]
+    parseInts k d fmt = case lookup k kv of
+      Nothing -> Right d
+      Just v | Just is <- mapM (readV :: String -> Maybe Int) (split ',' v), not (null is) -> Right is
+             | otherwise -> Left ("bad " ++ k ++ " (expected " ++ fmt ++ ")")
+    readV :: Read a => String -> Maybe a
+    readV v = case reads v of
+      [(x, "")] -> Just x
+      _         -> Nothing
+
+kvPairs :: String -> [(String, String)]
+kvPairs = map pair . filter (not . null) . map trim . split ';'
+  where
+    pair kv = let (k, v) = break (== '=') kv in (k, drop 1 v)
 
 toArgs :: String -> [String]
 toArgs = concatMap pair . filter (not . null) . map trim . split ';'

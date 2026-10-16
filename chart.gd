@@ -50,6 +50,8 @@ const PALETTE: Array[Color] = [
 @onready var cursor_widget: CursorWidget = $Cursor
 @onready var sim_window: ToolWindow = $SimWindow
 @onready var sim_panel: SimPanel = $SimWindow/Box/SimPanel
+@onready var ml_window: ToolWindow = $MlWindow
+@onready var ml_panel: MlPanel = $MlWindow/Box/MlPanel
 
 func _ready() -> void:
 	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget]:
@@ -64,6 +66,7 @@ func _ready() -> void:
 	sim_panel.timeline_added.connect(_on_timeline_added)
 	sim_panel.timeline_removed.connect(_on_timeline_removed)
 	sim_panel.timeline_toggled.connect(_on_timeline_toggled)
+	ml_panel.timeline_added.connect(_on_timeline_added)
 	_menu = PopupPanel.new()
 	var panel := PanelContainer.new()
 	_menu_box = VBoxContainer.new()
@@ -131,7 +134,7 @@ func _input(event: InputEvent) -> void:
 			vol_collapsed = false
 			vol_frac = clampf((view.plot_rect.end.y - motion.position.y) / plot_h, 0.0, VOL_MAX_FRAC)
 			_sync_volume()
-		elif not sim_window.is_dragging() and not _over_ui(motion.position):
+		elif not sim_window.is_dragging() and not ml_window.is_dragging() and not _over_ui(motion.position):
 			if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
 				view.scale_by(motion.relative, motion.position)
 				view.follow = false
@@ -141,7 +144,8 @@ func _input(event: InputEvent) -> void:
 		_refresh()
 
 func _over_ui(pos: Vector2) -> bool:
-	return sim_window.visible and sim_window.get_global_rect().has_point(pos)
+	return (sim_window.visible and sim_window.get_global_rect().has_point(pos)) \
+		or (ml_window.visible and ml_window.get_global_rect().has_point(pos))
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
@@ -157,6 +161,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_refresh()
 	elif key.keycode == KEY_F1:
 		sim_window.toggle()
+	elif key.keycode == KEY_F2:
+		ml_window.toggle()
 	elif key.keycode == KEY_V:
 		_toggle_volume()
 

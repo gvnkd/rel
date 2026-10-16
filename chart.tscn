@@ -1,7 +1,8 @@
-[gd_scene load_steps=11 format=3 uid="uid://cstjrpfbx0k33"]
+[gd_scene load_steps=12 format=3 uid="uid://cstjrpfbx0k33"]
 
 [ext_resource type="Script" uid="uid://7hei3gpwt2v2" path="res://chart.gd" id="1_0bwlf"]
 [ext_resource type="Script" uid="uid://cw1fn5scussh4" path="res://sim_panel.gd" id="2_sim"]
+[ext_resource type="Script" uid="uid://dq7ml2kpx8vfu" path="res://ml_panel.gd" id="2_ml"]
 [ext_resource type="Script" uid="uid://c18nkcprwm2ut" path="res://tool_window.gd" id="2_win"]
 [ext_resource type="Script" uid="uid://dyt0jnmb4f64m" path="res://grid_widget.gd" id="4_grid"]
 [ext_resource type="Script" uid="uid://bw62fg1diihr6" path="res://series_widget.gd" id="5_series"]
@@ -122,3 +123,40 @@ flat = true
 layout_mode = 2
 size_flags_vertical = 3
 script = ExtResource("2_sim")
+
+[node name="MlWindow" type="PanelContainer" parent="."]
+layout_mode = 0
+offset_left = 330.0
+offset_top = 10.0
+offset_right = 660.0
+offset_bottom = 580.0
+script = ExtResource("2_win")
+title = "ML Trainer"
+
+[node name="Box" type="VBoxContainer" parent="MlWindow"]
+layout_mode = 2
+
+[node name="Bar" type="HBoxContainer" parent="MlWindow/Box"]
+custom_minimum_size = Vector2(0, 24)
+layout_mode = 2
+
+[node name="Title" type="Label" parent="MlWindow/Box/Bar"]
+layout_mode = 2
+mouse_filter = 1
+text = "ML Trainer"
+
+[node name="Spacer" type="Control" parent="MlWindow/Box/Bar"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 1
+
+[node name="Close" type="Button" parent="MlWindow/Box/Bar"]
+layout_mode = 2
+focus_mode = 0
+text = "×"
+flat = true
+
+[node name="MlPanel" type="Control" parent="MlWindow/Box"]
+layout_mode = 2
+size_flags_vertical = 3
+script = ExtResource("2_ml")

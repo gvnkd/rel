@@ -4,10 +4,16 @@
 #include <godot_cpp/variant/packed_float64_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 
+#include <cstdlib>
+
 extern "C" int sim_generate(const char *params, const char *out_path);
 extern "C" int sim_continue(const char *params, const char *out_path);
 extern "C" double sim_progress(void);
 extern "C" void sim_cancel(void);
+extern "C" int sim_ml_train(const char *params);
+extern "C" double sim_ml_progress(void);
+extern "C" char *sim_ml_sessions(void);
+extern "C" void sim_ml_cancel(void);
 extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double edge_w, double *out);
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
@@ -38,6 +44,10 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves", "edge_w"), &SimNative::fft_forecast);
 		godot::ClassDB::bind_method(godot::D_METHOD("perm_entropy", "closes", "window", "m"), &SimNative::perm_entropy);
 		godot::ClassDB::bind_method(godot::D_METHOD("cecp", "closes", "window", "m"), &SimNative::cecp);
+		godot::ClassDB::bind_method(godot::D_METHOD("ml_train", "params"), &SimNative::ml_train);
+		godot::ClassDB::bind_method(godot::D_METHOD("ml_progress"), &SimNative::ml_progress);
+		godot::ClassDB::bind_method(godot::D_METHOD("ml_sessions"), &SimNative::ml_sessions);
+		godot::ClassDB::bind_method(godot::D_METHOD("ml_cancel"), &SimNative::ml_cancel);
 	}
 
 public:
@@ -59,6 +69,29 @@ public:
 
 	void cancel() {
 		sim_cancel();
+	}
+
+	// ML training: starts a batch of parallel sessions, blocks until done
+	// (call on a worker thread), writes per-session results into out dir
+	int ml_train(const godot::String &params) {
+		godot::CharString ps = params.utf8();
+		return sim_ml_train(ps.ptr());
+	}
+
+	double ml_progress() {
+		return sim_ml_progress();
+	}
+
+	// live session table as JSON; the C string is copied then freed
+	godot::String ml_sessions() {
+		char *s = sim_ml_sessions();
+		godot::String r(s);
+		::free(s);
+		return r;
+	}
+
+	void ml_cancel() {
+		sim_ml_cancel();
 	}
 
 	godot::PackedFloat64Array fft_forecast(const godot::PackedFloat64Array &closes, int64_t start, int64_t end, int64_t predict, int64_t waves, double edge_w) {

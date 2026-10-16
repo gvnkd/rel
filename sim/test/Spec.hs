@@ -7,20 +7,26 @@ import Data.Maybe (fromJust, listToMaybe)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Vector as V
 import Sim.Engine
 import Sim.Entropy (cecpOf, permEntropy, rollingCECP, rollingPermEntropy)
 import qualified Data.Vector.Unboxed as VU
 import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, refinePeaks, solveLS)
 import Sim.Gen
 import Sim.GenH (runSimH)
-import Sim.Csv (tickRow)
+import Sim.Csv (csvText, tickRow)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
+import qualified Sim.ML.Data as MLD
+import qualified Sim.ML.Model as MLM
+import qualified Sim.ML.Train as MLT
 import Sim.Resume (parseState, stateText)
 import Sim.Sinus (runSimSinus, sinusCandlesFrom, sinusPriceAt, sinusVolAt)
 import Sim.TickGen (runSimTicks)
 import Sim.TickGenH (runSimTicksH)
 import System.Exit (exitFailure, exitSuccess)
 import Sim.Types
+import System.IO.Unsafe (unsafePerformIO)
+import System.Random.SplitMix (mkSMGen)
 import Test.QuickCheck hiding (Result)
 import Test.QuickCheck (Result)
 
@@ -822,6 +828,183 @@ prop_fft_edge_weight =
       eW = errOf fitW
   in eW < eP - 3
 
+-- --- ML trainer props -----------------------------------------------------
+
+-- synthetic bars: smooth sinus with a small wick
+mlSinusBars :: Int -> [MLD.Bar]
+mlSinusBars n =
+  [ let p = 100 + 3 * sin (2 * pi * fromIntegral i / 50)
+    in MLD.Bar (p - 0.05) (p + 0.05) (p - 0.05) (p + 0.05) 1000
+  | i <- [0 .. n - 1] ]
+
+prop_ml_parse_bars_sim_csv :: Word64 -> Property
+prop_ml_parse_bars_sim_csv seed =
+  let p = defaultParams { spSeed = seed, spCandles = 30, spOrdersLo = 50, spOrdersHi = 50 }
+      cs = runSim p
+      scale = fromIntegral (spPriceScale p)
+      toBar c = MLD.Bar
+        (fromIntegral (unPrice (candleOpen c)) / scale)
+        (fromIntegral (unPrice (candleHigh c)) / scale)
+        (fromIntegral (unPrice (candleLow c)) / scale)
+        (fromIntegral (unPrice (candleClose c)) / scale)
+        (fromIntegral (candleVol c))
+      expect = map toBar cs
+  in case MLD.parseBars (csvText p cs) of
+       Left err -> property (counterexample err False)
+       Right got ->
+         property (length got == length expect)
+         .&&. property (all closeBar (zip got expect))
+  where
+    closeBar (a, b) =
+      abs (MLD.barO a - MLD.barO b) < 1e-9 && abs (MLD.barH a - MLD.barH b) < 1e-9
+      && abs (MLD.barL a - MLD.barL b) < 1e-9 && abs (MLD.barC a - MLD.barC b) < 1e-9
+      && MLD.barV a == MLD.barV b
+
+prop_ml_parse_bars_timestamped :: Bool
+prop_ml_parse_bars_timestamped =
+  let csv = "YYYY.MM.DD HH:MM,o,h,l,c,vol\n"
+         ++ "2024.01.02 03:04,1.1,1.2,1.0,1.15,100\n"
+         ++ "2024.01.02 03:05,1.15,1.3,1.1,1.25,200\n"
+      want = [MLD.Bar 1.1 1.2 1.0 1.15 100, MLD.Bar 1.15 1.3 1.1 1.25 200]
+  in MLD.parseBars csv == Right want
+
+prop_ml_parse_bars_garbage :: Bool
+prop_ml_parse_bars_garbage =
+  MLD.parseBars "open,high,low,close,vol\n" == Left "no parseable candle rows"
+
+prop_ml_features_rows_valid :: Bool
+prop_ml_features_rows_valid =
+  let spec = MLD.defaultFeatureSpec
+      fs = MLD.buildFeatures spec (mlSinusBars 800)
+      size = MLD.featureSize spec
+      ok i = let r = MLD.fRows fs V.! i
+             in VU.length r == size && VU.all (\x -> not (isNaN x) && not (isInfinite x)) r
+  in MLD.fWarmup fs == 20
+     && all (\i -> VU.null (MLD.fRows fs V.! i)) [0 .. MLD.fWarmup fs - 1]
+     && all ok [MLD.fWarmup fs .. 799 - 2]
+     && MLD.fLabels fs VU.! 799 == -1
+     && VU.all (\l -> l >= 0 && l <= 2) (VU.slice (MLD.fWarmup fs) (800 - MLD.fWarmup fs - 1) (MLD.fLabels fs))
+
+-- the optional entropy feature extends the row by one in [0,1] and
+-- pushes the warm-up out to the entropy window
+prop_ml_features_ks :: Bool
+prop_ml_features_ks =
+  let spec = MLD.defaultFeatureSpec { MLD.fsKsWin = 30, MLD.fsKsM = 4 }
+      fs = MLD.buildFeatures spec (mlSinusBars 200)
+      size = MLD.featureSize spec
+      ks i = (MLD.fRows fs V.! i) VU.! (size - 1)
+  in size == MLD.featureSize MLD.defaultFeatureSpec + 1
+     && MLD.fWarmup fs == 30
+     && all (\i -> let x = ks i in not (isNaN x) && x >= 0 && x <= 1) [30 .. 198]
+
+prop_ml_prepare_splits_and_norm :: Bool
+prop_ml_prepare_splits_and_norm =
+  let tp = MLT.defaultTrainParams
+  in case MLT.prepareData tp (mlSinusBars 800) of
+       Left err -> error err
+       Right md ->
+         let size = MLD.featureSize (MLT.tpSpec tp)
+             tr = MLT.mdTrain md
+             va = MLT.mdVal md
+             te = MLT.mdTest md
+             mean k idxs = sum [ (MLT.mdRows md V.! i) VU.! k | i <- idxs ] / fromIntegral (length idxs)
+             -- no overlap, ordered, non-empty
+             disjoint = all (`notElem` tr) (va ++ te) && all (`notElem` va) te
+         in length tr > 0 && length va > 0 && length te > 0
+            && disjoint
+            && all (> head tr) va && all (> last va) te
+            && all (\i -> VU.length (MLT.mdRows md V.! i) == size) (tr ++ va ++ te)
+            && all (\k -> abs (mean k tr) < 1e-9) [0 .. size - 1]
+
+prop_ml_softmax_sums_to_one :: Bool
+prop_ml_softmax_sums_to_one =
+  let m = MLM.initModel (mkSMGen 5) [7, 16, 3]
+      fs = MLD.buildFeatures MLD.defaultFeatureSpec (mlSinusBars 100)
+      x = MLD.fRows fs V.! 50
+      ps = MLM.predict m x
+  in abs (VU.sum ps - 1) < 1e-12 && MLM.predictClass m x >= 0 && MLM.predictClass m x <= 2
+
+prop_ml_init_deterministic :: Bool
+prop_ml_init_deterministic =
+  let a = MLM.initModel (mkSMGen 9) [4, 8, 3]
+      b = MLM.initModel (mkSMGen 9) [4, 8, 3]
+      c = MLM.initModel (mkSMGen 10) [4, 8, 3]
+  in a == b && a /= c && MLM.layerSizes a == [4, 8, 3]
+
+-- analytic gradient vs central finite differences on a tiny model
+prop_ml_grad_matches_numeric :: Bool
+prop_ml_grad_matches_numeric =
+  let m0 = MLM.initModel (mkSMGen 11) [2, 3, 2]
+      xs = [VU.fromList [0.3, -0.7], VU.fromList [1.1, 0.2], VU.fromList [-0.4, 0.9]]
+      ys = [1, 0, 1]
+      batch = zip xs ys
+      grads = zipWith (\x y -> MLM.gradOne m0 x y) xs ys
+      combined = foldr1 (\a b -> zipWith addG a b) grads
+      num l i =
+        let d = 1e-5
+            lp = MLM.loss (perturb m0 l i d) batch
+            lm = MLM.loss (perturb m0 l i (-d)) batch
+        in (lp - lm) / (2 * d)
+      check l g =
+        VU.and (VU.imap (\i gi -> abs (gi / n - num l i) < 1e-4) (MLM.lgW g))
+      n = fromIntegral (length batch)
+      addG a b = MLM.LayerGrad (VU.zipWith (+) (MLM.lgW a) (MLM.lgW b)) (VU.zipWith (+) (MLM.lgB a) (MLM.lgB b))
+  in all (\l -> check l (combined !! l)) [0, 1]
+  where
+    perturb m l i d =
+      let layers = MLM.mLayers m
+          lay = layers !! l
+          w' = MLM.lW lay VU.// [(i, MLM.lW lay VU.! i + d)]
+          lay' = lay { MLM.lW = w' }
+      in m { MLM.mLayers = take l layers ++ [lay'] ++ drop (l + 1) layers }
+
+prop_ml_sgd_decreases_loss :: Bool
+prop_ml_sgd_decreases_loss =
+  let samples = [ (VU.fromList [a, b], if a > b then 2 else 0)
+                | (a, b) <- [(0.9, 0.1), (0.8, -0.2), (-0.3, 0.6), (0.1, 0.7), (0.7, 0.4), (-0.6, -0.9)] ]
+      m0 = MLM.initModel (mkSMGen 7) [2, 4, 3]
+      l0 = MLM.loss m0 samples
+      m1 = MLM.sgdStep 0.1 m0 samples
+      l1 = MLM.loss m1 samples
+      mN = iterate (\m -> MLM.sgdStep 0.5 m samples) m1 !! 300
+      acc = sum [ if MLM.predictClass mN x == y then 1 else 0 | (x, y) <- samples ]
+  in l1 < l0 && acc >= 5
+
+-- an always-long policy on monotone rising bars: one trade in, positive
+-- PnL, zero drawdown, Calmar falls back to PnL
+prop_ml_policy_always_long :: Bool
+prop_ml_policy_always_long =
+  let bars = [ let c = 100 * 1.001 ^ i
+               in MLD.Bar c c c c 1000
+             | i <- [0 .. 299] :: [Int] ]
+      tp = MLT.defaultTrainParams { MLT.tpFee = 0.0002 }
+      Right md = MLT.prepareData tp bars
+      fi = MLD.featureSize (MLT.tpSpec tp)
+      long = MLM.Model [ MLM.Layer fi 3 (VU.replicate (fi * 3) 0) (VU.fromList [0, 0, 5]) ]
+      (met, eq) = MLT.evalPolicy long (MLT.tpFee tp) md (MLT.mdTest md)
+  in MLT.mPnl met > 0
+     && MLT.mMaxDD met == 0
+     && MLT.mCalmar met == MLT.mPnl met
+     && MLT.mTrades met == 1
+     && VU.length eq == length (MLT.mdTest md)
+
+-- end-to-end session on predictable (sinus) bars must beat chance by a
+-- wide margin; fixed seed, deterministic
+prop_ml_session_learns_sinus :: Bool
+prop_ml_session_learns_sinus =
+  let tp = MLT.defaultTrainParams { MLT.tpEpochs = 40, MLT.tpLR = 0.1, MLT.tpHidden = [8] }
+      Right md = MLT.prepareData tp (mlSinusBars 800)
+      res = unsafePerformIO (MLT.trainSession MLT.defaultTrainHooks tp md 3)
+  in case res of
+       Nothing -> False
+       Just sr ->
+         let m = MLT.srMetrics sr
+         in MLT.srBestEpoch sr > 0
+            && MLT.mAccuracy m > 0.6
+            && MLT.mAccuracy m <= 1
+            && MLT.mPnl m /= 0
+            && VU.length (MLT.srEquity sr) == length (MLT.mdTest md)
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -888,4 +1071,16 @@ props =
   , ("cecp_iid_noise_corner", property prop_cecp_iid_noise_corner)
   , ("cecp_rolling_matches_window", property prop_cecp_rolling_matches_window)
   , ("cecp_rolling_invalid", property prop_cecp_rolling_invalid)
+  , ("ml_parse_bars_sim_csv", property prop_ml_parse_bars_sim_csv)
+  , ("ml_parse_bars_timestamped", property prop_ml_parse_bars_timestamped)
+  , ("ml_parse_bars_garbage", property prop_ml_parse_bars_garbage)
+  , ("ml_features_rows_valid", property prop_ml_features_rows_valid)
+  , ("ml_features_ks", property prop_ml_features_ks)
+  , ("ml_prepare_splits_and_norm", property prop_ml_prepare_splits_and_norm)
+  , ("ml_softmax_sums_to_one", property prop_ml_softmax_sums_to_one)
+  , ("ml_init_deterministic", property prop_ml_init_deterministic)
+  , ("ml_grad_matches_numeric", property prop_ml_grad_matches_numeric)
+  , ("ml_sgd_decreases_loss", property prop_ml_sgd_decreases_loss)
+  , ("ml_policy_always_long", property prop_ml_policy_always_long)
+  , ("ml_session_learns_sinus", property prop_ml_session_learns_sinus)
   ]
