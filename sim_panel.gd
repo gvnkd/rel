@@ -125,7 +125,8 @@ func _build_ui() -> void:
 	_resume_btn = resume_btn
 
 	var load_btn := Button.new()
-	load_btn.text = "Load CSV..."
+	load_btn.text = "Load..."
+	load_btn.tooltip_text = "load candles from a CSV or a binary .rbin export"
 	load_btn.pressed.connect(_on_load_clicked)
 	box.add_child(load_btn)
 
@@ -144,7 +145,7 @@ func _build_ui() -> void:
 	var dialog := FileDialog.new()
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	dialog.access = FileDialog.ACCESS_FILESYSTEM
-	dialog.filters = PackedStringArray(["*.csv ; CSV candles"])
+	dialog.filters = PackedStringArray(["*.csv ; CSV candles", "*.rbin ; Binary candles"])
 	dialog.file_selected.connect(_on_file_selected)
 	add_child(dialog)
 	_load_dialog = dialog

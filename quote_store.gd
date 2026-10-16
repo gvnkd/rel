@@ -12,6 +12,12 @@ const HEADER_SIZE := 64
 const REC_SIZE := 48  # time u64 + o/h/l/c f64 + vol u64
 const CHUNK := 65536  # records processed per awaited step
 
+# full-export format: candles + book snapshots + level lifetimes + vev events
+const MAGIC_SIM := 0x534C4552  # "RELS" little-endian
+const SIM_VERSION := 1
+const SIM_FLAG_BOOKS := 1
+const SIM_FLAG_LEVELS := 2
+
 const CACHE_DIR := "user://quotecache"
 
 # timeframe -> minutes per bucket; sim chunk counts reuse the same keys
@@ -113,6 +119,51 @@ func _read_header(f: FileAccess) -> bool:
 	max_high = h.decode_double(32)
 	decimals = h.decode_s32(40)
 	return true
+
+# ---- RELS full-export header --------------------------------------------
+
+# 0 magic u32, 4 version u32, 8 flags u32, 12 decimals s32,
+# 16 candle_count u64, 24 book_depth u64, 32 level_row_count u64,
+# 40 vev_record_count u64, 48 min_low f64, 56 max_high f64
+static func write_sim_header(f: FileAccess, flags: int, p_dec: int, n: int, depth: int, nlevels: int, nvev: int, lo: float, hi: float) -> void:
+	var h := PackedByteArray()
+	h.resize(HEADER_SIZE)
+	h.encode_u32(0, MAGIC_SIM)
+	h.encode_u32(4, SIM_VERSION)
+	h.encode_u32(8, flags)
+	h.encode_s32(12, p_dec)
+	h.encode_u64(16, n)
+	h.encode_u64(24, depth)
+	h.encode_u64(32, nlevels)
+	h.encode_u64(40, nvev)
+	h.encode_double(48, lo)
+	h.encode_double(56, hi)
+	f.store_buffer(h)
+
+static func read_sim_header(f: FileAccess) -> Dictionary:
+	if f.get_length() < HEADER_SIZE:
+		return {}
+	f.seek(0)
+	var h := f.get_buffer(HEADER_SIZE)
+	if h.decode_u32(0) != MAGIC_SIM or h.decode_u32(4) != SIM_VERSION:
+		return {}
+	return {
+		"flags": h.decode_u32(8), "dec": h.decode_s32(12),
+		"n": int(h.decode_u64(16)), "depth": int(h.decode_u64(24)),
+		"nlevels": int(h.decode_u64(32)), "nvev": int(h.decode_u64(40)),
+		"lo": h.decode_double(48), "hi": h.decode_double(56),
+	}
+
+# first 4 bytes when they hold a known magic, else 0
+static func peek_magic(path: String) -> int:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null or f.get_length() < 8:
+		if f != null:
+			f.close()
+		return 0
+	var m := f.get_32()
+	f.close()
+	return m
 
 # ---- open / window reads -----------------------------------------------
 
@@ -243,11 +294,7 @@ func ensure_tf_async(csv_path: String, tf: String, progress: Callable = Callable
 	if tf == "1m":
 		return OK
 	var out := cache_path(csv_path, tf)
-	var parent_tf := _parent_tf(tf)
-	var parent_path := cache_path(csv_path, parent_tf)
-	if FileAccess.file_exists(out) and FileAccess.file_exists(parent_path):
-		if FileAccess.get_modified_time(out) >= FileAccess.get_modified_time(parent_path):
-			return OK
+	var parent_path := cache_path(csv_path, _parent_tf(tf))
 	if not FileAccess.file_exists(parent_path):
 		return ERR_FILE_NOT_FOUND
 	var pf := FileAccess.open(parent_path, FileAccess.READ)
@@ -257,15 +304,23 @@ func ensure_tf_async(csv_path: String, tf: String, progress: Callable = Callable
 	pf.close()
 	if ph.is_empty():
 		return ERR_PARSE_ERROR
-	var w := FileAccess.open(out, FileAccess.WRITE)
+	return await _aggregate_tf_async(parent_path, out, tf, ph["dec"], progress)
+
+# aggregates the RELQ store at `parent_path` into `out_path` at `tf`;
+# the parent may be any RELQ file (a csv cache or a directly saved rbin)
+func _aggregate_tf_async(parent_path: String, out_path: String, tf: String, dec: int, progress: Callable = Callable()) -> Error:
+	if FileAccess.file_exists(out_path):
+		if FileAccess.get_modified_time(out_path) >= FileAccess.get_modified_time(parent_path):
+			return OK
+	var w := FileAccess.open(out_path, FileAccess.WRITE)
 	if w == null:
 		return ERR_CANT_OPEN
-	_write_header(w, int(TF_MINUTES[tf]), true, ph["dec"], 0, 0.0, 0.0)
+	_write_header(w, int(TF_MINUTES[tf]), true, dec, 0, 0.0, 0.0)
 	var src := QuoteStore.new()
 	if not src.open(parent_path):
 		w.close()
 		return ERR_CANT_OPEN
-	var n: int = ph["count"]
+	var n: int = src.count
 	var lo := INF
 	var hi := -INF
 	var out_n := 0
@@ -310,7 +365,7 @@ func ensure_tf_async(csv_path: String, tf: String, progress: Callable = Callable
 		out_n += 1
 		lo = minf(lo, cl)
 		hi = maxf(hi, ch)
-	_write_header_at(w, int(TF_MINUTES[tf]), true, ph["dec"], out_n, lo, hi)
+	_write_header_at(w, int(TF_MINUTES[tf]), true, dec, out_n, lo, hi)
 	w.close()
 	src.close()
 	if progress.is_valid():

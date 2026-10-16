@@ -29,6 +29,8 @@ var _menu: PopupPanel
 var _menu_box: VBoxContainer
 var _fft_spins := {}
 var _opt_rmse_pct := 50
+var _save_dialog: FileDialog
+var _save_series_idx := -1
 
 const PALETTE: Array[Color] = [
 	Color(0.56, 0.93, 0.56),
@@ -368,6 +370,11 @@ func _build_series_row(i: int) -> void:
 	reset.tooltip_text = "reset colors"
 	reset.pressed.connect(_on_menu_series_reset.bind(i))
 	row.add_child(reset)
+	var save := Button.new()
+	save.text = "bin"
+	save.tooltip_text = "save series as binary (.rbin): candles + books + levels"
+	save.pressed.connect(_on_menu_series_save.bind(i))
+	row.add_child(save)
 	var tf_opt := OptionButton.new()
 	for tname in QuoteStore.TFS:
 		tf_opt.add_item(tname)
@@ -572,7 +579,13 @@ func _on_menu_series_tf(sel: int, idx: int) -> void:
 	if tf == s.tf:
 		return
 	if s.store != null:
-		if await _open_quotes(s, s.store_key, tf) != OK:
+		var err: int
+		if QuoteStore.peek_magic(s.store_key) == QuoteStore.MAGIC:
+			# a directly loaded rbin aggregates from itself, not from a csv
+			err = await _open_binary(s, s.store_key, tf)
+		else:
+			err = await _open_quotes(s, s.store_key, tf)
+		if err != OK:
 			_set_load_status("timeframe failed: %s" % s.name)
 			return
 	else:
@@ -710,6 +723,276 @@ func _open_quotes(s: PlotData.Series, csv_path: String, tf: String) -> int:
 	s.candles.clear()
 	return OK
 
+# opens a directly saved RELQ rbin (no csv conversion); higher timeframes
+# aggregate down the parent chain starting from the file itself
+func _open_binary(s: PlotData.Series, path: String, tf: String) -> int:
+	if s.store == null:
+		s.store = QuoteStore.new()
+	s.store_key = path
+	_load_name = path.get_file()
+	if tf != "1m":
+		var pf := FileAccess.open(path, FileAccess.READ)
+		if pf == null:
+			return ERR_CANT_OPEN
+		var ph := QuoteStore._peek_header(pf)
+		pf.close()
+		if ph.is_empty():
+			return ERR_PARSE_ERROR
+		var chain: Array[String] = []
+		var t := tf
+		while t != "1m":
+			chain.push_front(t)
+			t = QuoteStore._parent_tf(t)
+		var parent := path
+		for ct in chain:
+			_set_load_status("building %s…" % ct)
+			var out := QuoteStore.cache_path(path, ct)
+			var err: int = await QuoteStore.new()._aggregate_tf_async(parent, out, ct, ph["dec"], _load_progress)
+			if err != OK:
+				return err
+			parent = out
+	var base := path if tf == "1m" else QuoteStore.cache_path(path, tf)
+	if not s.store.open(base):
+		return ERR_CANT_OPEN
+	s.tf = tf
+	s.win_off = 0
+	s.candles.clear()
+	return OK
+
+# ---- binary save/load (RELS) ----------------------------------------------
+
+func _on_menu_series_save(i: int) -> void:
+	if _save_dialog == null:
+		_save_dialog = FileDialog.new()
+		_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+		_save_dialog.access = FileDialog.ACCESS_FILESYSTEM
+		_save_dialog.filters = PackedStringArray(["*.rbin ; Binary candles"])
+		_save_dialog.file_selected.connect(_on_save_file_selected)
+		add_child(_save_dialog)
+	_save_series_idx = i
+	_save_dialog.current_file = data.series[i].name + ".rbin"
+	_save_dialog.popup_centered(Vector2i(700, 500))
+
+func _on_save_file_selected(path: String) -> void:
+	var i := _save_series_idx
+	_save_series_idx = -1
+	if i < 0 or i >= data.series.size():
+		return
+	if not path.ends_with(".rbin"):
+		path += ".rbin"
+	_load_name = path.get_file()
+	_set_load_status("saving %s…" % _load_name)
+	var err := await _save_series_binary(i, path)
+	if err == OK:
+		_set_load_status("saved %s" % _load_name)
+	else:
+		_set_load_status("save failed: %s (code %d)" % [_load_name, err])
+
+# store-backed series: byte-copy the 1m cache (keeps timestamps and the
+# sliding-window store on reload); memory-backed series: full RELS export
+# (base candles + book snapshots + level lifetimes + vev events)
+func _save_series_binary(i: int, path: String) -> Error:
+	var s: PlotData.Series = data.series[i]
+	if s.store != null:
+		# directly loaded rbins copy themselves; csv-backed series copy
+		# their converted 1m cache
+		var src := s.store_key
+		if QuoteStore.peek_magic(src) != QuoteStore.MAGIC:
+			src = QuoteStore.cache_path(src)
+		return await _copy_file_async(src, path)
+	var base: Array[Candle] = s._base if not s._base.is_empty() else s.candles
+	var books: Array = s._base_books
+	var use_books := books.size() == base.size() and not books.is_empty()
+	var depth := 0
+	if use_books:
+		for b in books:
+			depth = maxi(depth, (b["bids"] as Array).size())
+			depth = maxi(depth, (b["asks"] as Array).size())
+		use_books = depth > 0
+	var vev := PackedByteArray()
+	var nvev := 0
+	if s.levels_path != "" and FileAccess.file_exists(s.levels_path):
+		var vf := FileAccess.open(s.levels_path, FileAccess.READ)
+		if vf != null and vf.get_length() >= 16:
+			vf.seek(8)
+			nvev = int(vf.get_64())
+			vf.seek(0)
+			vev = vf.get_buffer(16 + nvev * 20)
+			if vev.size() < 16 + nvev * 20:
+				nvev = 0
+		if vf != null:
+			vf.close()
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return ERR_CANT_OPEN
+	var flags := 0
+	if use_books:
+		flags |= QuoteStore.SIM_FLAG_BOOKS
+	if not s.levels.is_empty():
+		flags |= QuoteStore.SIM_FLAG_LEVELS
+	var n := base.size()
+	QuoteStore.write_sim_header(f, flags, view.decimals, n, depth if use_books else 0, s.levels.size() / 7, nvev, 0.0, 0.0)
+	var rec := PackedByteArray()
+	rec.resize(QuoteStore.REC_SIZE)
+	var lo := INF
+	var hi := -INF
+	for k in n:
+		var c := base[k]
+		rec.encode_u64(0, k)
+		rec.encode_double(8, c.open)
+		rec.encode_double(16, c.high)
+		rec.encode_double(24, c.low)
+		rec.encode_double(32, c.close)
+		rec.encode_u64(40, c.vol)
+		f.store_buffer(rec)
+		lo = minf(lo, c.low)
+		hi = maxf(hi, c.high)
+		if k % QuoteStore.CHUNK == QuoteStore.CHUNK - 1:
+			_load_progress(minf(float(k) / maxf(n, 1), 0.99))
+			await Engine.get_main_loop().process_frame
+	if use_books:
+		for k in n:
+			_write_book_rec(f, books[k], depth)
+			if k % QuoteStore.CHUNK == QuoteStore.CHUNK - 1:
+				_load_progress(minf(float(k) / maxf(n, 1), 0.99))
+				await Engine.get_main_loop().process_frame
+	if flags & QuoteStore.SIM_FLAG_LEVELS:
+		var lbuf := PackedByteArray()
+		lbuf.resize(s.levels.size() * 8)
+		for k in s.levels.size():
+			lbuf.encode_double(k * 8, s.levels[k])
+		f.store_buffer(lbuf)
+	if nvev > 0:
+		# records only — the 16-byte header is rebuilt on load
+		f.store_buffer(vev.slice(16))
+	var pos := f.get_position()
+	f.seek(0)
+	QuoteStore.write_sim_header(f, flags, view.decimals, n, depth if use_books else 0, s.levels.size() / 7, nvev, lo, hi)
+	f.seek(pos)
+	f.close()
+	if view.decimals >= 0:
+		var mf := FileAccess.open(path + ".meta", FileAccess.WRITE)
+		if mf != null:
+			mf.store_line("decimals=%d" % view.decimals)
+			mf.close()
+	_load_progress(1.0)
+	return OK
+
+static func _write_book_rec(f: FileAccess, book: Dictionary, depth: int) -> void:
+	var b: Array = book["bids"]
+	var a: Array = book["asks"]
+	var buf := PackedByteArray()
+	buf.resize(depth * 32)
+	for d in depth:
+		if d < b.size():
+			buf.encode_double(d * 16, b[d].x)
+			buf.encode_double(d * 16 + 8, b[d].y)
+		if d < a.size():
+			buf.encode_double(depth * 16 + d * 16, a[d].x)
+			buf.encode_double(depth * 16 + d * 16 + 8, a[d].y)
+	f.store_buffer(buf)
+
+func _copy_file_async(src: String, dst: String) -> Error:
+	var f := FileAccess.open(src, FileAccess.READ)
+	if f == null:
+		return ERR_CANT_OPEN
+	var w := FileAccess.open(dst, FileAccess.WRITE)
+	if w == null:
+		f.close()
+		return ERR_CANT_OPEN
+	var size := f.get_length()
+	var k := 0
+	while f.get_position() < size:
+		w.store_buffer(f.get_buffer(1 << 20))
+		k += 1
+		if k % 64 == 0:
+			_load_progress(minf(float(f.get_position()) / maxf(size, 1), 0.99))
+			await Engine.get_main_loop().process_frame
+	f.close()
+	w.close()
+	_load_progress(1.0)
+	return OK
+
+# loads a RELS full export; writes the embedded vev block back out as a
+# `<base>.vev` sidecar next to the file (the OBVOL indicator reads it there)
+func _load_binary(path: String) -> Dictionary:
+	var out := { "candles": [], "books": [], "levels": PackedFloat64Array(), "vev_path": "" }
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_error("cannot open binary file: " + path)
+		return out
+	var h := QuoteStore.read_sim_header(f)
+	if h.is_empty():
+		push_error("bad RELS header: " + path)
+		f.close()
+		return out
+	var n: int = h["n"]
+	var depth: int = h["depth"]
+	var candles: Array[Candle] = []
+	var i := 0
+	while i < n:
+		var upto := mini(i + QuoteStore.CHUNK, n)
+		var want := (upto - i) * QuoteStore.REC_SIZE
+		var buf := f.get_buffer(want)
+		if buf.size() < want:
+			buf.resize(want)
+		for off in range(0, want, QuoteStore.REC_SIZE):
+			var c := Candle.new()
+			c.open = buf.decode_double(off + 8)
+			c.high = buf.decode_double(off + 16)
+			c.low = buf.decode_double(off + 24)
+			c.close = buf.decode_double(off + 32)
+			c.vol = int(buf.decode_u64(off + 40))
+			candles.append(c)
+		i = upto
+	var books: Array = []
+	if int(h["flags"]) & QuoteStore.SIM_FLAG_BOOKS:
+		for k in n:
+			var bbuf := f.get_buffer(depth * 32)
+			if bbuf.size() < depth * 32:
+				bbuf.resize(depth * 32)
+			var bids: Array[Vector2] = []
+			var asks: Array[Vector2] = []
+			for d in depth:
+				var v := bbuf.decode_double(d * 16 + 8)
+				if v > 0.0:
+					bids.append(Vector2(bbuf.decode_double(d * 16), v))
+				v = bbuf.decode_double(depth * 16 + d * 16 + 8)
+				if v > 0.0:
+					asks.append(Vector2(bbuf.decode_double(depth * 16 + d * 16), v))
+			books.append({ "bids": bids, "asks": asks })
+	if int(h["flags"]) & QuoteStore.SIM_FLAG_LEVELS:
+		var levels := PackedFloat64Array()
+		var lbuf := f.get_buffer(int(h["nlevels"]) * 56)
+		if lbuf.size() < int(h["nlevels"]) * 56:
+			lbuf.resize(int(h["nlevels"]) * 56)
+		for r in int(h["nlevels"]):
+			for k in 7:
+				levels.append(lbuf.decode_double(r * 56 + k * 8))
+		out["levels"] = levels
+	if int(h["nvev"]) > 0:
+		var vbuf := f.get_buffer(int(h["nvev"]) * 20)
+		if vbuf.size() == int(h["nvev"]) * 20:
+			var base := path
+			if base.ends_with(".rbin"):
+				base = base.substr(0, base.length() - ".rbin".length())
+			var vev_path := base + ".vev"
+			var vf := FileAccess.open(vev_path, FileAccess.WRITE)
+			if vf != null:
+				var hdr := PackedByteArray()
+				hdr.resize(16)
+				hdr.encode_u32(0, 0x564C4552)  # "RELV"
+				hdr.encode_u32(4, 1)
+				hdr.encode_u64(8, h["nvev"])
+				vf.store_buffer(hdr)
+				vf.store_buffer(vbuf)
+				vf.close()
+				out["vev_path"] = vev_path
+	f.close()
+	out["candles"] = candles
+	out["books"] = books
+	return out
+
 func add_timeline(tl_name: String, path: String) -> int:
 	# a same-name timeline is a reload (e.g. after resuming generation):
 	# refresh its data in place, keeping user colors and indicators
@@ -718,17 +1001,27 @@ func add_timeline(tl_name: String, path: String) -> int:
 			return await _reload_series(i, path)
 	var s := PlotDataScript.Series.new()
 	s.name = tl_name
-	var ticks_path := "%s.ticks.csv" % path.get_basename()
-	if FileAccess.file_exists(ticks_path):
-		var t := _load_ticks(ticks_path)
+	var magic := QuoteStore.peek_magic(path)
+	if magic == QuoteStore.MAGIC_SIM:
+		var t := _load_binary(path)
 		s.set_base(t["candles"], t["books"], t["levels"])
 		s.levels_path = t["vev_path"]
-	elif QuoteStore.sniff_csv(path) == "quotes":
-		if await _open_quotes(s, path, "1m") != OK:
+	elif magic == QuoteStore.MAGIC:
+		if await _open_binary(s, path, "1m") != OK:
 			_set_load_status("load failed: %s" % tl_name)
 			return -1
 	else:
-		s.set_base(_load_candles(path), [], PackedFloat64Array())
+		var ticks_path := "%s.ticks.csv" % path.get_basename()
+		if FileAccess.file_exists(ticks_path):
+			var t := _load_ticks(ticks_path)
+			s.set_base(t["candles"], t["books"], t["levels"])
+			s.levels_path = t["vev_path"]
+		elif QuoteStore.sniff_csv(path) == "quotes":
+			if await _open_quotes(s, path, "1m") != OK:
+				_set_load_status("load failed: %s" % tl_name)
+				return -1
+		else:
+			s.set_base(_load_candles(path), [], PackedFloat64Array())
 	var idx: int = data.series.size()
 	var col: Color = PALETTE[idx % PALETTE.size()]
 	s.col_pos = col
@@ -750,26 +1043,38 @@ func add_timeline(tl_name: String, path: String) -> int:
 
 func _reload_series(i: int, path: String) -> int:
 	var s: PlotData.Series = data.series[i]
-	var ticks_path := "%s.ticks.csv" % path.get_basename()
-	if FileAccess.file_exists(ticks_path):
-		var t := _load_ticks(ticks_path)
-		s.set_base(t["candles"], t["books"], t["levels"])
+	var magic := QuoteStore.peek_magic(path)
+	if magic == QuoteStore.MAGIC_SIM:
+		var t := _load_binary(path)
 		s.levels_path = t["vev_path"]
-	elif s.store != null:
+		s.set_base(t["candles"], t["books"], t["levels"])
+	elif magic == QuoteStore.MAGIC:
 		s.levels = PackedFloat64Array()
 		s.levels_path = ""
-		if await _open_quotes(s, path, s.tf) != OK:
-			_set_load_status("reload failed: %s" % s.name)
-			return i
-	elif QuoteStore.sniff_csv(path) == "quotes":
-		s.levels = PackedFloat64Array()
-		s.levels_path = ""
-		if await _open_quotes(s, path, "1m") != OK:
+		if await _open_binary(s, path, s.tf) != OK:
 			_set_load_status("reload failed: %s" % s.name)
 			return i
 	else:
-		s.set_base(_load_candles(path), [], PackedFloat64Array())
-		s.levels_path = ""
+		var ticks_path := "%s.ticks.csv" % path.get_basename()
+		if FileAccess.file_exists(ticks_path):
+			var t := _load_ticks(ticks_path)
+			s.set_base(t["candles"], t["books"], t["levels"])
+			s.levels_path = t["vev_path"]
+		elif s.store != null:
+			s.levels = PackedFloat64Array()
+			s.levels_path = ""
+			if await _open_quotes(s, path, s.tf) != OK:
+				_set_load_status("reload failed: %s" % s.name)
+				return i
+		elif QuoteStore.sniff_csv(path) == "quotes":
+			s.levels = PackedFloat64Array()
+			s.levels_path = ""
+			if await _open_quotes(s, path, "1m") != OK:
+				_set_load_status("reload failed: %s" % s.name)
+				return i
+		else:
+			s.set_base(_load_candles(path), [], PackedFloat64Array())
+			s.levels_path = ""
 	_update_book()
 	_refresh()
 	return i
