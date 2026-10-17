@@ -3,6 +3,7 @@
 [ext_resource type="Script" uid="uid://b6n2w4k8x1pqv" path="res://main.gd" id="1_main"]
 [ext_resource type="PackedScene" uid="uid://cstjrpfbx0k33" path="res://chart.tscn" id="2_chart"]
 [ext_resource type="PackedScene" uid="uid://c8mlp2yav4tju" path="res://ml_page.tscn" id="3_ml"]
+[ext_resource type="PackedScene" uid="uid://s7tr4p2y8k1ab" path="res://strat_page.tscn" id="4_strat"]
 
 [node name="Main" type="TabContainer"]
 anchors_preset = 15
@@ -16,4 +17,7 @@ script = ExtResource("1_main")
 layout_mode = 2
 
 [node name="ML Trainer" parent="." instance=ExtResource("3_ml")]
+layout_mode = 2
+
+[node name="Strategy" parent="." instance=ExtResource("4_strat")]
 layout_mode = 2

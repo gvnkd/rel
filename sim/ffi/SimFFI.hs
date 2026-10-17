@@ -26,6 +26,9 @@ import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Train as MLT
 import Sim.Resume (readState, statePath, writeState)
 import Sim.Sinus (runSimSinusH)
+import qualified Sim.Strat.Backtest as STB
+import qualified Sim.Strat.Optimize as STO
+import qualified Sim.Strat.Rules as STR
 import Sim.TickGenH (runSimTicksH)
 import Sim.Types (Candle, SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize, removeFile)
@@ -457,6 +460,233 @@ foreign export ccall "sim_ml_sessions" simMlSessions :: IO CString
 
 -- request cancellation of the in-flight batch (idempotent)
 foreign export ccall "sim_ml_cancel" simMlCancel :: IO ()
+
+-- --- strategy optimizer FFI ------------------------------------------------
+
+-- start a batch of parallel SMA-cross strategy optimization sessions on
+-- one dataset. The call BLOCKS until all sessions finish (run it on a
+-- worker thread); progress is polled via sim_strat_progress and the
+-- per-session table via sim_strat_sessions. Each session samples
+-- `candidates` strategies on seed base+k and writes <out>/strat_<seed>.json
+-- (the winning spec + metrics), <out>/equity_<seed>.csv (the test equity
+-- curve in candles csv format), <out>/cand_<seed>.csv (val Calmar per
+-- candidate) and <out>/test_<seed>.csv (close,equity,pos on the test
+-- segment).
+--
+-- params (key=value pairs separated by ';'):
+--   data=<path>          candles csv (sim or real-quotes format) or a
+--                        binary .rbin store (RELQ/RELS) — required
+--   out=<dir>            results directory — required
+--   sessions=N           parallel sessions, seeds seed..seed+N-1 (default 4)
+--   seed=N               base seed (default 1)
+--   slots=N              rule slots per strategy (default 4)
+--   candidates=N         strategies sampled per session (default 200)
+--   valpct=D             val (search) segment fraction (default 0.2)
+--   fee=D                per position change, fraction (default 0.0002)
+--   fastmax=N            fastest SMA period upper bound (default 50)
+--   slowmax=N            slowest SMA period upper bound (default 200)
+--
+-- returns 0 on success, 1 on bad params, 2 on data/IO failure, 3 when
+-- cancelled (partial artifacts stay, like the ML trainer)
+foreign export ccall "sim_strat_optimize" simStratOptimize :: CString -> IO CInt
+
+foreign export ccall "sim_strat_progress" simStratProgress :: IO CDouble
+
+foreign export ccall "sim_strat_sessions" simStratSessions :: IO CString
+
+foreign export ccall "sim_strat_cancel" simStratCancel :: IO ()
+
+data StratSessionState = StratSessionState
+  { ssSeed   :: !Word64
+  , ssCand   :: !(IORef Int)
+  , ssCands  :: !Int
+  , ssBest   :: !(IORef Double)
+  , ssStatus :: !(IORef String)
+  }
+
+data StratParams = StratParams
+  { stpData     :: !FilePath
+  , stpOut      :: !FilePath
+  , stpSessions :: !Int
+  , stpSeedBase :: !Word64
+  , stpOpt      :: !STO.OptParams
+  }
+
+{-# NOINLINE stratProgressRef #-}
+stratProgressRef :: IORef (Int, Int)
+stratProgressRef = unsafePerformIO (newIORef (0, 0))
+
+{-# NOINLINE stratCancelRef #-}
+stratCancelRef :: IORef Bool
+stratCancelRef = unsafePerformIO (newIORef False)
+
+{-# NOINLINE stratSessionsRef #-}
+stratSessionsRef :: IORef [StratSessionState]
+stratSessionsRef = unsafePerformIO (newIORef [])
+
+simStratProgress :: IO CDouble
+simStratProgress = do
+  (done, total) <- readIORef stratProgressRef
+  pure (CDouble (if total <= 0 then 0 else fromIntegral done / fromIntegral total))
+
+simStratCancel :: IO ()
+simStratCancel = writeIORef stratCancelRef True
+
+simStratSessions :: IO CString
+simStratSessions = do
+  ss <- readIORef stratSessionsRef
+  parts <- mapM sessionJson ss
+  newCString ("[" ++ intercalate "," parts ++ "]")
+  where
+    sessionJson st = do
+      c <- readIORef (ssCand st)
+      b <- readIORef (ssBest st)
+      s <- readIORef (ssStatus st)
+      let b' = if isInfinite b || isNaN b then 0 else b
+      pure $ "{\"seed\":" ++ show (ssSeed st)
+          ++ ",\"candidate\":" ++ show c
+          ++ ",\"candidates\":" ++ show (ssCands st)
+          ++ ",\"best\":" ++ show b'
+          ++ ",\"status\":\"" ++ s ++ "\"}"
+
+simStratOptimize :: CString -> IO CInt
+simStratOptimize paramsPtr = do
+  paramsStr <- peekCString paramsPtr
+  case parseStratParams paramsStr of
+    Left _  -> pure 1
+    Right p -> do
+      writeIORef stratCancelRef False
+      result <- try (runStratBatch p) :: IO (Either SomeException ())
+      case result of
+        Left err
+          | Just SimCancelled <- fromException err -> pure 3
+          | otherwise                            -> pure 2
+        Right _ -> pure 0
+
+runStratBatch :: StratParams -> IO ()
+runStratBatch p = do
+  parsed <- MLD.loadBars (stpData p)
+  bars <- case parsed of
+    Left err -> ioError (userError err)
+    Right bs -> pure bs
+  let closes = VU.fromList (map MLD.barC bars)
+  case STO.optSplits (stpOpt p) (VU.length closes) of
+    Left err -> ioError (userError err)
+    Right _  -> pure ()
+  createDirectoryIfMissing True (stpOut p)
+  let cands = max 1 (STO.opCandidates (stpOpt p))
+      n = max 1 (stpSessions p)
+  stRefs <- forM [0 .. n - 1] $ \k -> do
+    c <- newIORef 0
+    b <- newIORef (-1 / 0)
+    s <- newIORef "run"
+    pure (StratSessionState (stpSeedBase p + fromIntegral k) c cands b s)
+  writeIORef stratSessionsRef stRefs
+  writeIORef stratProgressRef (0, n * cands)
+  doneRef <- newIORef 0
+  barrier <- newEmptyMVar
+  _ <- forM stRefs $ \st -> forkIO $ do
+    r <- try (STO.optimizeSession (stratHooks st) (stpOpt p) closes (ssSeed st))
+    case r of
+      Left err -> writeIORef (ssStatus st)
+        (case fromException err of
+           Just SimCancelled -> "cancelled"
+           _                 -> "error")
+      Right res -> do
+        writeIORef (ssStatus st) "done"
+        writeStratResult (stpOut p) res
+    finished <- atomicModifyIORef' doneRef (\d -> (d + 1, d + 1))
+    when (finished == n) (putMVar barrier ())
+  takeMVar barrier
+  pure ()
+  where
+    stratHooks st = STO.OptHooks
+      { STO.ohProgress = \c _ -> do
+          writeIORef (ssCand st) c
+          _ <- atomicModifyIORef' stratProgressRef (\(d, t) -> ((d + 1, t), ()))
+          pure ()
+      , STO.ohBest = \cm -> do
+          best <- readIORef (ssBest st)
+          when (cm > best) (writeIORef (ssBest st) cm)
+      , STO.ohCancelled = readIORef stratCancelRef
+      }
+
+-- per-session artifacts: metrics json (the winning spec + test metrics),
+-- the test equity curve as a candles csv, the val-Calmar-per-candidate
+-- history and the per-test-step series (close, equity, position) for the
+-- strategy page's plot widgets
+writeStratResult :: FilePath -> STO.OptResult -> IO ()
+writeStratResult out r = do
+  let bt = STO.orTest r
+      met = STB.brMetrics bt
+      seed = STO.orSeed r
+      spec = STR.stratText (STO.orStrat r)
+      eqPath = out ++ "/equity_" ++ show seed ++ ".csv"
+      js = intercalate ","
+        [ "\"seed\":" ++ show seed
+        , "\"slots\":\"" ++ spec ++ "\""
+        , "\"valCalmar\":" ++ show (STO.orValCalmar r)
+        , "\"pnl\":" ++ show (STB.bmPnl met)
+        , "\"maxDD\":" ++ show (STB.bmMaxDD met)
+        , "\"calmar\":" ++ show (STB.bmCalmar met)
+        , "\"trades\":" ++ show (STB.bmTrades met)
+        , "\"equity\":\"equity_" ++ show seed ++ ".csv\""
+        , "\"cand\":\"cand_" ++ show seed ++ ".csv\""
+        , "\"test\":\"test_" ++ show seed ++ ".csv\""
+        ]
+  withFile (out ++ "/strat_" ++ show seed ++ ".json") WriteMode $ \h ->
+    hPutStr h ("{" ++ js ++ "}\n")
+  withFile eqPath WriteMode $ \h -> do
+    hPutStr h "open,high,low,close,vol\n"
+    hPutStr h (concatMap eqRow (VU.toList (STB.brEquity bt)))
+  withFile (out ++ "/cand_" ++ show seed ++ ".csv") WriteMode $ \h -> do
+    hPutStr h "candidate,val_calmar\n"
+    hPutStr h (concatMap candRow (zip [(1 :: Int) ..] (VU.toList (STO.orCandCalmar r))))
+  withFile (out ++ "/test_" ++ show seed ++ ".csv") WriteMode $ \h -> do
+    hPutStr h "close,equity,pos\n"
+    hPutStr h (concatMap testRow (zip3 (VU.toList (STB.brCloses bt))
+                                       (VU.toList (STB.brEquity bt))
+                                       (VU.toList (STB.brPos bt))))
+  where
+    eqRow e =
+      let s = printf "%.5f" e
+      in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
+    candRow (c, v) = show c ++ "," ++ printf "%.6g" v ++ "\n"
+    testRow (c, e, p) = printf "%.5f,%.6g,%d\n" c e p
+
+parseStratParams :: String -> Either String StratParams
+parseStratParams s = do
+  let kv = kvPairs s
+  dataPath <- maybe (Left "missing data=") Right (lookup "data" kv)
+  outDir   <- maybe (Left "missing out=") Right (lookup "out" kv)
+  sessions <- readK "sessions" 4
+  seedBase <- readK "seed" (1 :: Word64)
+  slots    <- readK "slots" 4
+  cands    <- readK "candidates" 200
+  valPct   <- readKD "valpct" 0.2
+  fee      <- readKD "fee" 0.0002
+  fastMax  <- readK "fastmax" 50
+  slowMax  <- readK "slowmax" 200
+  let opt = STO.defaultOptParams
+        { STO.opSlots = slots
+        , STO.opCandidates = cands
+        , STO.opValFrac = valPct
+        , STO.opFee = fee
+        , STO.opFastMax = fastMax
+        , STO.opSlowMax = slowMax
+        }
+  pure (StratParams dataPath outDir sessions seedBase opt)
+  where
+    readK :: Read a => String -> a -> Either String a
+    readK k d = maybe (Right d) (readTK k) (lookup k (kvPairs s))
+    readKD :: String -> Double -> Either String Double
+    readKD k d = maybe (Right d) (readTK k) (lookup k (kvPairs s))
+    readTK :: Read a => String -> String -> Either String a
+    readTK k v = maybe (Left ("bad " ++ k)) Right (readV v)
+    readV :: Read a => String -> Maybe a
+    readV v = case reads v of
+      [(x, "")] -> Just x
+      _         -> Nothing
 
 data MlSessionState = MlSessionState
   { msSeed   :: !Word64

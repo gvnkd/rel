@@ -23,12 +23,15 @@ import qualified Sim.ML.Model as MLM
 import qualified Sim.ML.Train as MLT
 import Sim.Resume (parseState, stateText)
 import Sim.Sinus (runSimSinus, sinusCandlesFrom, sinusPriceAt, sinusVolAt)
+import qualified Sim.Strat.Backtest as STB
+import qualified Sim.Strat.Optimize as STO
+import qualified Sim.Strat.Rules as STR
 import Sim.TickGen (runSimTicks)
 import Sim.TickGenH (runSimTicksH)
 import System.Exit (exitFailure, exitSuccess)
 import Sim.Types
 import System.IO.Unsafe (unsafePerformIO)
-import System.Random.SplitMix (mkSMGen)
+import System.Random.SplitMix (mkSMGen, nextWord64)
 import Test.QuickCheck hiding (Result)
 import Test.QuickCheck (Result)
 
@@ -1034,6 +1037,85 @@ prop_ml_session_learns_sinus =
             && VU.length (MLT.srHistory sr) == MLT.tpEpochs tp
             && VU.length (MLT.prEquity (MLT.srTest sr)) == length (MLT.mdTest md)
 
+-- --- SMA-cross strategies ----------------------------------------------------
+
+prop_strat_sma_matches_naive :: Property
+prop_strat_sma_matches_naive =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs ->
+  forAll (chooseInt (1, 20)) $ \w ->
+    let v = VU.fromList xs
+        s = STB.smaSeries w v
+        naive i = sum (VU.toList (VU.slice (i - w + 1) w v)) / fromIntegral w
+    in VU.length s == VU.length v
+       && and [ if i < w - 1
+                  then isNaN (s VU.! i)
+                  else abs (s VU.! i - naive i) < 1e-9
+              | i <- [0 .. VU.length v - 1] ]
+
+-- the signal may only change where some slot's (fast, slow) diff crosses
+prop_strat_signal_changes_only_at_crosses :: Property
+prop_strat_signal_changes_only_at_crosses =
+  forAll (chooseInt (80, 300)) $ \n ->
+    let g = mkSMGen 42
+        closes = VU.fromList (take n (walk 100 g))
+        walk p gg = let (w, gg') = nextWord64 gg
+                        p' = p + fromIntegral (w `mod` 200) / 100 - 1
+                    in p' : walk p' gg'
+        st = STR.Strat [STR.Slot 3 8 1, STR.Slot 5 12 (-1), STR.Slot 2 20 0]
+        sig = STB.evalSignal st closes
+        diffs = [ VU.zipWith (-) (STB.smaSeries (STR.slFast s) closes)
+                                 (STB.smaSeries (STR.slSlow s) closes)
+                | s <- STR.stSlots st ]
+        crosses = Set.fromList (concatMap STB.crossEvents diffs)
+    in VU.length sig == n
+       && and [ sig VU.! i == sig VU.! (i - 1) || Set.member i crosses
+              | i <- [1 .. n - 1] ]
+
+-- monotone rising bars + a single long slot: one trade in, positive PnL,
+-- zero drawdown, Calmar falls back to PnL, and the fee ledger closes:
+-- pnl + fee * sum |dPos| == gross position return
+prop_strat_backtest_fee_ledger :: Bool
+prop_strat_backtest_fee_ledger =
+  let closes = VU.fromList [ 100 * 1.001 ^ i | i <- [0 .. 299] :: [Int] ]
+      st = STR.Strat [STR.Slot 3 10 1]
+      fee = 0.0002
+      sig = STB.evalSignal st closes
+      bt = STB.backtest fee closes sig (0, VU.length closes - 1)
+      met = STB.brMetrics bt
+      poss = VU.toList (STB.brPos bt)
+      dPos = abs (head poss) : [ abs (b - a) | (a, b) <- zip poss (drop 1 poss) ]
+      dPosN = sum (map fromIntegral dPos :: [Double])
+      gross = sum [ fromIntegral p * (closes VU.! (i + 1) / closes VU.! i - 1)
+                  | (i, p) <- zip [0 ..] poss ]
+  in STB.bmPnl met > 0
+     && STB.bmMaxDD met == 0
+     && STB.bmCalmar met == STB.bmPnl met
+     && STB.bmTrades met == length (filter (/= 0) dPos)
+     && abs (STB.bmPnl met + fee * dPosN - gross) < 1e-9
+
+prop_strat_spec_roundtrip :: Bool
+prop_strat_spec_roundtrip =
+  let strats =
+        [ STR.Strat [STR.Slot 3 10 1]
+        , STR.Strat [STR.Slot 2 50 (-1), STR.Slot 10 200 0, STR.Slot 5 8 1]
+        ]
+  in all (\st -> STR.parseStrat (STR.stratText st) == Right st) strats
+     && STR.parseStrat "slots=1:2:1" `elem` [Left "bad slot: 1:2:1"]
+     && STR.parseStrat "nonsense" == Left "missing slots="
+
+-- same seed -> same winning spec, val Calmar and candidate history
+prop_strat_optimize_deterministic :: Bool
+prop_strat_optimize_deterministic =
+  let closes = VU.fromList (map MLD.barC (mlSinusBars 800))
+      p = STO.defaultOptParams { STO.opCandidates = 25, STO.opSlowMax = 30 }
+      run = unsafePerformIO (STO.optimizeSession STO.defaultOptHooks p closes 11)
+      run2 = unsafePerformIO (STO.optimizeSession STO.defaultOptHooks p closes 11)
+  in STO.orStrat run == STO.orStrat run2
+     && STO.orValCalmar run == STO.orValCalmar run2
+     && STO.orCandCalmar run == STO.orCandCalmar run2
+     && VU.length (STO.orCandCalmar run) == 25
+     && STO.orValCalmar run == VU.maximum (STO.orCandCalmar run)
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -1113,4 +1195,9 @@ props =
   , ("ml_sgd_decreases_loss", property prop_ml_sgd_decreases_loss)
   , ("ml_policy_always_long", property prop_ml_policy_always_long)
   , ("ml_session_learns_sinus", property prop_ml_session_learns_sinus)
+  , ("strat_sma_matches_naive", property prop_strat_sma_matches_naive)
+  , ("strat_signal_changes_only_at_crosses", property prop_strat_signal_changes_only_at_crosses)
+  , ("strat_backtest_fee_ledger", property prop_strat_backtest_fee_ledger)
+  , ("strat_spec_roundtrip", property prop_strat_spec_roundtrip)
+  , ("strat_optimize_deterministic", property prop_strat_optimize_deterministic)
   ]

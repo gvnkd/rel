@@ -14,6 +14,10 @@ extern "C" int sim_ml_train(const char *params);
 extern "C" double sim_ml_progress(void);
 extern "C" char *sim_ml_sessions(void);
 extern "C" void sim_ml_cancel(void);
+extern "C" int sim_strat_optimize(const char *params);
+extern "C" double sim_strat_progress(void);
+extern "C" char *sim_strat_sessions(void);
+extern "C" void sim_strat_cancel(void);
 extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double edge_w, double *out);
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
@@ -48,6 +52,10 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_progress"), &SimNative::ml_progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_sessions"), &SimNative::ml_sessions);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_cancel"), &SimNative::ml_cancel);
+		godot::ClassDB::bind_method(godot::D_METHOD("strat_optimize", "params"), &SimNative::strat_optimize);
+		godot::ClassDB::bind_method(godot::D_METHOD("strat_progress"), &SimNative::strat_progress);
+		godot::ClassDB::bind_method(godot::D_METHOD("strat_sessions"), &SimNative::strat_sessions);
+		godot::ClassDB::bind_method(godot::D_METHOD("strat_cancel"), &SimNative::strat_cancel);
 	}
 
 public:
@@ -92,6 +100,29 @@ public:
 
 	void ml_cancel() {
 		sim_ml_cancel();
+	}
+
+	// strategy optimizer: starts a batch of parallel sessions, blocks until
+	// done (call on a worker thread), writes per-session results into out dir
+	int strat_optimize(const godot::String &params) {
+		godot::CharString ps = params.utf8();
+		return sim_strat_optimize(ps.ptr());
+	}
+
+	double strat_progress() {
+		return sim_strat_progress();
+	}
+
+	// live session table as JSON; the C string is copied then freed
+	godot::String strat_sessions() {
+		char *s = sim_strat_sessions();
+		godot::String r(s);
+		::free(s);
+		return r;
+	}
+
+	void strat_cancel() {
+		sim_strat_cancel();
 	}
 
 	godot::PackedFloat64Array fft_forecast(const godot::PackedFloat64Array &closes, int64_t start, int64_t end, int64_t predict, int64_t waves, double edge_w) {

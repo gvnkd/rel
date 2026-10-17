@@ -21,6 +21,9 @@ library
                       Sim.ML.Data
                       Sim.ML.Model
                       Sim.ML.Train
+                      Sim.Strat.Rules
+                      Sim.Strat.Backtest
+                      Sim.Strat.Optimize
                       Sim.Resume
     other-modules:    Sim.Internal
     build-depends:    base >=4 && <5,

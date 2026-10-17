@@ -53,7 +53,7 @@
             self.packages.${system}.sim
             nixpkgs.legacyPackages.${system}.gdtoolkit_4
             (nixpkgs.legacyPackages.${system}.haskellPackages.ghcWithPackages (
-              ps: with ps; [ QuickCheck splitmix ]
+              ps: with ps; [ QuickCheck splitmix vector ]
             ))
           ];
         };
