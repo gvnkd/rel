@@ -24,6 +24,7 @@ import qualified Sim.ML.Train as MLT
 import Sim.Resume (parseState, stateText)
 import Sim.Sinus (runSimSinus, sinusCandlesFrom, sinusPriceAt, sinusVolAt)
 import qualified Sim.Strat.Backtest as STB
+import qualified Sim.Strat.Dsl as STD
 import qualified Sim.Strat.Optimize as STO
 import qualified Sim.Strat.Rules as STR
 import Sim.TickGen (runSimTicks)
@@ -1116,6 +1117,91 @@ prop_strat_optimize_deterministic =
      && VU.length (STO.orCandCalmar run) == 25
      && STO.orValCalmar run == VU.maximum (STO.orCandCalmar run)
 
+-- --- strategy DSL ------------------------------------------------------------
+
+-- text round-trip on hand-written strategies covering every combinator
+prop_dsl_parse_roundtrip :: Bool
+prop_dsl_parse_roundtrip =
+  let strats =
+        [ STD.DslStrat [STD.Rule (STD.Cmp STD.RGt (STD.Sma 10) (STD.Sma 50)) 1]
+        , STD.DslStrat
+            [ STD.Rule (STD.Cmp STD.RGt (STD.Sma 10) (STD.Sma 50)) 1
+            , STD.Rule (STD.Cmp STD.RLt (STD.Sma 10) (STD.Sma 50)) (-1) ]
+        , STD.DslStrat
+            [ STD.Rule (STD.CrossUp STD.Px (STD.Sma 20)) 1
+            , STD.Rule (STD.NotC (STD.OrC (STD.Cmp STD.RGe (STD.Sma 2) (STD.Sma 3))
+                                          (STD.CrossDown (STD.Sma 5) (STD.Sma 9)))) 0 ]
+        , STD.DslStrat
+            [ STD.Rule (STD.AndC (STD.Cmp STD.RGt (STD.Sma 5) (STD.Sma 20))
+                                 (STD.OrC (STD.Cmp STD.RLt STD.Px (STD.Sma 50))
+                                          (STD.Cmp STD.RLe (STD.Sma 3) (STD.Sma 4)))) (-1) ]
+        ]
+  in all (\st -> STD.parseDsl (STD.dslText st) == Right st) strats
+     && STD.parseDsl "" == Left "no rules"
+     && case STD.parseDsl "sma(1) > sma(2) -> 5" of
+          Left _ -> True
+          Right _ -> False
+     && case STD.parseDsl "sma(10) > sma(50)" of
+          Left _ -> True
+          Right _ -> False
+     && case STD.parseDsl "foo > sma(50) -> 1" of
+          Left _ -> True
+          Right _ -> False
+
+-- '&' binds tighter than '|'; '!' binds tightest
+prop_dsl_precedence :: Bool
+prop_dsl_precedence =
+  let Right (STD.DslStrat [STD.Rule c _]) =
+        STD.parseDsl "sma(2)>sma(3) & sma(4)>sma(5) | sma(6)>sma(7) -> 1"
+      expected = STD.OrC (STD.AndC (STD.Cmp STD.RGt (STD.Sma 2) (STD.Sma 3))
+                                   (STD.Cmp STD.RGt (STD.Sma 4) (STD.Sma 5)))
+                         (STD.Cmp STD.RGt (STD.Sma 6) (STD.Sma 7))
+  in c == expected
+
+-- monotone rising bars: sma(3) > sma(10) holds after the warm-up, so a
+-- level-based rule rides long; before warm-up no rule matches -> flat
+prop_dsl_signal_monotone :: Bool
+prop_dsl_signal_monotone =
+  let closes = VU.fromList [ 100 * 1.001 ^ i | i <- [0 .. 199] :: [Int] ]
+      Right st = STD.parseDsl "sma(3)>sma(10) -> 1\nsma(3)<sma(10) -> -1"
+      sig = STD.dslSignal st closes
+  in VU.length sig == 200
+     && VU.all (== 0) (VU.slice 0 9 sig)
+     && VU.all (== 1) (VU.slice 9 (200 - 9) sig)
+     && STD.dslMaxPeriod st == 10
+
+-- DSL backtest closes the same fee ledger as the slot backtest
+prop_dsl_backtest_fee_ledger :: Bool
+prop_dsl_backtest_fee_ledger =
+  let closes = VU.fromList [ 100 * 1.001 ^ i | i <- [0 .. 299] :: [Int] ]
+      Right st = STD.parseDsl "sma(3)>sma(10) -> 1"
+      fee = 0.0002
+      sig = STD.dslSignal st closes
+      bt = STB.backtest fee closes sig (9, VU.length closes - 1)
+      met = STB.brMetrics bt
+      poss = VU.toList (STB.brPos bt)
+      dPosN = sum (map fromIntegral (abs (head poss) : [ abs (b - a) | (a, b) <- zip poss (drop 1 poss) ]) :: [Double])
+      gross = sum [ fromIntegral p * (closes VU.! (i + 1) / closes VU.! i - 1)
+                  | (i, p) <- zip [9 ..] poss ]
+  in STB.bmPnl met > 0
+     && STB.bmTrades met == 1
+     && abs (STB.bmPnl met + fee * dPosN - gross) < 1e-9
+
+-- xup fires when the diff leaves NaN with a positive side (activation)
+-- and again on a real up-cross afterwards
+prop_dsl_cross_activation :: Bool
+prop_dsl_cross_activation =
+  -- sawtooth: drops then rises, so sma(2)-sma(5) goes negative then
+  -- crosses up in the middle of the series
+  let closes = VU.fromList ([ 100 - fromIntegral i | i <- [0 .. 39] ]
+                            ++ [ 60 + 2 * fromIntegral i | i <- [0 .. 59] ])
+      Right st = STD.parseDsl "xup(sma(2),sma(5)) -> 1"
+      sig = STD.dslSignal st closes
+      fires = VU.toList (VU.findIndices (== 1) sig)
+  in not (null fires)
+     && head fires >= 5  -- first possible valid diff index for sma(5)
+     && VU.length sig == 100
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -1200,4 +1286,9 @@ props =
   , ("strat_backtest_fee_ledger", property prop_strat_backtest_fee_ledger)
   , ("strat_spec_roundtrip", property prop_strat_spec_roundtrip)
   , ("strat_optimize_deterministic", property prop_strat_optimize_deterministic)
+  , ("dsl_parse_roundtrip", property prop_dsl_parse_roundtrip)
+  , ("dsl_precedence", property prop_dsl_precedence)
+  , ("dsl_signal_monotone", property prop_dsl_signal_monotone)
+  , ("dsl_backtest_fee_ledger", property prop_dsl_backtest_fee_ledger)
+  , ("dsl_cross_activation", property prop_dsl_cross_activation)
   ]

@@ -22,6 +22,8 @@ var sim_available := false
 var _sim: Variant
 var _box: VBoxContainer
 var _opt_btn: Button
+var _dsl_btn: Button
+var _dsl_edit: TextEdit
 var _status_label: Label
 var _table: VBoxContainer
 var _data_edit: LineEdit
@@ -85,6 +87,20 @@ func _build_ui() -> void:
 	_opt_btn.pressed.connect(_on_optimize)
 	box.add_child(_opt_btn)
 
+	var dsl_label := Label.new()
+	dsl_label.text = "DSL strategy (one rule per line: COND -> POS)"
+	box.add_child(dsl_label)
+	_dsl_edit = TextEdit.new()
+	_dsl_edit.custom_minimum_size.y = 70
+	_dsl_edit.text = "sma(10)>sma(50) -> 1\nsma(10)<sma(50) -> -1"
+	_dsl_edit.placeholder_text = "sma(5)>sma(20) & close>sma(50) -> 1"
+	box.add_child(_dsl_edit)
+	_dsl_btn = Button.new()
+	_dsl_btn.text = "Backtest DSL"
+	_dsl_btn.tooltip_text = "evaluate the DSL strategy over the whole dataset (shown as session #0)"
+	_dsl_btn.pressed.connect(_on_backtest_dsl)
+	box.add_child(_dsl_btn)
+
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size.y = 160
 	scroll.size_flags_vertical = SIZE_EXPAND_FILL
@@ -116,6 +132,39 @@ func _on_browse() -> void:
 
 func _on_data_picked(path: String) -> void:
 	_data_edit.text = path
+
+func _on_backtest_dsl() -> void:
+	if not sim_available:
+		_update_status("cannot backtest: SimNative extension missing")
+		return
+	var data_path := _data_edit.text.strip_edges()
+	if data_path.is_empty() or not FileAccess.file_exists(data_path):
+		_update_status("pick an existing candles csv first")
+		return
+	var spec := _dsl_edit.text.replace(";", "\n").strip_edges()
+	if spec.is_empty():
+		_update_status("write a DSL strategy first")
+		return
+	_run_name = "dsl"
+	var dir := ProjectSettings.globalize_path(_run_dir())
+	DirAccess.make_dir_recursive_absolute(dir)
+	var params := "data=%s;out=%s;dsl=%s;fee=%s" % [
+		data_path, dir, spec, fields["fee"].text.strip_edges()]
+	var code: int = _sim.strat_backtest_dsl(params)
+	if code != 0:
+		_update_status("DSL backtest failed (code %d): check the strategy syntax" % code)
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("%s/strat_0.json" % dir))
+	if parsed is Dictionary:
+		_results = {0: parsed}
+		results_ready.emit(dir, _results)
+		_refresh_table([{"seed": 0, "candidate": 1, "candidates": 1,
+			"best": (parsed as Dictionary).get("calmar", 0.0), "status": "done"}])
+		session_selected.emit(0)
+		_update_status("DSL backtest done: calmar %.4f (%d trades)" % [
+			(parsed as Dictionary).get("calmar", 0.0), (parsed as Dictionary).get("trades", 0)])
+	else:
+		_update_status("DSL backtest produced no result")
 
 func _run_dir() -> String:
 	return "%s/%s" % [DATA_DIR, _run_name]

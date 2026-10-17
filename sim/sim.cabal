@@ -24,6 +24,7 @@ library
                       Sim.Strat.Rules
                       Sim.Strat.Backtest
                       Sim.Strat.Optimize
+                      Sim.Strat.Dsl
                       Sim.Resume
     other-modules:    Sim.Internal
     build-depends:    base >=4 && <5,

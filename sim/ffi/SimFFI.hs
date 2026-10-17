@@ -27,6 +27,7 @@ import qualified Sim.ML.Train as MLT
 import Sim.Resume (readState, statePath, writeState)
 import Sim.Sinus (runSimSinusH)
 import qualified Sim.Strat.Backtest as STB
+import qualified Sim.Strat.Dsl as STD
 import qualified Sim.Strat.Optimize as STO
 import qualified Sim.Strat.Rules as STR
 import Sim.TickGenH (runSimTicksH)
@@ -496,6 +497,22 @@ foreign export ccall "sim_strat_sessions" simStratSessions :: IO CString
 
 foreign export ccall "sim_strat_cancel" simStratCancel :: IO ()
 
+-- backtest one hand-authored DSL strategy (Sim.Strat.Dsl) over a dataset
+-- and write the result in the SAME artifact layout the optimizer uses,
+-- with seed 0: <out>/strat_0.json, equity_0.csv, cand_0.csv (a single
+-- candidate row), test_0.csv. The UI shows the run as session #0.
+--
+-- params (key=value pairs separated by ';'):
+--   data=<path>          candles csv (sim or real-quotes format) or a
+--                        binary .rbin store (RELQ/RELS) — required
+--   out=<dir>            results directory — required
+--   dsl=<spec>           strategy text; rules separated by newlines
+--                        (';' also works outside this params context)
+--   fee=D                per position change, fraction (default 0.0002)
+--
+-- returns 0 on success, 1 on bad params/dsl parse, 2 on data/IO failure
+foreign export ccall "sim_strat_dsl" simStratDsl :: CString -> IO CInt
+
 data StratSessionState = StratSessionState
   { ssSeed   :: !Word64
   , ssCand   :: !(IORef Int)
@@ -562,6 +579,95 @@ simStratOptimize paramsPtr = do
           | Just SimCancelled <- fromException err -> pure 3
           | otherwise                            -> pure 2
         Right _ -> pure 0
+
+simStratDsl :: CString -> IO CInt
+simStratDsl paramsPtr = do
+  paramsStr <- peekCString paramsPtr
+  case parseDslParams paramsStr of
+    Left _  -> pure 1
+    Right p -> do
+      result <- try (runDslBacktest p) :: IO (Either SomeException ())
+      case result of
+        Left _    -> pure 2
+        Right _   -> pure 0
+
+data DslParams = DslParams
+  { dspData :: !FilePath
+  , dspOut  :: !FilePath
+  , dspSpec :: !STD.DslStrat
+  , dspFee  :: !Double
+  }
+
+parseDslParams :: String -> Either String DslParams
+parseDslParams s = do
+  let kv = kvPairs s
+  dataPath <- maybe (Left "missing data=") Right (lookup "data" kv)
+  outDir   <- maybe (Left "missing out=") Right (lookup "out" kv)
+  specS    <- maybe (Left "missing dsl=") Right (lookup "dsl" kv)
+  spec     <- STD.parseDsl specS
+  fee      <- maybe (Right 0.0002) readD (lookup "fee" kv)
+  pure (DslParams dataPath outDir spec fee)
+  where
+    readD v = maybe (Left "bad fee") Right (readV v)
+    readV :: Read a => String -> Maybe a
+    readV v = case reads v of
+      [(x, "")] -> Just x
+      _         -> Nothing
+
+runDslBacktest :: DslParams -> IO ()
+runDslBacktest p = do
+  parsed <- MLD.loadBars (dspData p)
+  bars <- case parsed of
+    Left err -> ioError (userError err)
+    Right bs -> pure bs
+  let closes = VU.fromList (map MLD.barC bars)
+      n = VU.length closes
+      warmup = STD.dslMaxPeriod (dspSpec p) - 1
+  when (n < warmup + 12) (ioError (userError "not enough candles for the strategy warm-up"))
+  createDirectoryIfMissing True (dspOut p)
+  let sig = STD.dslSignal (dspSpec p) closes
+      bt = STB.backtest (dspFee p) closes sig (warmup, n - 1)
+      met = STB.brMetrics bt
+      eqPath = dspOut p ++ "/equity_0.csv"
+      specText = STD.dslText (dspSpec p)
+      js = intercalate ","
+        [ "\"seed\":0"
+        , "\"slots\":" ++ jsonStr specText
+        , "\"valCalmar\":" ++ show (STB.bmCalmar met)
+        , "\"pnl\":" ++ show (STB.bmPnl met)
+        , "\"maxDD\":" ++ show (STB.bmMaxDD met)
+        , "\"calmar\":" ++ show (STB.bmCalmar met)
+        , "\"trades\":" ++ show (STB.bmTrades met)
+        , "\"equity\":\"equity_0.csv\""
+        , "\"cand\":\"cand_0.csv\""
+        , "\"test\":\"test_0.csv\""
+        ]
+  withFile (dspOut p ++ "/strat_0.json") WriteMode $ \h ->
+    hPutStr h ("{" ++ js ++ "}\n")
+  withFile eqPath WriteMode $ \h -> do
+    hPutStr h "open,high,low,close,vol\n"
+    hPutStr h (concatMap eqRow (VU.toList (STB.brEquity bt)))
+  withFile (dspOut p ++ "/cand_0.csv") WriteMode $ \h -> do
+    hPutStr h "candidate,val_calmar\n"
+    hPutStr h ("1," ++ printf "%.6g" (STB.bmCalmar met) ++ "\n")
+  withFile (dspOut p ++ "/test_0.csv") WriteMode $ \h -> do
+    hPutStr h "close,equity,pos\n"
+    hPutStr h (concatMap testRow (zip3 (VU.toList (STB.brCloses bt))
+                                       (VU.toList (STB.brEquity bt))
+                                       (VU.toList (STB.brPos bt))))
+  where
+    eqRow e =
+      let s = printf "%.5f" e
+      in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
+    testRow (c, e, po) = printf "%.5f,%.6g,%d\n" c e po
+
+-- minimal JSON string escaping (DSL specs contain newlines)
+jsonStr :: String -> String
+jsonStr s = "\"" ++ concatMap esc s ++ "\""
+  where
+    esc '\n' = "\\n"
+    esc c | c == '"' || c == '\\' = ['\\', c]
+          | otherwise = [c]
 
 runStratBatch :: StratParams -> IO ()
 runStratBatch p = do

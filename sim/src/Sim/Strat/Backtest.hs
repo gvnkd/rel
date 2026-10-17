@@ -6,6 +6,7 @@
 -- same accounting the ML trainer uses.
 module Sim.Strat.Backtest
   ( smaSeries
+  , cmpD
   , crossEvents
   , evalSignal
   , BtMetrics (..)

@@ -18,6 +18,7 @@ extern "C" int sim_strat_optimize(const char *params);
 extern "C" double sim_strat_progress(void);
 extern "C" char *sim_strat_sessions(void);
 extern "C" void sim_strat_cancel(void);
+extern "C" int sim_strat_dsl(const char *params);
 extern "C" int sim_fft_forecast(const double *closes, int count, int start, int end, int predict, int waves, double edge_w, double *out);
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
@@ -56,6 +57,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("strat_progress"), &SimNative::strat_progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("strat_sessions"), &SimNative::strat_sessions);
 		godot::ClassDB::bind_method(godot::D_METHOD("strat_cancel"), &SimNative::strat_cancel);
+		godot::ClassDB::bind_method(godot::D_METHOD("strat_backtest_dsl", "params"), &SimNative::strat_backtest_dsl);
 	}
 
 public:
@@ -123,6 +125,13 @@ public:
 
 	void strat_cancel() {
 		sim_strat_cancel();
+	}
+
+	// hand-authored DSL strategy backtest (fast, synchronous); writes the
+	// optimizer's artifact layout with seed 0 into the out dir
+	int strat_backtest_dsl(const godot::String &params) {
+		godot::CharString ps = params.utf8();
+		return sim_strat_dsl(ps.ptr());
 	}
 
 	godot::PackedFloat64Array fft_forecast(const godot::PackedFloat64Array &closes, int64_t start, int64_t end, int64_t predict, int64_t waves, double edge_w) {
