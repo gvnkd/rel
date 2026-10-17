@@ -331,6 +331,8 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 		return "CECP (%d, m%d)" % [ind.period, ind.m]
 	if ind.kind == "OBVOL":
 		return "OBVOL %s%s" % ["snap" if ind.obvol_mode == 1 else "life", " b%.4f" % ind.bucket if ind.bucket > 0.0 else ""]
+	if ind.kind == "MKV":
+		return "MKV (%d, s%d, t%s)" % [ind.period, ind.surp, "auto" if ind.auto_thresh else "%.3g" % ind.thresh]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -376,12 +378,16 @@ func _rebuild_menu() -> void:
 	var b_obvol := Button.new()
 	b_obvol.text = "add OBVOL"
 	b_obvol.pressed.connect(_on_add_obvol)
+	var b_mkv := Button.new()
+	b_mkv.text = "add MKV"
+	b_mkv.pressed.connect(_on_add_mkv)
 	add_row.add_child(b_sma)
 	add_row.add_child(b_fft)
 	add_row.add_child(b_ks)
 	add_row.add_child(b_temp)
 	add_row.add_child(b_cecp)
 	add_row.add_child(b_obvol)
+	add_row.add_child(b_mkv)
 	_menu_box.add_child(add_row)
 	_add_section("trades overlays")
 	if _trades_sets.is_empty():
@@ -472,6 +478,13 @@ func _build_indicator_row(i: int) -> void:
 		mode.selected = ind.obvol_mode
 		mode.item_selected.connect(_on_menu_obvol_mode.bind(i))
 		row.add_child(mode)
+	if ind.kind == "MKV":
+		var auto := CheckBox.new()
+		auto.text = "auto"
+		auto.tooltip_text = "auto-calibrate thresh as 3x the median |return| of the loaded slice"
+		auto.button_pressed = ind.auto_thresh
+		auto.toggled.connect(_on_menu_mkv_auto.bind(i))
+		row.add_child(auto)
 	var del := Button.new()
 	del.text = "x"
 	del.tooltip_text = "delete"
@@ -490,6 +503,10 @@ func _build_indicator_row(i: int) -> void:
 	elif ind.kind == "KS" or ind.kind == "TEMP" or ind.kind == "CECP":
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 		_add_spin(grid, "m", ind.m, _on_menu_ks_m.bind(i))
+	elif ind.kind == "MKV":
+		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
+		_add_spin(grid, "surp", ind.surp, _on_menu_mkv_surp.bind(i))
+		_add_spin(grid, "thresh %", ind.thresh, _on_menu_mkv_thresh.bind(i), 0.01)
 	elif ind.kind == "OBVOL":
 		_add_spin(grid, "bucket", ind.bucket, _on_menu_obvol_bucket.bind(i), 0.00001)
 	else:
@@ -678,6 +695,30 @@ func _on_add_cecp() -> void:
 
 func _on_add_obvol() -> void:
 	indicator_widget.add_indicator("OBVOL", 0)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_menu_mkv_surp(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].surp = maxi(1, int(v))
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_mkv_thresh(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].thresh = maxf(0.0001, v)
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_mkv_auto(on: bool, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].auto_thresh = on
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_add_mkv() -> void:
+	indicator_widget.add_indicator("MKV", 20)
 	_rebuild_menu()
 	_sync_indicator_hud()
 	_refresh()

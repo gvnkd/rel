@@ -18,6 +18,7 @@ library
                       Sim.Lvl
                       Sim.Entropy
                       Sim.Fft
+                      Sim.Markov
                       Sim.ML.Data
                       Sim.ML.Model
                       Sim.ML.Train

@@ -11,6 +11,13 @@ class Indicator:
 	var waves := 0
 	var edge_w := 1.0
 	var m := 5
+	# MKV: rolling surprise window (bars), bull/bear |return| threshold in
+	# percent (5 = the spec default; sim sub-percent data needs ~0.05 or
+	# every bar reads Sideways). auto_thresh: derive the threshold from
+	# the loaded slice as 3x the median |return| (timeframe-agnostic)
+	var surp := 20
+	var thresh := 5.0
+	var auto_thresh := false
 	var locked := false
 	var opt_score := -1.0
 	# OBVOL: price bucket size in display units; 0 = exact price levels.
@@ -53,6 +60,18 @@ const OBVOL_SIDE_BIT := 1099511627776
 # plus a margin rounded to whole blocks, so pans/zooms inside the margin
 # reuse it instead of rebuilding per frame
 const OBVOL_PAD := 512
+
+# MKV fixed model parameters (mirror Sim.Markov.defaultMarkovParams) —
+# adaptive-memory decay ceiling/floor, surprise reference (log-loss units)
+# and shrink rate; the threshold IS UI-exposed (Indicator.thresh) or
+# auto-calibrated as MKV_AUTO_MULT x the sampled median |close-to-close
+# return| in percent — 3x reproduced the grid-searched optima on sim1
+# (1H: 0.99 vs 1.0, Daily: 4.95 vs 5.0)
+const MKV_AUTO_MULT := 3.0
+const MKV_LAM_HI := 0.99
+const MKV_LAM_LO := 0.90
+const MKV_SREF := 0.55
+const MKV_K := 4.0
 
 const PERIODS: Array[int] = [5, 10, 20, 50, 100, 200]
 const IND_COLORS: Array[Color] = [
@@ -153,6 +172,9 @@ func _draw() -> void:
 				continue
 			if ind.kind == "CECP":
 				_draw_cecp(ind, s, k)
+				continue
+			if ind.kind == "MKV":
+				_draw_mkv(ind, s, k)
 				continue
 			if ind.kind == "OBVOL":
 				_draw_obvol(ind, s, k)
@@ -281,6 +303,36 @@ func _draw_cecp(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	draw_string(font, r.position + Vector2(4, 13), "periodic", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
 	draw_string(font, Vector2(r.end.x - 44, r.position.y + 13), "random", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
 	draw_string(font, Vector2(r.position.x + r.size.x * 0.5 - 20, r.position.y + 13), "chaotic", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
+
+# Bull-Sideways-Bear Markov indicator: the transition matrix itself is
+# rendered as a 3x3 panel under the cursor tableau (cursor_widget), here
+# only the rolling surprise (mean log-loss of the previous bar's estimate
+# vs reality, normalized by the uniform-model loss ln 3) is drawn — a
+# translucent bottom band; a high surprise means the Markov assumption
+# just broke (regime change), it also drives the adaptive decay (lambda)
+func _draw_mkv(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var n: int = s.size()
+	if n < 2:
+		return
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := mini(int(ceil(ir.y)), n - 1)
+	if not _mkv_ensure(ind, s, i0, i1):
+		return
+	var c := _cache_for(ind, s)
+	var r := overlay_rect()
+	var ln3 := log(3.0)
+	for i in range(i0, i1 + 1):
+		if i < c.vals_off or i - c.vals_off >= c.vals.size() / 15:
+			continue
+		var sv: float = c.vals[(i - c.vals_off) * 15 + 13]
+		if is_nan(sv):
+			continue
+		var t := clampf(sv / ln3, 0.0, 1.0)
+		if t <= 0.0:
+			continue
+		var h := t * r.size.y * 0.25
+		draw_rect(Rect2(view.index_to_x(i), r.end.y - h, maxf(view.px_per_index, 1.0), h), Color(1.0, 0.45, 0.6, 0.10 + 0.22 * t))
 
 # max-complexity boundary of the CECP: the parametric curve for
 # distributions {p, (1-p)/(k-1), ...} (the ridge's upper envelope)
@@ -644,6 +696,63 @@ func _cecp_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 	c.cache_key = key
 	return not c.vals.is_empty()
 
+# fills the per-series MKV cache for [lo, i1]; the FFI returns the flat
+# 15-double per-bar record (BSBP x3, matrix row-major x9, surprise,
+# rolling surprise, lambda) stored whole in vals, one record per candle
+# from vals_off. The matrix/surprise chain is path-dependent: it restarts
+# from the uniform prior at the slice start, so the key carries win_off
+func _mkv_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 2:
+		return false
+	var lo := maxi(0, i0 - ind.period - 2)
+	var c := _cache_for(ind, s)
+	var th := ind.thresh
+	if ind.auto_thresh:
+		th = _mkv_auto_thresh(s)
+	# note: %d rejects booleans in Redot's format — cast the flag
+	var key := "%d:%d:%d:%d:%f:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.surp, int(ind.auto_thresh), th, n, s.win_off, lo, i1]
+	if key == c.cache_key:
+		return not c.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var closes := PackedFloat64Array()
+	closes.resize(i1 - lo + 1)
+	for i in range(lo, i1 + 1):
+		closes[i - lo] = s.candle_at(i).close
+	var ret: Variant = _sim.call("markov", closes, ind.period, ind.surp, th, MKV_LAM_HI, MKV_LAM_LO, MKV_SREF, MKV_K)
+	var vals: PackedFloat64Array = ret as PackedFloat64Array
+	if vals.size() == 15 * (i1 - lo + 1):
+		c.vals = vals
+		c.vals_off = lo
+	else:
+		c.vals = PackedFloat64Array()
+	c.cache_key = key
+	return not c.vals.is_empty()
+
+# auto threshold: MKV_AUTO_MULT x the median |close-to-close return| in
+# percent over up to 4096 evenly spaced samples of the loaded slice
+# (median, not mean: spikes inflate the mean). Returns -1 when the slice
+# is too short, so the caller keeps the manual threshold
+func _mkv_auto_thresh(s: PlotData.Series) -> float:
+	var lo := maxi(1, s.win_off + 1)
+	var hi := s.win_off + s.candles.size()
+	if hi - lo < 8:
+		return -1.0
+	var step := maxi(1, (hi - lo) / 4096)
+	var samples: Array[float] = []
+	var k := lo
+	while k < hi:
+		var prev: float = s.candle_at(k - 1).close
+		if prev > 0.0:
+			samples.append(absf(s.candle_at(k).close / prev - 1.0) * 100.0)
+		k += step
+	if samples.size() < 8:
+		return -1.0
+	samples.sort()
+	var med: float = samples[samples.size() / 2]
+	return maxf(MKV_AUTO_MULT * med, 0.0001)
+
 # fills the per-series cache (fit/forecast) when its key is stale; false
 # when the fit cannot be computed
 func _fft_ensure(ind: Indicator, s: PlotData.Series) -> bool:
@@ -718,6 +827,21 @@ func value_at(ind: Indicator, s: PlotData.Series, i: int) -> Variant:
 		if is_nan(h) or is_nan(cc):
 			return null
 		return [h, cc]
+	if ind.kind == "MKV":
+		var c := _cache_for(ind, s)
+		if i < 2 or i < c.vals_off or i - c.vals_off >= c.vals.size() / 15:
+			if not _mkv_ensure(ind, s, i, i):
+				return null
+		var o := (i - c.vals_off) * 15
+		var rec := []
+		rec.resize(10)
+		for j in 9:
+			var tv: float = c.vals[o + 3 + j]
+			if is_nan(tv):
+				return null
+			rec[j] = tv
+		rec[9] = c.vals[o + 13]
+		return rec
 	if ind.kind == "OBVOL":
 		var book: Variant = s.book_at(i)
 		if book == null:

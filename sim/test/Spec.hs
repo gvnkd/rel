@@ -19,6 +19,8 @@ import Sim.Gen
 import Sim.GenH (runSimH)
 import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
+import qualified Sim.Markov as MKV
+import Sim.Markov (MClass (..), MarkovParams (..), defaultMarkovParams, markovSeries)
 import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Model as MLM
 import qualified Sim.ML.Train as MLT
@@ -821,6 +823,137 @@ prop_cecp_rolling_invalid =
      && all (\(h, c) -> isNaN h && isNaN c) short
      && all (\(h, c) -> isNaN h && isNaN c) badWin
 
+-- --- Markov / BSBP (Sim.Markov) ----------------------------------------------
+
+mkvBlock :: [Double] -> Int -> [Double]
+mkvBlock out i = take 15 (drop (15 * i) out)
+
+-- spec boundaries: >= th Bull, <= -th Bear, exactly -th is Sideways
+prop_mkv_classify_boundaries :: Bool
+prop_mkv_classify_boundaries =
+  MKV.classify 5.0 5.0 == MBull
+    && MKV.classify 5.0 (-5.0) == MSw
+    && MKV.classify 5.0 4.99 == MSw
+    && MKV.classify 5.0 (-5.01) == MBear
+
+prop_mkv_output_length :: Bool
+prop_mkv_output_length =
+  let xs = take 300 (pricesFrom (cycle [1, -2, 3, -1]))
+  in length (markovSeries defaultMarkovParams xs) == 15 * length xs
+
+-- closes from a return-percent cycle, anchored at 100
+pricesFrom :: [Double] -> [Double]
+pricesFrom rs = scanl (\c r -> c * (1 + r / 100)) 100 rs
+
+-- BSBP block at bar i = the state histogram of bars [i-win+1 .. i]
+mkvBsbpRef :: Int -> Double -> [Double] -> Int -> [Double]
+mkvBsbpRef win th xs i =
+  let sts = [MKV.classify th (((xs !! k) / (xs !! (k - 1)) - 1) * 100) | k <- [i - win + 1 .. i]]
+      count s = fromIntegral (length (filter (== s) sts)) / fromIntegral win
+  in map count [MBull, MSw, MBear]
+
+prop_mkv_bsbp_matches_window :: Bool
+prop_mkv_bsbp_matches_window =
+  let xs = take 300 (pricesFrom (cycle [6, 1, -6, 0.5]))
+      win = 20
+      p = defaultMarkovParams { mpWin = win }
+      out = markovSeries p xs
+      ok i = let ref = mkvBsbpRef win (mpThresh p) xs i
+                 got = take 3 (mkvBlock out i)
+             in all (\(a, b) -> abs (a - b) < 1e-12) (zip got ref)
+  in all isNaN (take 3 (mkvBlock out (win - 1)))
+     && all ok [win, win + 37, 200, 299]
+
+-- independent list-based reference for the decayed-count matrix with a
+-- FORCED constant lambda (sRef huge keeps surprise below the reference, so
+-- lambda == lamHi == lamLo for every bar); catches decay-order, indexing
+-- and layout bugs in the ST loop
+mkvMatrixRef :: Double -> [Int] -> [[Double]]
+mkvMatrixRef lam sts =
+  let trans = zip sts (tail sts)
+      cw = foldl' step (replicate 9 0) trans
+      step c (a, b) =
+        let decayed = map (* lam) c
+        in take (a * 3 + b) decayed ++ [decayed !! (a * 3 + b) + 1] ++ drop (a * 3 + b + 1) decayed
+      rows = [take 3 (drop (r * 3) cw) | r <- [0 .. 2]]
+      -- never-visited state: uniform fallback, like the module
+  in map (\row -> let s = sum row in if s > 0 then map (/ s) row else replicate 3 (1 / 3)) rows
+
+prop_mkv_fixed_lambda_matrix :: Bool
+prop_mkv_fixed_lambda_matrix =
+  let xs = take 120 (pricesFrom (cycle [6, -6]))
+      p = defaultMarkovParams { mpLamHi = 0.9, mpLamLo = 0.9, mpSRef = 1e9 }
+      out = markovSeries p xs
+      sts = [MKV.classify (mpThresh p) (((xs !! k) / (xs !! (k - 1)) - 1) * 100) | k <- [1 .. length xs - 1]]
+      ref = concat (mkvMatrixRef 0.9 (map f sts))
+      f MBull = 0
+      f MSw = 1
+      f MBear = 2
+      got = take 9 (drop 3 (mkvBlock out (length xs - 1)))
+  in all (\(a, b) -> abs (a - b) < 1e-12) (zip got ref)
+
+-- the first transition scores against the uniform prior: surprise = ln 3
+prop_mkv_first_surprise_uniform_prior :: Bool
+prop_mkv_first_surprise_uniform_prior =
+  let xs = take 60 (pricesFrom (cycle [6, -6]))
+      out = markovSeries defaultMarkovParams xs
+  in abs (mkvBlock out 2 !! 12 - log 3) < 1e-12
+
+-- a perfectly persistent regime (every bar Bull) drives surprise to 0, so
+-- lambda sits at its ceiling
+prop_mkv_sticky_regime_lambda_max :: Bool
+prop_mkv_sticky_regime_lambda_max =
+  let xs = take 200 (pricesFrom (repeat 1))
+      out = markovSeries defaultMarkovParams xs
+      lam = mkvBlock out 199 !! 14
+  in abs (lam - mpLamHi defaultMarkovParams) < 1e-12
+
+-- near-random states keep the rolling surprise above the reference, so the
+-- adaptive memory shrinks below the ceiling
+prop_mkv_random_states_lambda_shrinks :: Bool
+prop_mkv_random_states_lambda_shrinks =
+  let xs = take 800 (pricesFrom (map (* 0.05) lcgNoise))
+      p = defaultMarkovParams { mpThresh = 0.01 }
+      out = markovSeries p xs
+      lam = mkvBlock out 799 !! 14
+  in lam < mpLamHi p - 1e-6 && lam >= mpLamLo p - 1e-12
+
+-- invariants on every bar: matrix rows stochastic, lambda inside
+-- [lamLo, lamHi], surprise non-negative, BSBP is a distribution once its
+-- window fills (NaN warm-up before that)
+prop_mkv_invariants :: Bool
+prop_mkv_invariants =
+  let xs = take 500 (pricesFrom (map (* 0.1) lcgNoise))
+      p = defaultMarkovParams { mpThresh = 0.05 }
+      out = markovSeries p xs
+      okRow i =
+        let b = mkvBlock out i
+            rowsOk = all (\r -> let row = take 3 (drop (3 + r * 3) b)
+                                    s = sum row
+                                in s > 1 - 1e-9 && s < 1 + 1e-9 && all (\x -> x >= 0 && x <= 1) row)
+                   [0 .. 2]
+            lam = b !! 14
+        in rowsOk
+           && b !! 12 >= 0 && not (isNaN (b !! 12)) && not (isInfinite (b !! 12))
+           && not (isNaN (b !! 13))
+           && lam >= mpLamLo p - 1e-12 && lam <= mpLamHi p + 1e-12
+      okBsbp i =
+        let b = take 3 (mkvBlock out i)
+        in all (\x -> x >= 0 && x <= 1) b && abs (sum b - 1) < 1e-9
+  in all okRow [2 .. 499]
+     && all (not . okBsbp) [2 .. mpWin p - 1]
+     && all okBsbp [mpWin p .. 499]
+
+prop_mkv_warmup :: Bool
+prop_mkv_warmup =
+  let xs = take 40 (pricesFrom (cycle [1, -1]))
+      p = defaultMarkovParams { mpWin = 20 }
+      out = markovSeries p xs
+  in all (\i -> all isNaN (take 3 (mkvBlock out i))) [0 .. 19]
+     && all (not . isNaN) (take 3 (mkvBlock out 20))
+     && all isNaN (markovSeries p (take 1 xs))
+     && null (markovSeries p [])
+
 -- endpoint weighting must pin the fit to the first candle: with a spike
 -- at t=0 plain LS absorbs only a fraction of it, weighted LS (edgeW
 -- large) absorbs nearly all
@@ -1310,6 +1443,15 @@ props =
   , ("cecp_iid_noise_corner", property prop_cecp_iid_noise_corner)
   , ("cecp_rolling_matches_window", property prop_cecp_rolling_matches_window)
   , ("cecp_rolling_invalid", property prop_cecp_rolling_invalid)
+  , ("mkv_classify_boundaries", property prop_mkv_classify_boundaries)
+  , ("mkv_output_length", property prop_mkv_output_length)
+  , ("mkv_bsbp_matches_window", property prop_mkv_bsbp_matches_window)
+  , ("mkv_fixed_lambda_matrix", property prop_mkv_fixed_lambda_matrix)
+  , ("mkv_first_surprise_uniform_prior", property prop_mkv_first_surprise_uniform_prior)
+  , ("mkv_sticky_regime_lambda_max", property prop_mkv_sticky_regime_lambda_max)
+  , ("mkv_random_states_lambda_shrinks", property prop_mkv_random_states_lambda_shrinks)
+  , ("mkv_invariants", property prop_mkv_invariants)
+  , ("mkv_warmup", property prop_mkv_warmup)
   , ("ml_parse_bars_sim_csv", property prop_ml_parse_bars_sim_csv)
   , ("ml_parse_bars_timestamped", property prop_ml_parse_bars_timestamped)
   , ("ml_parse_bars_garbage", property prop_ml_parse_bars_garbage)

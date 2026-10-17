@@ -19,6 +19,7 @@ import Sim.Cli (applyArgs)
 import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
+import Sim.Markov (MarkovParams (..), markovSeries)
 import Sim.Gen (GenState (..), initState)
 import Sim.GenH (runSimH)
 import Sim.Lvl (LvlEv, LvlSeg, trFromBook)
@@ -137,6 +138,28 @@ simCecp ptr (CInt count) (CInt win) (CInt m) out
         then pure 0
         else do
           pokeArray out vals
+          pure (CInt (fromIntegral (length vals)))
+
+-- rolling Bull-Sideways-Bear probabilities + surprise-adaptive 3x3 Markov
+-- transition matrix over closes: writes 15 * `count` doubles into out —
+-- per bar [bsbpBull, bsbpSw, bsbpBear, t00..t22 (row-major), surprise,
+-- rolling surprise, lambda], NaN warm-up on BSBP — returns 15 * count on
+-- success, 0 on invalid input. thresh/lamHi/lamLo/sRef/k sanitize into
+-- ranges (see Sim.Markov.sanitizeParams)
+foreign export ccall "sim_markov" simMarkov
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble -> Ptr CDouble -> IO CInt
+
+simMarkov :: Ptr CDouble -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble -> Ptr CDouble -> IO CInt
+simMarkov ptr (CInt count) (CInt win) (CInt surpWin) (CDouble thresh) (CDouble lamHi) (CDouble lamLo) (CDouble sRef) (CDouble k) out
+  | count <= 0 || win <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let mp = MarkovParams (fromIntegral win) (fromIntegral surpWin) thresh lamHi lamLo sRef k
+          vals = markovSeries mp (map (\(CDouble d) -> d) closes)
+      if length vals /= 15 * fromIntegral count
+        then pure 0
+        else do
+          pokeArray out (map CDouble vals)
           pure (CInt (fromIntegral (length vals)))
 
 {-# NOINLINE progressRef #-}

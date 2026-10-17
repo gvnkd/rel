@@ -4,6 +4,10 @@ extends Control
 const FONT_SIZE := 20
 const PAD := 8.0
 const EXTRA_COL := Color(0.7, 0.72, 0.75)
+# MKV transition-matrix panel under the tableau
+const MKV_CELL := 90.0
+const MKV_LABEL_W := 72.0
+const MKV_STATE_NAMES: Array[String] = ["Bu", "Sw", "Be"]
 
 var view: ChartView
 var data: PlotData
@@ -22,6 +26,7 @@ func _draw() -> void:
 	var font := ThemeDB.fallback_font
 	var line_h := font.get_height(FONT_SIZE) + 4.0
 	var lines := []
+	var mkv_panels: Array = []
 	for s in data.series:
 		if not s.visible or s.size() == 0:
 			continue
@@ -53,6 +58,10 @@ func _draw() -> void:
 					txt += "  CECP H%.3f C%.3f" % [v[0], v[1]]
 				elif ind.kind == "OBVOL":
 					txt += "  OBVOL B%s A%s" % [VolumeWidget.fmt_vol(int(v[0])), VolumeWidget.fmt_vol(int(v[1]))]
+				elif ind.kind == "MKV":
+					# the 3x3 matrix is drawn as a panel under the
+					# tableau, not inline text
+					mkv_panels.append([s, ind, i, v as Array])
 				else:
 					txt += "  %s %s" % [ind.kind, view.fmt_price(float(v))]
 		lines.append([txt, s.col_pos])
@@ -81,3 +90,35 @@ func _draw() -> void:
 	for t in extra:
 		draw_string(font, Vector2(x, y + font.get_ascent(FONT_SIZE) + 2.0), t, HORIZONTAL_ALIGNMENT_LEFT, text_w, FONT_SIZE, EXTRA_COL)
 		y += line_h
+	for panel in mkv_panels:
+		y = _draw_mkv_panel(font, panel, x, y + 6.0, block_w)
+
+# one 3x3 transition matrix per (series, MKV indicator), right-aligned
+# under the cursor tableau: rows = current state at the cursor candle,
+# cols = next-bar probabilities; the diagonal (stay / stickiness) cells
+# get a border, the background heat = probability; v is the 10-element
+# value_at record (matrix row-major + rolling surprise)
+func _draw_mkv_panel(font: Font, panel: Array, x: float, y: float, block_w: float) -> float:
+	var s: PlotData.Series = panel[0]
+	var ind: IndicatorWidget.Indicator = panel[1]
+	var v: Array = panel[3]
+	var col := indicators.color_for(s, indicators.indicators.find(ind))
+	var w := MKV_LABEL_W + 3 * MKV_CELL
+	var px := x + block_w - w
+	draw_string(font, Vector2(px, y + 30), "%s MKV [%d]" % [s.name, panel[2]], HORIZONTAL_ALIGNMENT_LEFT, w, 28, EXTRA_COL)
+	y += 40
+	for c in 3:
+		draw_string(font, Vector2(px + MKV_LABEL_W + c * MKV_CELL, y + 26), MKV_STATE_NAMES[c], HORIZONTAL_ALIGNMENT_CENTER, MKV_CELL, 24, EXTRA_COL)
+	y += 30
+	for r in 3:
+		draw_string(font, Vector2(px, y + 58), MKV_STATE_NAMES[r], HORIZONTAL_ALIGNMENT_RIGHT, MKV_LABEL_W - 10, 24, EXTRA_COL)
+		for c in 3:
+			var p: float = v[r * 3 + c]
+			var rect := Rect2(px + MKV_LABEL_W + c * MKV_CELL + 2, y + 2, MKV_CELL - 4, MKV_CELL - 4)
+			draw_rect(rect, Color(col, 0.10 + 0.45 * p))
+			if r == c:
+				draw_rect(rect, Color(1, 1, 1, 0.45), false, 2.0)
+			draw_string(font, rect.position + Vector2(0, (MKV_CELL - 4) * 0.5 + 10), "%.2f" % p, HORIZONTAL_ALIGNMENT_CENTER, MKV_CELL - 4, 28, Color.WHITE)
+		y += MKV_CELL
+	draw_string(font, Vector2(px, y + 30), "S %.2f" % float(v[9]), HORIZONTAL_ALIGNMENT_LEFT, w, 28, Color(1.0, 0.45, 0.6))
+	return y + 42

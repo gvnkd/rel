@@ -125,7 +125,8 @@ the same as a `sinus` checkbox plus five fields in the sim panel.
 ## Chart indicators
 
 Indicators live in the right-click chart menu (`add SMA` / `add FFT` /
-`add KS` / `add TEMP` / `add CECP`; per-indicator period/params, color,
+`add KS` / `add TEMP` / `add CECP` / `add OBVOL` / `add MKV`;
+per-indicator period/params, color,
 delete). The math runs in Haskell behind the FFI (`Sim.Fft`, `Sim.Entropy`),
 the widget only draws. The cursor tableau (top right) appends each enabled
 indicator's value at the hovered candle (or the replay head): `KS 0.871`,
@@ -180,6 +181,65 @@ during warm-up / outside the indicator's range.
   m! bins well** — C is only meaningful when `period − m` ≫ m!;
   e.g. period 100 / m=5 reads C ≈ 0.27 on pure noise (histogram
   sparseness, not structure). NaN until the window fills.
+- **MKV** — Bull-Sideways-Bear Markov indicator. Every bar is classified
+  by its close-to-close return in percent: ≥ `thresh %` → Bull,
+  < −`thresh %` → Bear (exactly ±thresh is Sideways), else Sideways.
+  **thresh is data-scale critical**: the default 5 means sub-percent
+  series (most sim and forex data) classify every bar as Sideways, and
+  the indicator correctly but uselessly locks to pSwSw=1.0 with the
+  never-visited Bull/Bear rows at the uniform 1/3 — set `thresh %`
+  near the data's typical move (e.g. 0.05), or enable the **auto**
+  checkbox: the threshold is then derived per series as 3× the median
+  |close-to-close return| over the loaded slice (median, not mean —
+  spikes inflate the mean; sampled, ≤4096 points). The ×3 factor
+  reproduced the grid-searched optima on sim1 for both 1H (0.64 vs 1.0)
+  and Daily (4.95 vs 5.0) and scales automatically across timeframes.
+  The transition matrix is
+  drawn as a **3x3 panel under the cursor tableau** (rows = current
+  state at the cursor candle, cols = next-bar probabilities, diagonal
+  = the "stickiness" of each state, cell heat = probability), and the
+  **rolling surprise** (how wrong the estimate just was, normalized by
+  the uniform-model loss ln 3) as a magenta bottom band on the chart: a
+  sustained high band means the Markov assumption broke — a regime
+  change. Params: `period` = the BSBP rolling window, `surp` = the
+  rolling-surprise window, `thresh %` = the state threshold. The same
+  surprise also shortens the matrix's memory adaptively (see below).
+  Cursor: `MKV [200]` panel + `S 0.71` under the matrix.
+
+### MKV internals (developer notes)
+
+`Sim.Markov` (`sim/src/Sim/Markov.hs`), FFI `sim_markov` — 15 doubles
+per bar: `[bsbpBull, bsbpSw, bsbpBear, t00..t22 row-major, surprise,
+rolling surprise, lambda]`.
+
+1. **Classification** — state of bar i from `(close[i]/close[i−1] − 1)·100`
+   against ±thresh. States exist from bar 1, transitions from bar 2.
+2. **BSBP** — plain rolling state histogram over the last `period` bars,
+   O(1) sliding counts like KS; NaN until the window fills.
+3. **Adaptive transition counts** — decayed counts `C ← λ·C + 1` on the
+   realized cell each bar, rows normalized into T; a never-visited state
+   reads as a uniform row (that is the 1/3 fallback, not an estimate).
+4. **Surprise** — `−log max(T_prev[a][b], 1e-12)`: the previous bar's
+   estimate scored against reality. The floor matters: early rows are
+   deterministic (`[0,1,0]`), a zero-probability realization would be
+   +inf and `inf − inf = NaN` once that ring slot is evicted. S is the
+   rolling mean over `surp` bars.
+5. **Adaptive memory** — `λ = λ_lo + (λ_hi−λ_lo)·e^{−k·max(0, S−S_ref)}`
+   (defaults λ_hi 0.99, λ_lo 0.90, S_ref 0.55, k 4): surprise above the
+   reference shrinks memory toward λ_lo (distrust stale counts), below
+   it stretches toward λ_hi. ~1/(1−λ) bars of effective memory, 100 at
+   the ceiling, 10 at the floor.
+
+The matrix and surprise chain are **path-dependent**: they restart from
+a uniform prior at the start of the loaded slice, so values on
+store-backed series are relative to the current window slide (the cache
+key carries `win_off`); BSBP alone is purely window-local. The t+k
+forecast `Tᵏ·e_state` is a trivial client-side operation on the cached
+matrix and is not drawn yet. Tests: 9 QuickCheck props (fixed-λ
+geometric-weight reference against an independent list implementation,
+uniform-prior first surprise = ln 3, λ at ceiling on a persistent
+regime, λ shrinkage on near-random states, warm-up/NaN layout), plus
+headless FFI and widget tests.
 
 ### CECP internals (developer notes)
 
