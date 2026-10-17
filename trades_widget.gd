@@ -45,8 +45,9 @@ func _draw() -> void:
 			var y0 := view.price_to_y(t["entry"])
 			var y1 := view.price_to_y(t["exit"])
 			var up: bool = t["side"] > 0
-			# dashed track from the entry point to the exit point
-			_dash_line(Vector2(x0, y0), Vector2(minf(x1, size.x), y1), col)
+			# dashed track entry -> exit, colored by trade result
+			var tcol := Color(0.4, 0.9, 0.55) if t["pnl"] >= 0 else Color(0.95, 0.45, 0.45)
+			_dash_line(Vector2(x0, y0), Vector2(minf(x1, size.x), y1), tcol)
 			var mcol := col.lightened(0.25)
 			var pts := PackedVector2Array()
 			if up:
@@ -69,12 +70,11 @@ func _draw() -> void:
 			draw_multiline_string(font, ipos, info,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SZ, -1, col)
 			var res := "%+.2f%%" % ((t["exit"] / t["entry"] - 1.0) * 100.0 * signf(t["side"]))
-			var rcol := Color(0.4, 0.9, 0.55) if t["pnl"] >= 0 else Color(0.95, 0.45, 0.45)
 			var rsize := font.get_string_size(res, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SZ)
 			var rpos := Vector2(x1 + 5, y1 - 6 - rsize.y) if up else Vector2(x1 + 5, y1 + 6)
 			_label_bg(font, rpos, rsize, ascent)
 			draw_multiline_string(font, rpos, res, HORIZONTAL_ALIGNMENT_LEFT,
-				-1, FONT_SZ, -1, rcol)
+				-1, FONT_SZ, -1, tcol)
 
 # dark background behind a label drawn at baseline-origin pos; `lsize` is
 # the text's bounding size (multiline size for multi-line labels)

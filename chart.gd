@@ -56,6 +56,8 @@ const PALETTE: Array[Color] = [
 # Each set: {name, enabled, trades: Array of Dicts, color}
 var _trades_sets: Array = []
 var _trades_dialog: FileDialog
+var _trades_save_dialog: FileDialog
+var _trades_save_idx := -1
 
 func _ready() -> void:
 	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
@@ -83,6 +85,12 @@ func _ready() -> void:
 	_trades_dialog.filters = PackedStringArray(["*.bin ; Trades binary"])
 	_trades_dialog.file_selected.connect(_on_trades_file_picked)
 	add_child(_trades_dialog)
+	_trades_save_dialog = FileDialog.new()
+	_trades_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_trades_save_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_trades_save_dialog.filters = PackedStringArray(["*.bin ; Trades binary"])
+	_trades_save_dialog.file_selected.connect(_on_trades_save_picked)
+	add_child(_trades_save_dialog)
 
 # --- trades overlays ---------------------------------------------------------
 
@@ -96,6 +104,7 @@ func add_trades_from_file(path: String, tname: String) -> int:
 		"name": tname,
 		"enabled": true,
 		"trades": trades,
+		"path": path,
 		"color": PALETTE[_trades_sets.size() % PALETTE.size()],
 	})
 	_rebuild_menu()
@@ -147,6 +156,30 @@ func _load_trades_bin(path: String) -> Array:
 
 func _on_trades_file_picked(path: String) -> void:
 	add_trades_from_file(path, path.get_file().get_basename())
+
+func _on_menu_trades_save(k: int) -> void:
+	if k < _trades_sets.size():
+		_trades_save_idx = k
+		_trades_save_dialog.popup_centered(Vector2i(700, 500))
+
+func _on_trades_save_picked(target: String) -> void:
+	if _trades_save_idx < 0 or _trades_save_idx >= _trades_sets.size():
+		return
+	var src := str(_trades_sets[_trades_save_idx].get("path", ""))
+	var out := target
+	if not out.ends_with(".bin"):
+		out += ".bin"
+	var rf := FileAccess.open(src, FileAccess.READ)
+	if rf == null:
+		return
+	var bytes := rf.get_buffer(rf.get_length())
+	rf.close()
+	var wf := FileAccess.open(out, FileAccess.WRITE)
+	if wf == null:
+		return
+	wf.store_buffer(bytes)
+	wf.close()
+	_trades_sets[_trades_save_idx]["path"] = out
 
 func _on_menu_trades_toggle(on: bool, k: int) -> void:
 	if k < _trades_sets.size():
@@ -367,6 +400,11 @@ func _rebuild_menu() -> void:
 		tdel.tooltip_text = "delete"
 		tdel.pressed.connect(_on_menu_trades_remove.bind(k))
 		trow.add_child(tdel)
+		var tsave := Button.new()
+		tsave.text = "save"
+		tsave.tooltip_text = "copy the trades binary to a file"
+		tsave.pressed.connect(_on_menu_trades_save.bind(k))
+		trow.add_child(tsave)
 		_menu_box.add_child(trow)
 	var tload := Button.new()
 	tload.text = "load trades…"
