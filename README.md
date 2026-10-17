@@ -202,10 +202,11 @@ during warm-up / outside the indicator's range.
   surprise** (how wrong the estimate just was, normalized by the
   uniform-model loss ln 3) is a magenta bottom band on the chart: a
   sustained high band means the Markov assumption broke — a regime
-  change. The chart also gets **bull/bear regime strips**: each bar
-  whose window sum classifies Bull/Bear tints its whole plot column in
-  the series up/down hues behind the candles, so trend regimes read as
-  background. Params: `period` = the window (classification + BSBP), `surp`
+  change. The chart also gets **bull/bear regime bands**: each classified
+  bar draws a deviation band anchored at the plot's midline (Bull up,
+  Bear down) with height proportional to the |window sum| — full height
+  at 4× the threshold — in fixed bull-green / bear-red hues, so both the
+  regime and its strength read behind the candles. Params: `period` = the window (classification + BSBP), `surp`
   = the rolling-surprise window, `thresh %` / `auto` + `auto x` = the
   threshold. The same surprise also shortens the matrix's memory
   adaptively (see below). Cursor: `MKV [200]` panel + `BS ...` +

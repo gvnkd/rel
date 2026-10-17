@@ -49,9 +49,13 @@ class IndCache:
 	var segs := PackedFloat64Array()
 	var cache_key := ""
 	# MKV: per-bar classification states (0 Bu / 1 SW / 2 Be) of the whole
-	# loaded slice — exact window sums, never slice-truncated
+	# loaded slice — exact window sums, never slice-truncated; sums holds
+	# the signed window sum per bar; th_resolved the threshold the cache
+	# was computed with (auto resolved)
 	var states := PackedInt32Array()
+	var sums := PackedFloat64Array()
 	var states_key := ""
+	var th_resolved := 5.0
 
 const FFT_MIN_WINDOW := 16
 const HANDLE_TOL := 5.0
@@ -74,10 +78,15 @@ const OBVOL_PAD := 512
 # MKV fixed model parameters (mirror Sim.Markov.defaultMarkovParams) —
 # adaptive-memory decay ceiling/floor, surprise reference (log-loss units)
 # and shrink rate; the threshold IS UI-exposed (Indicator.thresh) or
-# auto-calibrated as `auto_mult` x the sampled median |close-to-close
-# return| in percent — 3x reproduced the grid-searched optima on sim1
-# (1H: 0.99 vs 1.0, Daily: 4.95 vs 5.0); drift sums want more (see the
-# Indicator.auto_mult field)
+# auto-calibrated as `auto_mult` x the sampled median |window sum|
+# MKV band: reaches full height at MKV_BAND_SCALE x the threshold,
+# MKV_BAND_MIN keeps a barely-classified bar visible; fixed bull/bear
+# hues (series col_pos/col_neg are both green by default — semantics
+# over palette, same rationale as OBVOL)
+const MKV_BAND_SCALE := 4.0
+const MKV_BAND_MIN := 0.12
+const MKV_BULL_COL := Color(0.30, 0.80, 0.45)
+const MKV_BEAR_COL := Color(0.90, 0.40, 0.35)
 const MKV_LAM_HI := 0.99
 const MKV_LAM_LO := 0.90
 const MKV_SREF := 0.55
@@ -316,13 +325,15 @@ func _draw_cecp(ind: Indicator, s: PlotData.Series, k: int) -> void:
 
 # Bull-Sideways-Bear Markov indicator: the transition matrix itself is
 # rendered as a 3x3 panel under the cursor tableau (cursor_widget). Here
-# the chart gets (1) bull/bear regime strips — the window-sum state of
-# each bar tints its whole plot column in the series up/down hues, so the
-# trend background is visible behind the candles — and (2) the rolling
-# surprise (mean log-loss of the previous bar's estimate vs reality,
-# normalized by the uniform-model loss ln 3) as a translucent bottom
-# band; a high surprise means the Markov assumption just broke (regime
-# change), it also drives the adaptive decay (lambda)
+# the chart gets (1) bull/bear regime bands — each classified bar draws a
+# deviation band anchored at the plot's midline, its height proportional
+# to the |window sum| (full height at MKV_BAND_SCALE x the threshold,
+# fixed bull/bear hues), so both the regime AND its strength read behind
+# the candles — and (2) the rolling surprise (mean log-loss of the
+# previous bar's estimate vs reality, normalized by the uniform-model
+# loss ln 3) as a translucent bottom band; a high surprise means the
+# Markov assumption just broke (regime change), it also drives the
+# adaptive decay (lambda)
 func _draw_mkv(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	var n: int = s.size()
 	if n < 2:
@@ -334,17 +345,25 @@ func _draw_mkv(ind: Indicator, s: PlotData.Series, k: int) -> void:
 		return
 	var c := _cache_for(ind, s)
 	var r := overlay_rect()
-	# regime strips from the per-bar classification states (cached for
-	# the whole slice — exact for any subslice); Sideways stays clear
+	# regime bands from the per-bar classification states and window
+	# sums (cached for the whole slice — exact for any subslice);
+	# Sideways stays clear
+	var y_mid := r.position.y + r.size.y * 0.5
+	var h_max := r.size.y * 0.5
+	var th := maxf(c.th_resolved, 1e-9)
 	for i in range(i0, i1 + 1):
-		if i < s.win_off or i - s.win_off >= c.states.size():
+		var si := i - s.win_off
+		if i < s.win_off or si >= c.states.size():
 			continue
-		var stt: int = c.states[i - s.win_off]
+		var stt: int = c.states[si]
 		if stt == 1:
 			continue
-		var col: Color = s.col_pos if stt == 0 else s.col_neg
-		col.a = 0.09
-		draw_rect(Rect2(view.index_to_x(i), r.position.y, maxf(view.px_per_index, 1.0), r.size.y), col)
+		var t := clampf(absf(c.sums[si]) / (MKV_BAND_SCALE * th), MKV_BAND_MIN, 1.0)
+		var h := h_max * t
+		var col := MKV_BULL_COL if stt == 0 else MKV_BEAR_COL
+		col.a = 0.05 + 0.11 * t
+		var y := y_mid - h if stt == 0 else y_mid
+		draw_rect(Rect2(view.index_to_x(i), y, maxf(view.px_per_index, 1.0), h), col)
 	var ln3 := log(3.0)
 	for i in range(i0, i1 + 1):
 		if i < c.vals_off or i - c.vals_off >= c.vals.size() / 15:
@@ -745,7 +764,10 @@ func _mkv_states_ensure(ind: Indicator, s: PlotData.Series, th: float) -> bool:
 		return false
 	var st := PackedInt32Array()
 	st.resize(hi - base)
+	var sm := PackedFloat64Array()
+	sm.resize(hi - base)
 	st[0] = 1
+	sm[0] = 0.0
 	var ssum := 0.0
 	var k := base + 1
 	var j := 1
@@ -755,9 +777,11 @@ func _mkv_states_ensure(ind: Indicator, s: PlotData.Series, th: float) -> bool:
 		if j > ind.period:
 			ssum -= (s.candle_at(k - ind.period).close / s.candle_at(k - ind.period - 1).close - 1.0) * 100.0
 		st[j] = 0 if ssum >= th else (2 if ssum < -th else 1)
+		sm[j] = ssum
 		k += 1
 		j += 1
 	c.states = st
+	c.sums = sm
 	c.states_key = key
 	return true
 
@@ -787,6 +811,7 @@ func _mkv_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 		return false
 	if not _mkv_states_ensure(ind, s, th):
 		return false
+	c.th_resolved = th
 	var off := lo - s.win_off
 	var st := PackedInt32Array()
 	st.resize(i1 - lo + 1)
