@@ -73,5 +73,5 @@ Order-book market sim. Redot (Godot fork) 26.2 = renderer + UI only; **Haskell (
 ## State / prefs
 
 - Master branch; commits only when Sergey asks (he says "commit"/"coomit"), push only when asked.
-- As of 2026-10-17: HEAD `37b8390` (trades overlay polish + save), local, NOT pushed.
+- As of 2026-10-17: HEAD `0ed0d1b` (MKV window-sum indicator), local, NOT pushed.
 - Perf target: 100k candles × 1k orders ≈ 16.7s (mid-only baseline since 2026-10-13; was 11.7s under the removed opposite mode — mid reads both book sides per order, that gap is intrinsic). Regressions matter.
