@@ -1,9 +1,9 @@
-[gd_scene load_steps=4 format=3 uid="uid://d2bqf3x7y8kw0"]
+[gd_scene load_steps=5 format=3 uid="uid://d2bqf3x7y8kw0"]
 
 [ext_resource type="Script" uid="uid://b6n2w4k8x1pqv" path="res://main.gd" id="1_main"]
 [ext_resource type="PackedScene" uid="uid://cstjrpfbx0k33" path="res://chart.tscn" id="2_chart"]
 [ext_resource type="PackedScene" uid="uid://c8mlp2yav4tju" path="res://ml_page.tscn" id="3_ml"]
-[ext_resource type="PackedScene" uid="uid://s7tr4p2y8k1ab" path="res://strat_page.tscn" id="4_strat"]
+[ext_resource type="PackedScene" uid="uid://dq7brieyyri78" path="res://strat_page.tscn" id="4_strat"]
 
 [node name="Main" type="TabContainer"]
 anchors_preset = 15
@@ -11,13 +11,19 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+current_tab = 0
 script = ExtResource("1_main")
 
 [node name="Chart" parent="." instance=ExtResource("2_chart")]
 layout_mode = 2
+metadata/_tab_index = 0
 
 [node name="ML Trainer" parent="." instance=ExtResource("3_ml")]
+visible = false
 layout_mode = 2
+metadata/_tab_index = 1
 
 [node name="Strategy" parent="." instance=ExtResource("4_strat")]
+visible = false
 layout_mode = 2
+metadata/_tab_index = 2

@@ -2,6 +2,7 @@ module Main (main) where
 
 import Data.Bits (shiftL, shiftR, xor)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
 import Data.ByteString.Builder (doubleLE, toLazyByteString, word32LE, word64LE)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sort, sortOn)
@@ -16,7 +17,7 @@ import qualified Data.Vector.Unboxed as VU
 import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, refinePeaks, solveLS)
 import Sim.Gen
 import Sim.GenH (runSimH)
-import Sim.Csv (csvText, tickRow)
+import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Model as MLM
@@ -1108,14 +1109,55 @@ prop_strat_spec_roundtrip =
 prop_strat_optimize_deterministic :: Bool
 prop_strat_optimize_deterministic =
   let closes = VU.fromList (map MLD.barC (mlSinusBars 800))
+      vols = VU.fromList (map MLD.barV (mlSinusBars 800))
       p = STO.defaultOptParams { STO.opCandidates = 25, STO.opSlowMax = 30 }
-      run = unsafePerformIO (STO.optimizeSession STO.defaultOptHooks p closes 11)
-      run2 = unsafePerformIO (STO.optimizeSession STO.defaultOptHooks p closes 11)
+      run = unsafePerformIO (STO.optimizeSession STO.defaultOptHooks p closes vols 11)
+      run2 = unsafePerformIO (STO.optimizeSession STO.defaultOptHooks p closes vols 11)
   in STO.orStrat run == STO.orStrat run2
      && STO.orValCalmar run == STO.orValCalmar run2
      && STO.orCandCalmar run == STO.orCandCalmar run2
      && VU.length (STO.orCandCalmar run) == 25
      && STO.orValCalmar run == VU.maximum (STO.orCandCalmar run)
+     && STO.orTrades run == STO.orTrades run2
+
+-- trades tile the walked range: entries/exits at the right closes,
+-- net pnl = gross - 2*fee per trade, causes non-empty
+prop_strat_trades_accounting :: Bool
+prop_strat_trades_accounting =
+  let closes = VU.fromList [ 100 * 1.001 ^ i | i <- [0 .. 299] :: [Int] ]
+      vols = VU.replicate 300 1000
+      st = STR.Strat [STR.Slot 3 10 1]
+      fee = 0.0002
+      (sig, causes) = STB.evalSignalC st closes
+      (_bt, trades) = STB.backtestWithTrades fee closes vols sig causes (0, VU.length closes - 1)
+      grossOf t = fromIntegral (STB.trSide t) * (STB.trExit t / STB.trEntry t - 1)
+      ok t = STB.trI0 t < STB.trI1 t
+             && STB.trI1 t <= VU.length closes - 1
+             && abs (STB.trEntry t - closes VU.! STB.trI0 t) < 1e-12
+             && abs (STB.trExit t - closes VU.! STB.trI1 t) < 1e-12
+             && abs (STB.trPnl t - (grossOf t - 2 * fee)) < 1e-12
+             && not (null (STB.trCause t))
+             && STB.trVol t == 1000
+  in not (null trades)
+     && all ok trades
+     && (case trades of
+           (t : _) -> STB.trSide t == 1
+           []      -> False)
+
+-- binary export round-trips (including multi-line, repeated causes)
+prop_trades_bin_roundtrip :: Bool
+prop_trades_bin_roundtrip =
+  let ts = [ STB.Trade 3 17 1 "slot 3:10:1\nslot 3:10:1" 1.02 1.03 0.001 1000
+           , STB.Trade 17 40 (-1) "sma(10)>sma(50) -> 1" 1.03 1.025 (-0.005) 2000
+           , STB.Trade 40 55 1 "sma(10)>sma(50) -> 1" 1.025 1.04 0.01 1500
+           ]
+      enc = BL.toStrict (toLazyByteString (tradesBin ts))
+  in case parseTradesBin enc of
+       Right ts' -> ts' == ts
+       Left _    -> False
+     && case parseTradesBin B.empty of
+          Left _  -> True
+          Right _ -> False
 
 -- --- strategy DSL ------------------------------------------------------------
 
@@ -1286,6 +1328,8 @@ props =
   , ("strat_backtest_fee_ledger", property prop_strat_backtest_fee_ledger)
   , ("strat_spec_roundtrip", property prop_strat_spec_roundtrip)
   , ("strat_optimize_deterministic", property prop_strat_optimize_deterministic)
+  , ("strat_trades_accounting", property prop_strat_trades_accounting)
+  , ("trades_bin_roundtrip", property prop_trades_bin_roundtrip)
   , ("dsl_parse_roundtrip", property prop_dsl_parse_roundtrip)
   , ("dsl_precedence", property prop_dsl_precedence)
   , ("dsl_signal_monotone", property prop_dsl_signal_monotone)

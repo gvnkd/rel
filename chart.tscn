@@ -1,4 +1,4 @@
-[gd_scene load_steps=11 format=3 uid="uid://cstjrpfbx0k33"]
+[gd_scene load_steps=12 format=3 uid="uid://cstjrpfbx0k33"]
 
 [ext_resource type="Script" uid="uid://7hei3gpwt2v2" path="res://chart.gd" id="1_0bwlf"]
 [ext_resource type="Script" uid="uid://cw1fn5scussh4" path="res://sim_panel.gd" id="2_sim"]
@@ -10,6 +10,7 @@
 [ext_resource type="Script" uid="uid://chcgg54nkl8hh" path="res://cross_widget.gd" id="8_cross"]
 [ext_resource type="Script" uid="uid://bckq6f6x652w" path="res://cursor_widget.gd" id="9_cursor"]
 [ext_resource type="Script" uid="uid://b7hwbcxacj5w0" path="res://volume_widget.gd" id="10_vol"]
+[ext_resource type="Script" path="res://trades_widget.gd" id="11_trades"]
 
 [node name="Chart" type="Control"]
 layout_mode = 3
@@ -67,6 +68,16 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("7_book")
+
+[node name="Trades" type="Control" parent="."]
+clip_contents = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("11_trades")
 
 [node name="Cross" type="Control" parent="."]
 layout_mode = 1

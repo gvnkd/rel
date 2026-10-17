@@ -27,12 +27,14 @@ module Sim.Strat.Dsl
   , parseDsl
   , dslText
   , dslSignal
+  , dslSignalCause
   , dslMaxPeriod
   ) where
 
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.List (intercalate, nub)
 import qualified Data.Map.Strict as Map
+import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import Sim.Strat.Backtest (cmpD, smaSeries)
 
@@ -81,9 +83,13 @@ indSeries (Sma w) = smaSeries w
 -- per-candle positions. Indicator series and cross diffs are built once
 -- per distinct pair; conditions are then O(1) per candle per rule.
 dslSignal :: DslStrat -> VU.Vector Double -> VU.Vector Int
-dslSignal (DslStrat rules) closes
-  | VU.null closes = VU.empty
-  | null rules = VU.replicate (VU.length closes) 0
+dslSignal st closes = fst (dslSignalCause st closes)
+
+-- signal + per-candle cause (the text of the first matching rule)
+dslSignalCause :: DslStrat -> VU.Vector Double -> (VU.Vector Int, V.Vector String)
+dslSignalCause (DslStrat rules) closes
+  | VU.null closes = (VU.empty, V.empty)
+  | null rules = (VU.replicate (VU.length closes) 0, V.replicate (VU.length closes) "")
   | otherwise =
       let n = VU.length closes
           conds = map rCond rules
@@ -93,7 +99,9 @@ dslSignal (DslStrat rules) closes
           diffsOf = Map.fromList
             [ (k, VU.zipWith (-) (seriesOf Map.! fst k) (seriesOf Map.! snd k))
             | k <- crossPs ]
-          ruleVecs = [ (VU.generate n (condAt (rCond r)), rPos r) | r <- rules ]
+          causeOf r = showCond (rCond r) ++ " -> " ++ show (rPos r)
+          ruleVecs = [ (VU.generate n (condAt (rCond r)), rPos r, causeOf r)
+                     | r <- rules ]
           condAt c i = case c of
             Cmp rel a b ->
               let x = seriesOf Map.! a VU.! i
@@ -111,9 +119,13 @@ dslSignal (DslStrat rules) closes
             && cmpD (d VU.! (i - 1)) /= side
           signalAt i = go ruleVecs
             where
-              go ((v, p) : rest) = if v VU.! i then p else go rest
+              go ((v, p, _) : rest) = if v VU.! i then p else go rest
               go [] = 0
-      in VU.generate n signalAt
+          causeAt i = go ruleVecs
+            where
+              go ((v, _, c) : rest) = if v VU.! i then c else go rest
+              go [] = ""
+      in (VU.generate n signalAt, V.generate n causeAt)
   where
     condInds c = case c of
       Cmp _ a b     -> [a, b]
@@ -150,25 +162,29 @@ dslMaxPeriod (DslStrat rules) = maximum (1 : concatMap rulePeriods rules)
 dslText :: DslStrat -> String
 dslText (DslStrat rules) =
   intercalate "\n" [ showCond (rCond r) ++ " -> " ++ show (rPos r) | r <- rules ]
+
+showInd :: Ind -> String
+showInd Px = "close"
+showInd (Sma w) = "sma(" ++ show w ++ ")"
+
+showCond :: Cond -> String
+showCond c = case c of
+  Cmp rel a b -> showInd a ++ relShow rel ++ showInd b
+  CrossUp a b -> "xup(" ++ showInd a ++ "," ++ showInd b ++ ")"
+  CrossDown a b -> "xdn(" ++ showInd a ++ "," ++ showInd b ++ ")"
+  NotC a -> "!" ++ showTight a
+  AndC a b -> showSide a ++ " & " ++ showSide b
+  OrC a b -> showCond a ++ " | " ++ showCond b
   where
-    showInd Px = "close"
-    showInd (Sma w) = "sma(" ++ show w ++ ")"
-    showCond c = case c of
-      Cmp rel a b -> showInd a ++ relShow rel ++ showInd b
-      CrossUp a b -> "xup(" ++ showInd a ++ "," ++ showInd b ++ ")"
-      CrossDown a b -> "xdn(" ++ showInd a ++ "," ++ showInd b ++ ")"
-      NotC a -> "!" ++ showTight a
-      AndC a b -> showSide a ++ " & " ++ showSide b
-      OrC a b -> showCond a ++ " | " ++ showCond b
     -- argument printers: '&' args must parenthesize '|' children
-    showSide c = case c of
-      OrC _ _ -> "(" ++ showCond c ++ ")"
-      _       -> showCond c
+    showSide cc = case cc of
+      OrC _ _ -> "(" ++ showCond cc ++ ")"
+      _       -> showCond cc
     -- '!' args must parenthesize boolean children
-    showTight c = case c of
-      AndC _ _ -> "(" ++ showCond c ++ ")"
-      OrC _ _  -> "(" ++ showCond c ++ ")"
-      _        -> showCond c
+    showTight cc = case cc of
+      AndC _ _ -> "(" ++ showCond cc ++ ")"
+      OrC _ _  -> "(" ++ showCond cc ++ ")"
+      _        -> showCond cc
 
 parseDsl :: String -> Either String DslStrat
 parseDsl s = do

@@ -53,6 +53,7 @@ data OptResult = OptResult
   , orCandCalmar :: !(VU.Vector Double) -- val Calmar per sampled candidate
   , orValCalmar  :: !Double             -- best candidate's val Calmar
   , orTest       :: !BacktestResult     -- best candidate on the test segment
+  , orTrades     :: ![Trade]            -- best candidate's test trades
   } deriving (Show)
 
 data OptSplits = OptSplits
@@ -90,8 +91,8 @@ sampleStrat p g0 = go g0 (max 1 (opSlots p)) []
       let (w, g') = nextWord64 g
       in (g', lo + fromIntegral (w `mod` fromIntegral (hi - lo + 1)))
 
-optimizeSession :: OptHooks -> OptParams -> VU.Vector Double -> Word64 -> IO OptResult
-optimizeSession hooks p closes seed =
+optimizeSession :: OptHooks -> OptParams -> VU.Vector Double -> VU.Vector Double -> Word64 -> IO OptResult
+optimizeSession hooks p closes vols seed =
   case optSplits p (VU.length closes) of
     Left err -> ioError (userError err)
     Right sp -> loop (mkSMGen seed) 1 Nothing (-1 / 0) [] sp
@@ -104,8 +105,9 @@ optimizeSession hooks p closes seed =
           let st = case bestS of
                 Just s  -> s
                 Nothing -> Strat []
-              testRes = backtest (opFee p) closes (evalSignal st closes) (osTest sp)
-          pure (OptResult seed st (VU.fromList (reverse hist)) bestC testRes)
+              (sig, causes) = evalSignalC st closes
+              (testRes, trades) = backtestWithTrades (opFee p) closes vols sig causes (osTest sp)
+          pure (OptResult seed st (VU.fromList (reverse hist)) bestC testRes trades)
       | otherwise = do
           cancelled <- ohCancelled hooks
           when cancelled (throwIO SimCancelled)

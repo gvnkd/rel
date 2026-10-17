@@ -282,7 +282,26 @@ func _refresh_table(live: Array) -> void:
 		plot_btn.disabled = not _results.has(sess_seed)
 		plot_btn.pressed.connect(_on_plot_pressed.bind(sess_seed))
 		row.add_child(plot_btn)
+		var trades_btn := Button.new()
+		trades_btn.text = "trades"
+		trades_btn.tooltip_text = "show this run's trades on the chart tab"
+		var trades_path := "%s/trades_%d.bin" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
+		trades_btn.disabled = not _results.has(sess_seed) or not FileAccess.file_exists(trades_path)
+		trades_btn.pressed.connect(_on_trades_pressed.bind(sess_seed))
+		row.add_child(trades_btn)
 		_table.add_child(row)
 
 func _on_plot_pressed(sess_seed: int) -> void:
 	session_selected.emit(sess_seed)
+
+func _on_trades_pressed(sess_seed: int) -> void:
+	var path := "%s/trades_%d.bin" % [ProjectSettings.globalize_path(_run_dir()), sess_seed]
+	var chart := get_tree().root.find_child("Chart", true, false)
+	if chart == null:
+		_update_status("chart tab not found")
+		return
+	var n: int = chart.add_trades_from_file(path, "strat#%d" % sess_seed)
+	if n < 0:
+		_update_status("failed to load trades from %s" % path)
+	else:
+		_update_status("chart: %d trades from seed %d (see the Chart tab)" % [n, sess_seed])

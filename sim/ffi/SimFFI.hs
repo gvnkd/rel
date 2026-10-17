@@ -16,7 +16,7 @@ import Foreign.Marshal.Array (peekArray, pokeArray)
 import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, vevHeader, vevPath, vevRecB)
+import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..), initState)
@@ -621,12 +621,13 @@ runDslBacktest p = do
     Left err -> ioError (userError err)
     Right bs -> pure bs
   let closes = VU.fromList (map MLD.barC bars)
+      vols = VU.fromList (map MLD.barV bars)
       n = VU.length closes
       warmup = STD.dslMaxPeriod (dspSpec p) - 1
   when (n < warmup + 12) (ioError (userError "not enough candles for the strategy warm-up"))
   createDirectoryIfMissing True (dspOut p)
-  let sig = STD.dslSignal (dspSpec p) closes
-      bt = STB.backtest (dspFee p) closes sig (warmup, n - 1)
+  let (sig, causes) = STD.dslSignalCause (dspSpec p) closes
+      (bt, trades) = STB.backtestWithTrades (dspFee p) closes vols sig causes (warmup, n - 1)
       met = STB.brMetrics bt
       eqPath = dspOut p ++ "/equity_0.csv"
       specText = STD.dslText (dspSpec p)
@@ -655,6 +656,8 @@ runDslBacktest p = do
     hPutStr h (concatMap testRow (zip3 (VU.toList (STB.brCloses bt))
                                        (VU.toList (STB.brEquity bt))
                                        (VU.toList (STB.brPos bt))))
+  withFile (dspOut p ++ "/trades_0.bin") WriteMode $ \h ->
+    hPutBuilder h (tradesBin trades)
   where
     eqRow e =
       let s = printf "%.5f" e
@@ -676,6 +679,7 @@ runStratBatch p = do
     Left err -> ioError (userError err)
     Right bs -> pure bs
   let closes = VU.fromList (map MLD.barC bars)
+      vols = VU.fromList (map MLD.barV bars)
   case STO.optSplits (stpOpt p) (VU.length closes) of
     Left err -> ioError (userError err)
     Right _  -> pure ()
@@ -692,7 +696,7 @@ runStratBatch p = do
   doneRef <- newIORef 0
   barrier <- newEmptyMVar
   _ <- forM stRefs $ \st -> forkIO $ do
-    r <- try (STO.optimizeSession (stratHooks st) (stpOpt p) closes (ssSeed st))
+    r <- try (STO.optimizeSession (stratHooks st) (stpOpt p) closes vols (ssSeed st))
     case r of
       Left err -> writeIORef (ssStatus st)
         (case fromException err of
@@ -753,6 +757,8 @@ writeStratResult out r = do
     hPutStr h (concatMap testRow (zip3 (VU.toList (STB.brCloses bt))
                                        (VU.toList (STB.brEquity bt))
                                        (VU.toList (STB.brPos bt))))
+  withFile (out ++ "/trades_" ++ show seed ++ ".bin") WriteMode $ \h ->
+    hPutBuilder h (tradesBin (STO.orTrades r))
   where
     eqRow e =
       let s = printf "%.5f" e

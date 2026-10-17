@@ -13,12 +13,22 @@ module Sim.Csv
   , vevHeader
   , vevRecB
   , vevPath
+  , tradesBin
+  , parseTradesBin
   , metaText
   ) where
 
-import Data.ByteString.Builder (Builder, char8, intDec, string8, word32LE, word64LE)
-import Data.List (intercalate, zipWith4)
+import Data.Bits (shiftL, (.|.))
+import Data.ByteString.Builder (Builder, byteString, char8, doubleLE, intDec, string8, word32LE, word64LE)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as B8
+import Data.Int (Int32)
+import Data.List (foldl', intercalate, zipWith4)
+import qualified Data.Map.Strict as Map
+import Data.Word (Word32, Word64)
+import GHC.Float (castWord64ToDouble)
 import Sim.Lvl (LvlEv (..), LvlSeg (..))
+import qualified Sim.Strat.Backtest as STB
 import Sim.Types
 import Text.Printf (printf)
 
@@ -146,6 +156,91 @@ vevRecB (LvlEv c side (Price px) vol) =
 
 vevPath :: FilePath -> FilePath
 vevPath path = sidecarPath "vev" path
+
+-- --- backtest trades binary (RELT) -------------------------------------------
+--
+-- little-endian, records after a 16-byte header:
+--   u32 magic 'RELT', u32 version (1), u64 trade count,
+--   then count x 48-byte records:
+--     i0 u32, i1 u32, side i32, causeId u32,
+--     entry f64, exit f64, pnl f64, vol f64
+--   then the string table: u64 byte length followed by the cause strings
+--   concatenated with NUL separators, in causeId order (UTF-8)
+
+magicTrades :: Word32
+magicTrades = 0x544C4552
+
+tradesBin :: [STB.Trade] -> Builder
+tradesBin ts =
+  word32LE magicTrades
+    <> word32LE 1
+    <> word64LE (fromIntegral (length ts))
+    <> mconcat (map recB ts)
+    <> word64LE (fromIntegral (B.length blob))
+    <> byteString blob
+  where
+    causeIds = Map.fromList (zip causes [0 ..])
+    causes = dedup (map STB.trCause ts)
+    dedup = foldr (\c acc -> if c `elem` acc then acc else c : acc) []
+    recB t =
+      word32LE (fromIntegral (STB.trI0 t))
+        <> word32LE (fromIntegral (STB.trI1 t))
+        <> word32LE (fromIntegral (STB.trSide t))
+        <> word32LE (causeIds Map.! STB.trCause t)
+        <> doubleLE (STB.trEntry t)
+        <> doubleLE (STB.trExit t)
+        <> doubleLE (STB.trPnl t)
+        <> doubleLE (STB.trVol t)
+    blob = B.concat (map (B8.pack . (++ "\NUL")) causes)
+
+parseTradesBin :: B.ByteString -> Either String [STB.Trade]
+parseTradesBin bs
+  | B.length bs < 16 = Left "trades binary too short"
+  | getU32 bs 0 /= magicTrades = Left "bad magic"
+  | getU32 bs 4 /= 1 = Left "unsupported trades version"
+  | B.length bs < 16 + n * recLen = Left "truncated trade records"
+  | B.length bs < 16 + n * recLen + 8 = Left "missing string table"
+  | B.length bs < 16 + n * recLen + 8 + blobLen = Left "truncated string table"
+  | otherwise = mapM recAt [0 .. n - 1]
+  where
+    n = fromIntegral (getU64 bs 8)
+    recLen = 48
+    blobOff = 16 + n * recLen
+    blobLen = fromIntegral (getU64 bs blobOff)
+    blob = B.take blobLen (B.drop (blobOff + 8) bs)
+    causes = B.split 0 blob
+    causeAt k = if k < length causes
+                  then Right (B8.unpack (causes !! k))
+                  else Left ("cause id out of range: " ++ show k)
+    recAt k =
+      let o = 16 + k * recLen
+          side = fromIntegral (getI32 bs (o + 8))
+          entry = getF64 bs (o + 16)
+          exit = getF64 bs (o + 24)
+          pnl = getF64 bs (o + 32)
+          vol = getF64 bs (o + 40)
+      in do
+           cause <- causeAt (fromIntegral (getU32 bs (o + 12)))
+           Right (STB.Trade { STB.trI0 = fromIntegral (getU32 bs o)
+                        , STB.trI1 = fromIntegral (getU32 bs (o + 4))
+                        , STB.trSide = side
+                        , STB.trCause = cause
+                        , STB.trEntry = entry
+                        , STB.trExit = exit
+                        , STB.trPnl = pnl
+                        , STB.trVol = vol })
+
+getU32 :: B.ByteString -> Int -> Word32
+getU32 bs o = foldl' (.|.) 0 [fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 3]]
+
+getU64 :: B.ByteString -> Int -> Word64
+getU64 bs o = foldl' (.|.) 0 [fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 7]]
+
+getI32 :: B.ByteString -> Int -> Int
+getI32 bs o = fromIntegral (fromIntegral (getU32 bs o) :: Int32)
+
+getF64 :: B.ByteString -> Int -> Double
+getF64 bs o = castWord64ToDouble (getU64 bs o)
 
 ticksPath :: FilePath -> FilePath
 ticksPath path = sidecarPath "ticks.csv" path

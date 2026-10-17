@@ -50,11 +50,18 @@ const PALETTE: Array[Color] = [
 @onready var cursor_widget: CursorWidget = $Cursor
 @onready var sim_window: ToolWindow = $SimWindow
 @onready var sim_panel: SimPanel = $SimWindow/Box/SimPanel
+@onready var trades_widget: TradesWidget = $Trades
+
+# backtest trades overlays: shared with trades_widget by array identity.
+# Each set: {name, enabled, trades: Array of Dicts, color}
+var _trades_sets: Array = []
+var _trades_dialog: FileDialog
 
 func _ready() -> void:
-	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget]:
+	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
 		w.view = view
 		w.data = data
+	trades_widget.trades_sets = _trades_sets
 	_sync_volume()
 	_sync_mode_hud()
 	_sync_indicator_hud()
@@ -70,6 +77,87 @@ func _ready() -> void:
 	panel.add_child(_menu_box)
 	_menu.add_child(panel)
 	add_child(_menu)
+	_trades_dialog = FileDialog.new()
+	_trades_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_trades_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_trades_dialog.filters = PackedStringArray(["*.bin ; Trades binary"])
+	_trades_dialog.file_selected.connect(_on_trades_file_picked)
+	add_child(_trades_dialog)
+
+# --- trades overlays ---------------------------------------------------------
+
+# load a RELT trades binary (see Sim.Csv.tradesBin) and register it as an
+# overlay; returns the trade count, or -1 when the file is missing/invalid
+func add_trades_from_file(path: String, tname: String) -> int:
+	var trades := _load_trades_bin(path)
+	if trades.is_empty():
+		return -1
+	_trades_sets.append({
+		"name": tname,
+		"enabled": true,
+		"trades": trades,
+		"color": PALETTE[_trades_sets.size() % PALETTE.size()],
+	})
+	_rebuild_menu()
+	_refresh()
+	return trades.size()
+
+func _load_trades_bin(path: String) -> Array:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return []
+	var bytes := f.get_buffer(f.get_length())
+	f.close()
+	if bytes.size() < 16 or bytes.decode_u32(0) != 0x544C4552:
+		return []
+	var n: int = bytes.decode_u64(8)
+	var rec_len := 48
+	var blob_off := 16 + n * rec_len
+	if bytes.size() < blob_off + 8:
+		return []
+	var blob_len: int = bytes.decode_u64(blob_off)
+	if bytes.size() < blob_off + 8 + blob_len:
+		return []
+	var causes := PackedStringArray()
+	var pos := blob_off + 8
+	var blob_end := pos + blob_len
+	while pos < blob_end:
+		var e := pos
+		while e < blob_end and bytes[e] != 0:
+			e += 1
+		causes.append(bytes.slice(pos, e).get_string_from_utf8())
+		pos = e + 1
+	var out: Array = []
+	for k in n:
+		var o := 16 + k * rec_len
+		var cause_id := bytes.decode_u32(o + 12)
+		if cause_id >= causes.size():
+			return []
+		out.append({
+			"i0": bytes.decode_u32(o),
+			"i1": bytes.decode_u32(o + 4),
+			"side": bytes.decode_s32(o + 8),
+			"cause": causes[cause_id],
+			"entry": bytes.decode_double(o + 16),
+			"exit": bytes.decode_double(o + 24),
+			"pnl": bytes.decode_double(o + 32),
+			"vol": bytes.decode_double(o + 40),
+		})
+	return out
+
+func _on_trades_file_picked(path: String) -> void:
+	add_trades_from_file(path, path.get_file().get_basename())
+
+func _on_menu_trades_toggle(on: bool, k: int) -> void:
+	if k < _trades_sets.size():
+		_trades_sets[k]["enabled"] = on
+		_refresh()
+
+func _on_menu_trades_remove(k: int) -> void:
+	if k < _trades_sets.size():
+		_trades_sets.remove_at(k)
+		_rebuild_menu()
+		_refresh()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
@@ -262,6 +350,28 @@ func _rebuild_menu() -> void:
 	add_row.add_child(b_cecp)
 	add_row.add_child(b_obvol)
 	_menu_box.add_child(add_row)
+	_add_section("trades overlays")
+	if _trades_sets.is_empty():
+		var tnone := Label.new()
+		tnone.text = "(none)"
+		_menu_box.add_child(tnone)
+	for k in _trades_sets.size():
+		var trow := HBoxContainer.new()
+		var tcb := CheckBox.new()
+		tcb.text = _trades_sets[k]["name"]
+		tcb.button_pressed = _trades_sets[k]["enabled"]
+		tcb.toggled.connect(_on_menu_trades_toggle.bind(k))
+		trow.add_child(tcb)
+		var tdel := Button.new()
+		tdel.text = "x"
+		tdel.tooltip_text = "delete"
+		tdel.pressed.connect(_on_menu_trades_remove.bind(k))
+		trow.add_child(tdel)
+		_menu_box.add_child(trow)
+	var tload := Button.new()
+	tload.text = "load trades…"
+	tload.pressed.connect(func() -> void: _trades_dialog.popup_centered(Vector2i(700, 500)))
+	_menu_box.add_child(tload)
 	if not data.series.is_empty():
 		_add_section("series")
 		for i in data.series.size():
@@ -657,7 +767,7 @@ func _refresh() -> void:
 	if grid == null:
 		return
 	_ensure_windows()
-	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget]:
+	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
 		w.queue_redraw()
 
 # sliding window refill for binary-backed (real quotes) series: keeps
