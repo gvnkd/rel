@@ -19,7 +19,7 @@ import Sim.Cli (applyArgs)
 import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
-import Sim.Markov (MarkovParams (..), markovSeries)
+import Sim.Markov (MarkovParams (..), markovSeriesStates)
 import Sim.Gen (GenState (..), initState)
 import Sim.GenH (runSimH)
 import Sim.Lvl (LvlEv, LvlSeg, trFromBook)
@@ -141,21 +141,26 @@ simCecp ptr (CInt count) (CInt win) (CInt m) out
           pure (CInt (fromIntegral (length vals)))
 
 -- rolling Bull-Sideways-Bear probabilities + surprise-adaptive 3x3 Markov
--- transition matrix over closes: writes 15 * `count` doubles into out —
--- per bar [bsbpBull, bsbpSw, bsbpBear, t00..t22 (row-major), surprise,
--- rolling surprise, lambda], NaN warm-up on BSBP — returns 15 * count on
--- success, 0 on invalid input. thresh/lamHi/lamLo/sRef/k sanitize into
--- ranges (see Sim.Markov.sanitizeParams)
+-- transition matrix over PRE-CLASSIFIED states: writes 15 * `count`
+-- doubles into out — per bar [bsbpBull, bsbpSw, bsbpBear, t00..t22
+-- (row-major), surprise, rolling surprise, lambda], NaN warm-up on BSBP
+-- — returns 15 * count on success, 0 on invalid input.
+-- `states` holds one state per slice bar (0 Bull, 1 Sideways, 2 Bear;
+-- index 0 an unused dummy, states from index 1 on) — the caller
+-- classifies the WHOLE loaded slice (window sums, see Sim.Markov.statesOf)
+-- so the states are exact for any subslice; only the count/surprise
+-- chain restarts at the slice start (uniform prior). lamHi/lamLo/sRef/k
+-- sanitize into ranges (see Sim.Markov.sanitizeParams)
 foreign export ccall "sim_markov" simMarkov
-  :: Ptr CDouble -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble -> Ptr CDouble -> IO CInt
+  :: Ptr CInt -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> Ptr CDouble -> IO CInt
 
-simMarkov :: Ptr CDouble -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble -> Ptr CDouble -> IO CInt
-simMarkov ptr (CInt count) (CInt win) (CInt surpWin) (CDouble thresh) (CDouble lamHi) (CDouble lamLo) (CDouble sRef) (CDouble k) out
+simMarkov :: Ptr CInt -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> Ptr CDouble -> IO CInt
+simMarkov ptr (CInt count) (CInt win) (CInt surpWin) (CDouble lamHi) (CDouble lamLo) (CDouble sRef) (CDouble k) out
   | count <= 0 || win <= 0 = pure 0
   | otherwise = do
-      closes <- peekArray (fromIntegral count) ptr
-      let mp = MarkovParams (fromIntegral win) (fromIntegral surpWin) thresh lamHi lamLo sRef k
-          vals = markovSeries mp (map (\(CDouble d) -> d) closes)
+      sts <- peekArray (fromIntegral count) ptr
+      let mp = MarkovParams (fromIntegral win) (fromIntegral surpWin) 5.0 lamHi lamLo sRef k
+          vals = markovSeriesStates mp (VU.fromList (map (\(CInt x) -> fromIntegral x) sts))
       if length vals /= 15 * fromIntegral count
         then pure 0
         else do

@@ -11,13 +11,19 @@ class Indicator:
 	var waves := 0
 	var edge_w := 1.0
 	var m := 5
-	# MKV: rolling surprise window (bars), bull/bear |return| threshold in
-	# percent (5 = the spec default; sim sub-percent data needs ~0.05 or
-	# every bar reads Sideways). auto_thresh: derive the threshold from
-	# the loaded slice as 3x the median |return| (timeframe-agnostic)
+	# MKV: rolling window (bars) for BOTH the BSBP histogram and the
+	# classification window-sum; rolling surprise window (bars); the
+	# bull/bear threshold in percent applies to the SUM of the last
+	# `period` returns ending at each bar (partial while the window
+	# fills). auto_thresh derives the threshold as auto_mult x the median
+	# |window sum| of the loaded slice
 	var surp := 20
 	var thresh := 5.0
 	var auto_thresh := false
+	# auto-threshold multiplier on the median |window sum| (3 = the
+	# original fit for per-bar returns; window sums are near-Gaussian and
+	# want 4-9x — tune live)
+	var auto_mult := 3.0
 	var locked := false
 	var opt_score := -1.0
 	# OBVOL: price bucket size in display units; 0 = exact price levels.
@@ -42,6 +48,10 @@ class IndCache:
 	# OBVOL: flat segment list, 5 doubles each (side, price, i0, i1, alpha)
 	var segs := PackedFloat64Array()
 	var cache_key := ""
+	# MKV: per-bar classification states (0 Bu / 1 SW / 2 Be) of the whole
+	# loaded slice — exact window sums, never slice-truncated
+	var states := PackedInt32Array()
+	var states_key := ""
 
 const FFT_MIN_WINDOW := 16
 const HANDLE_TOL := 5.0
@@ -64,10 +74,10 @@ const OBVOL_PAD := 512
 # MKV fixed model parameters (mirror Sim.Markov.defaultMarkovParams) —
 # adaptive-memory decay ceiling/floor, surprise reference (log-loss units)
 # and shrink rate; the threshold IS UI-exposed (Indicator.thresh) or
-# auto-calibrated as MKV_AUTO_MULT x the sampled median |close-to-close
+# auto-calibrated as `auto_mult` x the sampled median |close-to-close
 # return| in percent — 3x reproduced the grid-searched optima on sim1
-# (1H: 0.99 vs 1.0, Daily: 4.95 vs 5.0)
-const MKV_AUTO_MULT := 3.0
+# (1H: 0.99 vs 1.0, Daily: 4.95 vs 5.0); drift sums want more (see the
+# Indicator.auto_mult field)
 const MKV_LAM_HI := 0.99
 const MKV_LAM_LO := 0.90
 const MKV_SREF := 0.55
@@ -701,26 +711,74 @@ func _cecp_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 # rolling surprise, lambda) stored whole in vals, one record per candle
 # from vals_off. The matrix/surprise chain is path-dependent: it restarts
 # from the uniform prior at the slice start, so the key carries win_off
+# fills the per-series STATE cache for the whole loaded slice: one state
+# per bar of [win_off, win_off + candles) from the window sums (partial
+# at the slice edges only). Computed once per (period, thresh, slice), so
+# classification is EXACT for any subslice — it never restarts at a
+# cache-fill boundary. The FFI consumes these states; only the
+# count/surprise chain restarts at the slice start (path-dependent, the
+# cache key carries win_off)
+func _mkv_states_ensure(ind: Indicator, s: PlotData.Series, th: float) -> bool:
+	var base := s.win_off
+	var hi := base + s.candles.size()
+	var c := _cache_for(ind, s)
+	var key := "%d:%d:%f:%d:%d" % [data.series.find(s), ind.period, th, hi, base]
+	if key == c.states_key:
+		return c.states.size() == hi - base
+	if hi - base < 2:
+		c.states = PackedInt32Array()
+		c.states_key = key
+		return false
+	var st := PackedInt32Array()
+	st.resize(hi - base)
+	st[0] = 1
+	var ssum := 0.0
+	var k := base + 1
+	var j := 1
+	while k < hi:
+		ssum += (s.candle_at(k).close / s.candle_at(k - 1).close - 1.0) * 100.0
+		# keep only the last `period` returns in the window
+		if j > ind.period:
+			ssum -= (s.candle_at(k - ind.period).close / s.candle_at(k - ind.period - 1).close - 1.0) * 100.0
+		st[j] = 0 if ssum >= th else (2 if ssum < -th else 1)
+		k += 1
+		j += 1
+	c.states = st
+	c.states_key = key
+	return true
+
+# fills the per-series MKV cache for [lo, i1]; the FFI returns the flat
+# 15-double per-bar record (BSBP x3, matrix row-major x9, surprise,
+# rolling surprise, lambda) stored whole in vals, one record per candle
+# from vals_off. lo clamps to win_off (the states cover the whole slice,
+# exact classification for any subslice); the BSBP window is
+# slice-relative, so the first `period` bars of the slice read NaN — the
+# margin in lo keeps them outside [i0, i1]
 func _mkv_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 	var n: int = s.size()
 	if n < 2:
 		return false
-	var lo := maxi(0, i0 - ind.period - 2)
-	var c := _cache_for(ind, s)
+	var lo := maxi(s.win_off, i0 - ind.period - 2)
 	var th := ind.thresh
 	if ind.auto_thresh:
-		th = _mkv_auto_thresh(s)
+		var ta := _mkv_auto_thresh(ind, s)
+		if ta > 0.0:
+			th = ta
 	# note: %d rejects booleans in Redot's format — cast the flag
-	var key := "%d:%d:%d:%d:%f:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.surp, int(ind.auto_thresh), th, n, s.win_off, lo, i1]
+	var c := _cache_for(ind, s)
+	var key := "%d:%d:%d:%d:%f:%f:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.surp, int(ind.auto_thresh), th, ind.auto_mult, n, s.win_off, lo, i1]
 	if key == c.cache_key:
 		return not c.vals.is_empty()
 	if not _ensure_sim():
 		return false
-	var closes := PackedFloat64Array()
-	closes.resize(i1 - lo + 1)
-	for i in range(lo, i1 + 1):
-		closes[i - lo] = s.candle_at(i).close
-	var ret: Variant = _sim.call("markov", closes, ind.period, ind.surp, th, MKV_LAM_HI, MKV_LAM_LO, MKV_SREF, MKV_K)
+	if not _mkv_states_ensure(ind, s, th):
+		return false
+	var off := lo - s.win_off
+	var st := PackedInt32Array()
+	st.resize(i1 - lo + 1)
+	for j in range(i1 - lo + 1):
+		st[j] = c.states[off + j]
+	var ret: Variant = _sim.call("markov", st, ind.period, ind.surp, MKV_LAM_HI, MKV_LAM_LO, MKV_SREF, MKV_K)
 	var vals: PackedFloat64Array = ret as PackedFloat64Array
 	if vals.size() == 15 * (i1 - lo + 1):
 		c.vals = vals
@@ -730,11 +788,12 @@ func _mkv_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 	c.cache_key = key
 	return not c.vals.is_empty()
 
-# auto threshold: MKV_AUTO_MULT x the median |close-to-close return| in
-# percent over up to 4096 evenly spaced samples of the loaded slice
-# (median, not mean: spikes inflate the mean). Returns -1 when the slice
+# auto threshold: ind.auto_mult x the median |window sum| in percent over
+# up to 4096 evenly spaced samples of the loaded slice (median, not mean:
+# spikes inflate the mean; the sample series is the same quantity the
+# classifier compares against the threshold). Returns -1 when the slice
 # is too short, so the caller keeps the manual threshold
-func _mkv_auto_thresh(s: PlotData.Series) -> float:
+func _mkv_auto_thresh(ind: Indicator, s: PlotData.Series) -> float:
 	var lo := maxi(1, s.win_off + 1)
 	var hi := s.win_off + s.candles.size()
 	if hi - lo < 8:
@@ -743,15 +802,19 @@ func _mkv_auto_thresh(s: PlotData.Series) -> float:
 	var samples: Array[float] = []
 	var k := lo
 	while k < hi:
-		var prev: float = s.candle_at(k - 1).close
-		if prev > 0.0:
-			samples.append(absf(s.candle_at(k).close / prev - 1.0) * 100.0)
+		# full window only (window [k-period+1 .. k], all returns
+		# defined): partial sums are a different scale
+		if k - ind.period >= s.win_off:
+			var ssum := 0.0
+			for j in range(k - ind.period + 1, k + 1):
+				ssum += (s.candle_at(j).close / s.candle_at(j - 1).close - 1.0) * 100.0
+			samples.append(absf(ssum))
 		k += step
 	if samples.size() < 8:
 		return -1.0
 	samples.sort()
 	var med: float = samples[samples.size() / 2]
-	return maxf(MKV_AUTO_MULT * med, 0.0001)
+	return maxf(ind.auto_mult * med, 0.0001)
 
 # fills the per-series cache (fit/forecast) when its key is stale; false
 # when the fit cannot be computed
@@ -834,13 +897,18 @@ func value_at(ind: Indicator, s: PlotData.Series, i: int) -> Variant:
 				return null
 		var o := (i - c.vals_off) * 15
 		var rec := []
-		rec.resize(10)
+		rec.resize(13)
+		# BSBP block (record 0..2) passes through even while NaN (window
+		# warm-up) — the panel skips the line; the matrix below decides
+		# null
+		for j in 3:
+			rec[j] = c.vals[o + j]
 		for j in 9:
 			var tv: float = c.vals[o + 3 + j]
 			if is_nan(tv):
 				return null
-			rec[j] = tv
-		rec[9] = c.vals[o + 13]
+			rec[3 + j] = tv
+		rec[12] = c.vals[o + 13]
 		return rec
 	if ind.kind == "OBVOL":
 		var book: Variant = s.book_at(i)

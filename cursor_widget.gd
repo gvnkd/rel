@@ -96,8 +96,8 @@ func _draw() -> void:
 # one 3x3 transition matrix per (series, MKV indicator), right-aligned
 # under the cursor tableau: rows = current state at the cursor candle,
 # cols = next-bar probabilities; the diagonal (stay / stickiness) cells
-# get a border, the background heat = probability; v is the 10-element
-# value_at record (matrix row-major + rolling surprise)
+# get a border, the background heat = probability; v is the 13-element
+# value_at record (BSBP x3, matrix row-major x9, rolling surprise)
 func _draw_mkv_panel(font: Font, panel: Array, x: float, y: float, block_w: float) -> float:
 	var s: PlotData.Series = panel[0]
 	var ind: IndicatorWidget.Indicator = panel[1]
@@ -120,5 +120,19 @@ func _draw_mkv_panel(font: Font, panel: Array, x: float, y: float, block_w: floa
 				draw_rect(rect, Color(1, 1, 1, 0.45), false, 2.0)
 			draw_string(font, rect.position + Vector2(0, (MKV_CELL - 4) * 0.5 + 10), "%.2f" % p, HORIZONTAL_ALIGNMENT_CENTER, MKV_CELL - 4, 28, Color.WHITE)
 		y += MKV_CELL
-	draw_string(font, Vector2(px, y + 30), "S %.2f" % float(v[9]), HORIZONTAL_ALIGNMENT_LEFT, w, 28, Color(1.0, 0.45, 0.6))
+	# BSBP line: the window's state mix (Bull/SW/Bear probabilities) plus
+	# the cursor bar's change to the previous bar, so the cell mix reads
+	# next to the move that produced it; hidden while the BSBP window is
+	# still filling (NaN)
+	if not is_nan(float(v[0])):
+		var chg := "  --"
+		var bi: int = panel[2]
+		if bi >= 1:
+			var prev: float = s.candle_at(bi - 1).close
+			if prev > 0.0:
+				var pct := (s.candle_at(bi).close / prev - 1.0) * 100.0
+				chg = "  %+.2f%%" % pct
+		draw_string(font, Vector2(px, y + 30), "BS %.2f/%.2f/%.2f%s" % [v[0], v[1], v[2], chg], HORIZONTAL_ALIGNMENT_LEFT, w, 28, EXTRA_COL)
+		y += 38
+	draw_string(font, Vector2(px, y + 30), "S %.2f" % float(v[12]), HORIZONTAL_ALIGNMENT_LEFT, w, 28, Color(1.0, 0.45, 0.6))
 	return y + 42

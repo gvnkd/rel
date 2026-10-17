@@ -182,29 +182,31 @@ during warm-up / outside the indicator's range.
   e.g. period 100 / m=5 reads C ≈ 0.27 on pure noise (histogram
   sparseness, not structure). NaN until the window fills.
 - **MKV** — Bull-Sideways-Bear Markov indicator. Every bar is classified
-  by its close-to-close return in percent: ≥ `thresh %` → Bull,
-  < −`thresh %` → Bear (exactly ±thresh is Sideways), else Sideways.
-  **thresh is data-scale critical**: the default 5 means sub-percent
-  series (most sim and forex data) classify every bar as Sideways, and
-  the indicator correctly but uselessly locks to pSwSw=1.0 with the
-  never-visited Bull/Bear rows at the uniform 1/3 — set `thresh %`
-  near the data's typical move (e.g. 0.05), or enable the **auto**
-  checkbox: the threshold is then derived per series as 3× the median
-  |close-to-close return| over the loaded slice (median, not mean —
-  spikes inflate the mean; sampled, ≤4096 points). The ×3 factor
-  reproduced the grid-searched optima on sim1 for both 1H (0.64 vs 1.0)
-  and Daily (4.95 vs 5.0) and scales automatically across timeframes.
-  The transition matrix is
-  drawn as a **3x3 panel under the cursor tableau** (rows = current
-  state at the cursor candle, cols = next-bar probabilities, diagonal
-  = the "stickiness" of each state, cell heat = probability), and the
-  **rolling surprise** (how wrong the estimate just was, normalized by
-  the uniform-model loss ln 3) as a magenta bottom band on the chart: a
+  from the **SUM of the last `period` returns ending at it** (partial
+  sum while the window fills — every bar from bar 1 on is classifiable,
+  e.g. bar 3 sums returns [1..3]): sum ≥ `thresh %` → Bull, ≤ −thresh →
+  Bear, else Sideways. A run of moderate up-moves (`+2%` every bar)
+  reads as one Bull state — something no per-bar spike classifier can
+  express. Because the sums are near-Gaussian, the meaningful threshold
+  is ~4–9× the median |sum| (`auto x` spin, default 3, is on the low
+  side): on sim1 the walk-forward optima are th≈8 (1H) and th≈30
+  (Daily), e.g. Daily at th=30 scores log-loss 0.12 / accuracy 0.96 vs
+  uniform 1.10. Window-sum states persist ~`period` bars by
+  construction — expect a strong matrix diagonal (sticky trends) and
+  transitions at threshold crossings. The transition matrix is drawn as
+  a **3x3 panel under the cursor tableau** (rows = current state at the
+  cursor candle, cols = next-bar probabilities, diagonal = the
+  "stickiness" of each state, cell heat = probability), plus a `BS
+  a/b/c` line (the window's state mix) with the bar's change % to the
+  previous one, and `S` (the rolling surprise). The **rolling
+  surprise** (how wrong the estimate just was, normalized by the
+  uniform-model loss ln 3) is a magenta bottom band on the chart: a
   sustained high band means the Markov assumption broke — a regime
-  change. Params: `period` = the BSBP rolling window, `surp` = the
-  rolling-surprise window, `thresh %` = the state threshold. The same
-  surprise also shortens the matrix's memory adaptively (see below).
-  Cursor: `MKV [200]` panel + `S 0.71` under the matrix.
+  change. Params: `period` = the window (classification + BSBP), `surp`
+  = the rolling-surprise window, `thresh %` / `auto` + `auto x` = the
+  threshold. The same surprise also shortens the matrix's memory
+  adaptively (see below). Cursor: `MKV [200]` panel + `BS ...` +
+  `S 0.71`.
 
 ### MKV internals (developer notes)
 
@@ -212,8 +214,19 @@ during warm-up / outside the indicator's range.
 per bar: `[bsbpBull, bsbpSw, bsbpBear, t00..t22 row-major, surprise,
 rolling surprise, lambda]`.
 
-1. **Classification** — state of bar i from `(close[i]/close[i−1] − 1)·100`
-   against ±thresh. States exist from bar 1, transitions from bar 2.
+1. **Classification** — `statesOf`: state of bar i from the SUM of the
+   last `period` close-to-close returns (percent) ending at it,
+   `s_i = Σ r` over `[i−period+1 .. i]` via prefix sums; PARTIAL while
+   i < period (every bar from bar 1 on is classifiable; bar 3 sums
+   returns [1..3]). ≥ thresh → Bull, < −thresh → Bear (exactly ±thresh
+   is Sideways), else Sideways. Transitions exist from bar 2.
+   **The FFI takes pre-classified states, not closes** (`sim_markov`
+   states array): the widget computes the states once for the WHOLE
+   loaded slice (`_mkv_states_ensure`), so the classification is EXACT
+   for any subslice — letting the FFI classify a subslice truncated the
+   window sums at the slice edge (the first `period` bars of every
+   cache fill got wrong states; bar 500 read all-Sideways in a real
+   trend).
 2. **BSBP** — plain rolling state histogram over the last `period` bars,
    O(1) sliding counts like KS; NaN until the window fills.
 3. **Adaptive transition counts** — decayed counts `C ← λ·C + 1` on the
@@ -233,13 +246,15 @@ rolling surprise, lambda]`.
 The matrix and surprise chain are **path-dependent**: they restart from
 a uniform prior at the start of the loaded slice, so values on
 store-backed series are relative to the current window slide (the cache
-key carries `win_off`); BSBP alone is purely window-local. The t+k
-forecast `Tᵏ·e_state` is a trivial client-side operation on the cached
-matrix and is not drawn yet. Tests: 9 QuickCheck props (fixed-λ
-geometric-weight reference against an independent list implementation,
+key carries `win_off`); classification (states) and BSBP are exact
+window-local quantities. The t+k forecast `Tᵏ·e_state` is a trivial
+client-side operation on the cached matrix and is not drawn yet.
+Tests: 13 QuickCheck props (window-sum BSBP against an independent
+prefix-sum reference, fixed-λ geometric-weight matrix reference,
 uniform-prior first surprise = ln 3, λ at ceiling on a persistent
-regime, λ shrinkage on near-random states, warm-up/NaN layout), plus
-headless FFI and widget tests.
+regime, λ shrinkage on sign-alternating random magnitudes, partial-
+window classification from bar 1, closes-vs-states entry-point
+equivalence, warm-up/NaN layout), plus headless FFI and widget tests.
 
 ### CECP internals (developer notes)
 

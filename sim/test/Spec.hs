@@ -5,7 +5,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.ByteString.Builder (doubleLE, toLazyByteString, word32LE, word64LE)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (sort, sortOn)
+import Data.List (scanl', sort, sortOn)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
@@ -20,7 +20,7 @@ import Sim.GenH (runSimH)
 import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import qualified Sim.Markov as MKV
-import Sim.Markov (MClass (..), MarkovParams (..), defaultMarkovParams, markovSeries)
+import Sim.Markov (MClass (..), MarkovParams (..), defaultMarkovParams, markovSeries, markovSeriesStates, statesOf)
 import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Model as MLM
 import qualified Sim.ML.Train as MLT
@@ -845,12 +845,28 @@ prop_mkv_output_length =
 pricesFrom :: [Double] -> [Double]
 pricesFrom rs = scanl (\c r -> c * (1 + r / 100)) 100 rs
 
+-- the classification series: per-bar states (0/1/2) of bars 1..n-1 from
+-- the SUM of the last `win` returns ending at each bar (partial while
+-- the window fills) — the independent reference for the BSBP props
+mkvStates :: Int -> Double -> [Double] -> [Int]
+mkvStates win th xs = map stOf [1 .. n - 1]
+  where
+  n = length xs
+  rs = [((xs !! k) / (xs !! (k - 1)) - 1) * 100 | k <- [1 .. n - 1]]
+  pres = scanl' (+) 0 rs
+  stOf i =
+    let s = pres !! i - pres !! max 0 (i - win)
+    in case MKV.classify th s of
+         MBull -> 0
+         MSw -> 1
+         MBear -> 2
+
 -- BSBP block at bar i = the state histogram of bars [i-win+1 .. i]
 mkvBsbpRef :: Int -> Double -> [Double] -> Int -> [Double]
 mkvBsbpRef win th xs i =
-  let sts = [MKV.classify th (((xs !! k) / (xs !! (k - 1)) - 1) * 100) | k <- [i - win + 1 .. i]]
+  let sts = take win (drop (i - win) (mkvStates win th xs))
       count s = fromIntegral (length (filter (== s) sts)) / fromIntegral win
-  in map count [MBull, MSw, MBear]
+  in map count [0, 1, 2]
 
 prop_mkv_bsbp_matches_window :: Bool
 prop_mkv_bsbp_matches_window =
@@ -879,16 +895,13 @@ mkvMatrixRef lam sts =
       -- never-visited state: uniform fallback, like the module
   in map (\row -> let s = sum row in if s > 0 then map (/ s) row else replicate 3 (1 / 3)) rows
 
-prop_mkv_fixed_lambda_matrix :: Bool
-prop_mkv_fixed_lambda_matrix =
-  let xs = take 120 (pricesFrom (cycle [6, -6]))
-      p = defaultMarkovParams { mpLamHi = 0.9, mpLamLo = 0.9, mpSRef = 1e9 }
+prop_mkv_lambda_matrix :: Bool
+prop_mkv_lambda_matrix =
+  let xs = take 120 (pricesFrom (replicate 60 6 ++ replicate 60 (-6)))
+      p = defaultMarkovParams { mpWin = 10, mpLamHi = 0.9, mpLamLo = 0.9, mpSRef = 1e9 }
       out = markovSeries p xs
-      sts = [MKV.classify (mpThresh p) (((xs !! k) / (xs !! (k - 1)) - 1) * 100) | k <- [1 .. length xs - 1]]
-      ref = concat (mkvMatrixRef 0.9 (map f sts))
-      f MBull = 0
-      f MSw = 1
-      f MBear = 2
+      sts = mkvStates (mpWin p) (mpThresh p) xs
+      ref = concat (mkvMatrixRef 0.9 sts)
       got = take 9 (drop 3 (mkvBlock out (length xs - 1)))
   in all (\(a, b) -> abs (a - b) < 1e-12) (zip got ref)
 
@@ -910,10 +923,18 @@ prop_mkv_sticky_regime_lambda_max =
 
 -- near-random states keep the rolling surprise above the reference, so the
 -- adaptive memory shrinks below the ceiling
+-- window sums are positively autocorrelated (overlapping windows), so
+-- iid returns would look self-similar and drive the surprise DOWN. to
+-- keep the estimate wrong, use sign-alternating returns with random
+-- magnitudes: with window 2 the sum is (m_i - m_{i-1}), its sign
+-- unpredictable even after learning the marginals -> sustained surprise
+-- -> lambda below the ceiling
 prop_mkv_random_states_lambda_shrinks :: Bool
 prop_mkv_random_states_lambda_shrinks =
-  let xs = take 800 (pricesFrom (map (* 0.05) lcgNoise))
-      p = defaultMarkovParams { mpThresh = 0.01 }
+  let mags = map (\x -> 0.02 + 0.06 * abs x) lcgNoise
+      rs = zipWith (\alt m -> (if alt then 1 else -1) * m) (cycle [True, False]) mags
+      xs = take 800 (pricesFrom rs)
+      p = defaultMarkovParams { mpWin = 2, mpThresh = 0.01 }
       out = markovSeries p xs
       lam = mkvBlock out 799 !! 14
   in lam < mpLamHi p - 1e-6 && lam >= mpLamLo p - 1e-12
@@ -953,6 +974,61 @@ prop_mkv_warmup =
      && all (not . isNaN) (take 3 (mkvBlock out 20))
      && all isNaN (markovSeries p (take 1 xs))
      && null (markovSeries p [])
+
+-- the closes-based entry point and the states-based one (the FFI path:
+-- the caller classifies the whole slice, the chain runs on the subsliced
+-- states) must agree when given the same full series
+prop_mkv_states_path_matches_closes :: Bool
+prop_mkv_states_path_matches_closes =
+  let xs = take 200 (pricesFrom (cycle [2, -1, 3, -2, 1, 0.5]))
+      p = defaultMarkovParams { mpWin = 7 }
+      a = markovSeries p xs
+      b = markovSeriesStates p (statesOf p xs)
+  in length a == length b && all (\(x, y) -> (isNaN x && isNaN y) || x == y) (zip a b)
+
+-- --- MKV window-sum classification ------------------------------------------
+
+-- every bar is classifiable from bar 1: the window sum is PARTIAL while
+-- it fills. returns [3,3,3,...] give sums 3 (Sw), 6 (Bu), 9 (Bu) — the
+-- first transition lands at bar 2 like any other state sequence
+prop_mkv_partial_window :: Bool
+prop_mkv_partial_window =
+  let xs = take 10 (pricesFrom (repeat 3.0))
+      p = defaultMarkovParams { mpWin = 3, mpThresh = 5.0 }
+      out = markovSeries p xs
+      closeTo a b = abs (a - b) < 1e-12
+      b3 = take 3 (mkvBlock out 3)
+  in all (not . isNaN) (take 3 (drop 3 (mkvBlock out 2)))
+     && closeTo (b3 !! 0) (2 / 3) && closeTo (b3 !! 1) (1 / 3) && closeTo (b3 !! 2) 0.0
+
+-- the state of bar i comes from the SUM of the last mpWin returns ending
+-- at it (partial while filling): returns [3,3,3,-3,-3,-3,3,3,3] with
+-- window 3 and thresh 5 give window sums 3, 6, 9, 3, -3, -9, -3, 3, 9 ->
+-- Sw, Bu, Bu, Sw, Sw, Be, Sw, Sw, Bu
+prop_mkv_drift_states :: Bool
+prop_mkv_drift_states =
+  let xs = pricesFrom [3, 3, 3, -3, -3, -3, 3, 3, 3]
+      p = defaultMarkovParams { mpWin = 3, mpThresh = 5.0 }
+      out = markovSeries p xs
+      closeTo a b = abs (a - b) < 1e-12
+      b5 = take 3 (mkvBlock out 5)
+      b9 = take 3 (mkvBlock out 9)
+      -- bars 3..5: Bu, Sw, Sw
+  in length xs == 10
+     && closeTo (b5 !! 0) (1 / 3) && closeTo (b5 !! 1) (2 / 3) && closeTo (b5 !! 2) 0.0
+     -- bars 7..9: Sw, Sw, Bu
+     && closeTo (b9 !! 0) (1 / 3) && closeTo (b9 !! 1) (2 / 3) && closeTo (b9 !! 2) 0.0
+
+-- a moderate up-trend (each bar +2%, individually below a 5% threshold)
+-- reads as Bull once the partial sums cross it: sums 2, 4, 6, 8, ... ->
+-- Sw, Sw, Bu, Bu, ...; by bar 29 the window is all Bull
+prop_mkv_trend_states :: Bool
+prop_mkv_trend_states =
+  let xs = take 30 (pricesFrom (repeat 2.0))
+      out = markovSeries (defaultMarkovParams { mpWin = 5, mpThresh = 5.0 }) xs
+  in mkvBlock out 29 !! 3 == 1.0
+     && mkvBlock out 29 !! 0 == 1.0
+     && mkvBlock out 29 !! 1 == 0.0
 
 -- endpoint weighting must pin the fit to the first candle: with a spike
 -- at t=0 plain LS absorbs only a fraction of it, weighted LS (edgeW
@@ -1446,12 +1522,16 @@ props =
   , ("mkv_classify_boundaries", property prop_mkv_classify_boundaries)
   , ("mkv_output_length", property prop_mkv_output_length)
   , ("mkv_bsbp_matches_window", property prop_mkv_bsbp_matches_window)
-  , ("mkv_fixed_lambda_matrix", property prop_mkv_fixed_lambda_matrix)
+  , ("mkv_lambda_matrix", property prop_mkv_lambda_matrix)
   , ("mkv_first_surprise_uniform_prior", property prop_mkv_first_surprise_uniform_prior)
   , ("mkv_sticky_regime_lambda_max", property prop_mkv_sticky_regime_lambda_max)
   , ("mkv_random_states_lambda_shrinks", property prop_mkv_random_states_lambda_shrinks)
   , ("mkv_invariants", property prop_mkv_invariants)
   , ("mkv_warmup", property prop_mkv_warmup)
+  , ("mkv_partial_window", property prop_mkv_partial_window)
+  , ("mkv_states_path_matches_closes", property prop_mkv_states_path_matches_closes)
+  , ("mkv_drift_states", property prop_mkv_drift_states)
+  , ("mkv_trend_states", property prop_mkv_trend_states)
   , ("ml_parse_bars_sim_csv", property prop_ml_parse_bars_sim_csv)
   , ("ml_parse_bars_timestamped", property prop_ml_parse_bars_timestamped)
   , ("ml_parse_bars_garbage", property prop_ml_parse_bars_garbage)

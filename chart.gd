@@ -481,7 +481,7 @@ func _build_indicator_row(i: int) -> void:
 	if ind.kind == "MKV":
 		var auto := CheckBox.new()
 		auto.text = "auto"
-		auto.tooltip_text = "auto-calibrate thresh as 3x the median |return| of the loaded slice"
+		auto.tooltip_text = "auto-calibrate thresh as auto-mult x the median |window sum| of the loaded slice"
 		auto.button_pressed = ind.auto_thresh
 		auto.toggled.connect(_on_menu_mkv_auto.bind(i))
 		row.add_child(auto)
@@ -507,6 +507,7 @@ func _build_indicator_row(i: int) -> void:
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 		_add_spin(grid, "surp", ind.surp, _on_menu_mkv_surp.bind(i))
 		_add_spin(grid, "thresh %", ind.thresh, _on_menu_mkv_thresh.bind(i), 0.01)
+		_add_spin(grid, "auto x", ind.auto_mult, _on_menu_mkv_auto_mult.bind(i), 0.5, 30.0)
 	elif ind.kind == "OBVOL":
 		_add_spin(grid, "bucket", ind.bucket, _on_menu_obvol_bucket.bind(i), 0.00001)
 	else:
@@ -714,6 +715,12 @@ func _on_menu_mkv_thresh(v: float, i: int) -> void:
 func _on_menu_mkv_auto(on: bool, i: int) -> void:
 	if i < indicator_widget.indicators.size():
 		indicator_widget.indicators[i].auto_thresh = on
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_mkv_auto_mult(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].auto_mult = clampf(v, 0.5, 30.0)
 		_sync_indicator_hud()
 		_refresh()
 

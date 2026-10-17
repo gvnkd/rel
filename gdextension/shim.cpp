@@ -2,6 +2,7 @@
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_float64_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 
 #include <cstdlib>
@@ -23,7 +24,7 @@ extern "C" int sim_fft_forecast(const double *closes, int count, int start, int 
 extern "C" int sim_fft_best(const double *closes, int count, int predict, int rmse_pct, double *out);
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
 extern "C" int sim_cecp(const double *closes, int count, int window, int m, double *out);
-extern "C" int sim_markov(const double *closes, int count, int window, int surpwin, double thresh, double lam_hi, double lam_lo, double s_ref, double k, double *out);
+extern "C" int sim_markov(const int *states, int count, int window, int surpwin, double lam_hi, double lam_lo, double s_ref, double k, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -50,7 +51,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves", "edge_w"), &SimNative::fft_forecast);
 		godot::ClassDB::bind_method(godot::D_METHOD("perm_entropy", "closes", "window", "m"), &SimNative::perm_entropy);
 		godot::ClassDB::bind_method(godot::D_METHOD("cecp", "closes", "window", "m"), &SimNative::cecp);
-		godot::ClassDB::bind_method(godot::D_METHOD("markov", "closes", "window", "surpwin", "thresh", "lam_hi", "lam_lo", "s_ref", "k"), &SimNative::markov);
+		godot::ClassDB::bind_method(godot::D_METHOD("markov", "states", "window", "surpwin", "lam_hi", "lam_lo", "s_ref", "k"), &SimNative::markov);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_train", "params"), &SimNative::ml_train);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_progress"), &SimNative::ml_progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_sessions"), &SimNative::ml_sessions);
@@ -167,15 +168,18 @@ public:
 		return out;
 	}
 
-	// Bull-Sideways-Bear probabilities + adaptive Markov matrix: 15 doubles
-	// per bar — [bsbp x3, transition matrix row-major x9, surprise, rolling
-	// surprise, lambda]
-	godot::PackedFloat64Array markov(const godot::PackedFloat64Array &closes, int64_t window, int64_t surpwin, double thresh, double lam_hi, double lam_lo, double s_ref, double k) {
+	// Bull-Sideways-Bear probabilities + adaptive Markov matrix over
+	// PRE-CLASSIFIED states (one per slice bar, 0 Bu / 1 SW / 2 Be, index
+	// 0 a dummy): 15 doubles per bar — [bsbp x3, transition matrix
+	// row-major x9, surprise, rolling surprise, lambda]. The caller
+	// classifies the whole loaded slice so the states are exact for any
+	// subslice; only the count/surprise chain restarts at the slice start
+	godot::PackedFloat64Array markov(const godot::PackedInt32Array &states, int64_t window, int64_t surpwin, double lam_hi, double lam_lo, double s_ref, double k) {
 		godot::PackedFloat64Array out;
-		if (closes.is_empty() || window < 1 || surpwin < 1)
+		if (states.is_empty() || window < 1 || surpwin < 1)
 			return out;
-		out.resize(15 * (int)closes.size());
-		int got = sim_markov(closes.ptr(), (int)closes.size(), (int)window, (int)surpwin, thresh, lam_hi, lam_lo, s_ref, k, out.ptrw());
+		out.resize(15 * (int)states.size());
+		int got = sim_markov(states.ptr(), (int)states.size(), (int)window, (int)surpwin, lam_hi, lam_lo, s_ref, k, out.ptrw());
 		out.resize(got < 0 ? 0 : got);
 		return out;
 	}
