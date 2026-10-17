@@ -315,11 +315,14 @@ func _draw_cecp(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	draw_string(font, Vector2(r.position.x + r.size.x * 0.5 - 20, r.position.y + 13), "chaotic", HORIZONTAL_ALIGNMENT_LEFT, 80.0, 10, dim)
 
 # Bull-Sideways-Bear Markov indicator: the transition matrix itself is
-# rendered as a 3x3 panel under the cursor tableau (cursor_widget), here
-# only the rolling surprise (mean log-loss of the previous bar's estimate
-# vs reality, normalized by the uniform-model loss ln 3) is drawn — a
-# translucent bottom band; a high surprise means the Markov assumption
-# just broke (regime change), it also drives the adaptive decay (lambda)
+# rendered as a 3x3 panel under the cursor tableau (cursor_widget). Here
+# the chart gets (1) bull/bear regime strips — the window-sum state of
+# each bar tints its whole plot column in the series up/down hues, so the
+# trend background is visible behind the candles — and (2) the rolling
+# surprise (mean log-loss of the previous bar's estimate vs reality,
+# normalized by the uniform-model loss ln 3) as a translucent bottom
+# band; a high surprise means the Markov assumption just broke (regime
+# change), it also drives the adaptive decay (lambda)
 func _draw_mkv(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	var n: int = s.size()
 	if n < 2:
@@ -331,6 +334,17 @@ func _draw_mkv(ind: Indicator, s: PlotData.Series, k: int) -> void:
 		return
 	var c := _cache_for(ind, s)
 	var r := overlay_rect()
+	# regime strips from the per-bar classification states (cached for
+	# the whole slice — exact for any subslice); Sideways stays clear
+	for i in range(i0, i1 + 1):
+		if i < s.win_off or i - s.win_off >= c.states.size():
+			continue
+		var stt: int = c.states[i - s.win_off]
+		if stt == 1:
+			continue
+		var col: Color = s.col_pos if stt == 0 else s.col_neg
+		col.a = 0.09
+		draw_rect(Rect2(view.index_to_x(i), r.position.y, maxf(view.px_per_index, 1.0), r.size.y), col)
 	var ln3 := log(3.0)
 	for i in range(i0, i1 + 1):
 		if i < c.vals_off or i - c.vals_off >= c.vals.size() / 15:
