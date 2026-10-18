@@ -986,6 +986,57 @@ prop_mkv_states_path_matches_closes =
       b = markovSeriesStates p (statesOf p xs)
   in length a == length b && all (\(x, y) -> (isNaN x && isNaN y) || x == y) (zip a b)
 
+-- --- MKV weighted window mode -----------------------------------------------
+
+-- naive per-bar weighted sum (explicit weights list) — the independent
+-- reference for the prefix-sum formulation
+naiveWeightedStates :: Int -> Double -> [Double] -> [Int]
+naiveWeightedStates win th xs = [f i | i <- [1 .. n - 1]]
+  where
+  n = length xs
+  ret i = ((xs !! i) / (xs !! (i - 1)) - 1) * 100
+  f i =
+    let lo = max 1 (i - win + 1)
+        cnt = i - lo + 1
+        ws = [fromIntegral (j - lo + 1) * 2 / fromIntegral (cnt + 1) | j <- [lo .. i]]
+        s = sum (zipWith (*) ws (map ret [lo .. i]))
+    in case MKV.classify th s of
+         MBull -> 0
+         MSw -> 1
+         MBear -> 2
+
+-- the module's weighted states (via the BSBP block of markovSeries)
+-- match the naive reference; and equal returns give the same sums as
+-- the plain window (scale preservation), so both modes classify a
+-- constant-move series identically
+prop_mkv_weighted_matches_naive :: Bool
+prop_mkv_weighted_matches_naive =
+  let xs = take 200 (pricesFrom (cycle [3, -1, 2, -2, 4, -3]))
+      win = 9
+      th = 5.0
+      pw = defaultMarkovParams { mpWin = win, mpThresh = th, mpWeighted = True }
+      outW = markovSeries pw xs
+      ref = markovSeriesStates pw (VU.fromList (1 : naiveWeightedStates win th xs))
+      same = all (\(x, y) -> (isNaN x && isNaN y) || x == y) (zip outW ref)
+      flat = take 40 (pricesFrom (repeat 2.0))
+      p = defaultMarkovParams { mpWin = 5, mpThresh = 5.0 }
+      a = markovSeries p flat
+      b = markovSeries (p { mpWeighted = True }) flat
+  in same
+     && all (\(x, y) -> (isNaN x && isNaN y) || x == y) (zip a b)
+
+-- recency: one +50% move at bar 1, flat after. Plain window keeps the
+-- move alive for `win` bars (sum 50 -> Bull at bar 20); the weighted
+-- window fades it (50 * 2/21 < 5 -> Sideways at bar 20)
+prop_mkv_weighted_recency :: Bool
+prop_mkv_weighted_recency =
+  let xs = pricesFrom (50 : replicate 29 0.0)
+      p = defaultMarkovParams { mpWin = 20, mpThresh = 5.0 }
+      plain = markovSeries p xs
+      wtd = markovSeries (p { mpWeighted = True }) xs
+  in take 3 (mkvBlock plain 20) == [1.0, 0.0, 0.0]
+     && take 3 (mkvBlock wtd 20) == [0.95, 0.05, 0.0]
+
 -- --- MKV window-sum classification ------------------------------------------
 
 -- every bar is classifiable from bar 1: the window sum is PARTIAL while
@@ -1530,6 +1581,8 @@ props =
   , ("mkv_warmup", property prop_mkv_warmup)
   , ("mkv_partial_window", property prop_mkv_partial_window)
   , ("mkv_states_path_matches_closes", property prop_mkv_states_path_matches_closes)
+  , ("mkv_weighted_matches_naive", property prop_mkv_weighted_matches_naive)
+  , ("mkv_weighted_recency", property prop_mkv_weighted_recency)
   , ("mkv_drift_states", property prop_mkv_drift_states)
   , ("mkv_trend_states", property prop_mkv_trend_states)
   , ("ml_parse_bars_sim_csv", property prop_ml_parse_bars_sim_csv)

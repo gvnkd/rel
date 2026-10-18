@@ -332,7 +332,7 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 	if ind.kind == "OBVOL":
 		return "OBVOL %s%s" % ["snap" if ind.obvol_mode == 1 else "life", " b%.4f" % ind.bucket if ind.bucket > 0.0 else ""]
 	if ind.kind == "MKV":
-		return "MKV (%d, s%d, t%s)" % [ind.period, ind.surp, "auto" if ind.auto_thresh else "%.3g" % ind.thresh]
+		return "MKV (%d, s%d, t%s%s)" % [ind.period, ind.surp, "auto" if ind.auto_thresh else "%.3g" % ind.thresh, " w" if ind.weighted else ""]
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -485,6 +485,12 @@ func _build_indicator_row(i: int) -> void:
 		auto.button_pressed = ind.auto_thresh
 		auto.toggled.connect(_on_menu_mkv_auto.bind(i))
 		row.add_child(auto)
+		var w := CheckBox.new()
+		w.text = "w"
+		w.tooltip_text = "weighted window: linear recency ramp (newest bar ~2x the oldest), scale-preserving"
+		w.button_pressed = ind.weighted
+		w.toggled.connect(_on_menu_mkv_weighted.bind(i))
+		row.add_child(w)
 	var del := Button.new()
 	del.text = "x"
 	del.tooltip_text = "delete"
@@ -715,6 +721,12 @@ func _on_menu_mkv_thresh(v: float, i: int) -> void:
 func _on_menu_mkv_auto(on: bool, i: int) -> void:
 	if i < indicator_widget.indicators.size():
 		indicator_widget.indicators[i].auto_thresh = on
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_mkv_weighted(on: bool, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].weighted = on
 		_sync_indicator_hud()
 		_refresh()
 

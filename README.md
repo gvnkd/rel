@@ -206,7 +206,11 @@ during warm-up / outside the indicator's range.
   bar draws a deviation band anchored at the plot's midline (Bull up,
   Bear down) with height proportional to the |window sum| — full height
   at 4× the threshold — in fixed bull-green / bear-red hues, so both the
-  regime and its strength read behind the candles. Params: `period` = the window (classification + BSBP), `surp`
+  regime   and its strength read behind the candles. The **w** checkbox switches the
+  window to a linear recency ramp (newest bar ~2× the oldest), normalized
+  scale-preserving (equal returns give the same sum as the plain window,
+  so the threshold stays comparable) — an old spike fades within the
+  window instead of dominating it. Params: `period` = the window (classification + BSBP), `surp`
   = the rolling-surprise window, `thresh %` / `auto` + `auto x` = the
   threshold. The same surprise also shortens the matrix's memory
   adaptively (see below). Cursor: `MKV [200]` panel + `BS ...` +
@@ -222,8 +226,13 @@ rolling surprise, lambda]`.
    last `period` close-to-close returns (percent) ending at it,
    `s_i = Σ r` over `[i−period+1 .. i]` via prefix sums; PARTIAL while
    i < period (every bar from bar 1 on is classifiable; bar 3 sums
-   returns [1..3]). ≥ thresh → Bull, < −thresh → Bear (exactly ±thresh
-   is Sideways), else Sideways. Transitions exist from bar 2.
+   returns [1..3]). `mpWeighted`: linear recency ramp, weight
+   `(j−lo+1)·2/(cnt+1)` on return j — scale-preserving (equal returns
+   give `cnt·r`, the plain-sum scale, so the threshold stays
+   comparable). Implemented O(1)-per-bar in GDScript via two running
+   sums: `s = (Σj·rⱼ − (lo−1)·Σrⱼ)·2/(cnt+1)`; in Haskell via a second
+   prefix sum. ≥ thresh → Bull, < −thresh → Bear (exactly ±thresh is
+   Sideways), else Sideways. Transitions exist from bar 2.
    **The FFI takes pre-classified states, not closes** (`sim_markov`
    states array): the widget computes the states once for the WHOLE
    loaded slice (`_mkv_states_ensure`), so the classification is EXACT
@@ -253,8 +262,9 @@ store-backed series are relative to the current window slide (the cache
 key carries `win_off`); classification (states) and BSBP are exact
 window-local quantities. The t+k forecast `Tᵏ·e_state` is a trivial
 client-side operation on the cached matrix and is not drawn yet.
-Tests: 13 QuickCheck props (window-sum BSBP against an independent
-prefix-sum reference, fixed-λ geometric-weight matrix reference,
+Tests: 15 QuickCheck props (window-sum BSBP against an independent
+prefix-sum reference, weighted-vs-naive equivalence + recency fade,
+fixed-λ geometric-weight matrix reference,
 uniform-prior first surprise = ln 3, λ at ceiling on a persistent
 regime, λ shrinkage on sign-alternating random magnitudes, partial-
 window classification from bar 1, closes-vs-states entry-point

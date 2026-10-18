@@ -159,7 +159,9 @@ simMarkov ptr (CInt count) (CInt win) (CInt surpWin) (CDouble lamHi) (CDouble la
   | count <= 0 || win <= 0 = pure 0
   | otherwise = do
       sts <- peekArray (fromIntegral count) ptr
-      let mp = MarkovParams (fromIntegral win) (fromIntegral surpWin) 5.0 lamHi lamLo sRef k
+      -- mpWeighted is irrelevant here: the caller classifies (states
+      -- arrive pre-computed), only the chain params matter
+      let mp = MarkovParams (fromIntegral win) (fromIntegral surpWin) 5.0 lamHi lamLo sRef k False
           vals = markovSeriesStates mp (VU.fromList (map (\(CInt x) -> fromIntegral x) sts))
       if length vals /= 15 * fromIntegral count
         then pure 0

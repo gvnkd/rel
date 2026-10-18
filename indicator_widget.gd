@@ -24,6 +24,9 @@ class Indicator:
 	# original fit for per-bar returns; window sums are near-Gaussian and
 	# want 4-9x — tune live)
 	var auto_mult := 3.0
+	# weighted window: linear recency ramp inside the window (newest bar
+	# ~2x the oldest), scale-preserving — the threshold stays comparable
+	var weighted := false
 	var locked := false
 	var opt_score := -1.0
 	# OBVOL: price bucket size in display units; 0 = exact price levels.
@@ -755,7 +758,8 @@ func _mkv_states_ensure(ind: Indicator, s: PlotData.Series, th: float) -> bool:
 	var base := s.win_off
 	var hi := base + s.candles.size()
 	var c := _cache_for(ind, s)
-	var key := "%d:%d:%f:%d:%d" % [data.series.find(s), ind.period, th, hi, base]
+	# note: %d rejects booleans in Redot's format — cast the flag
+	var key := "%d:%d:%f:%d:%d:%d" % [data.series.find(s), ind.period, th, int(ind.weighted), hi, base]
 	if key == c.states_key:
 		return c.states.size() == hi - base
 	if hi - base < 2:
@@ -769,13 +773,28 @@ func _mkv_states_ensure(ind: Indicator, s: PlotData.Series, th: float) -> bool:
 	st[0] = 1
 	sm[0] = 0.0
 	var ssum := 0.0
+	# weighted mode: two running sums give the recency-weighted window in
+	# O(1) per bar — weight (j - lo + 1) on return j, normalized by
+	# 2/(cnt+1) so equal returns give the same sum as the plain window
+	var rsum := 0.0
+	var jsum := 0.0
 	var k := base + 1
 	var j := 1
 	while k < hi:
-		ssum += (s.candle_at(k).close / s.candle_at(k - 1).close - 1.0) * 100.0
+		var rv := (s.candle_at(k).close / s.candle_at(k - 1).close - 1.0) * 100.0
+		ssum += rv
+		rsum += rv
+		jsum += float(k) * rv
 		# keep only the last `period` returns in the window
 		if j > ind.period:
-			ssum -= (s.candle_at(k - ind.period).close / s.candle_at(k - ind.period - 1).close - 1.0) * 100.0
+			var ro := (s.candle_at(k - ind.period).close / s.candle_at(k - ind.period - 1).close - 1.0) * 100.0
+			ssum -= ro
+			rsum -= ro
+			jsum -= float(k - ind.period) * ro
+		if ind.weighted:
+			var lo := maxi(base + 1, k - ind.period + 1)
+			var cnt := k - lo + 1
+			ssum = (jsum - float(lo - 1) * rsum) * 2.0 / (cnt + 1)
 		st[j] = 0 if ssum >= th else (2 if ssum < -th else 1)
 		sm[j] = ssum
 		k += 1
@@ -804,7 +823,7 @@ func _mkv_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
 			th = ta
 	# note: %d rejects booleans in Redot's format — cast the flag
 	var c := _cache_for(ind, s)
-	var key := "%d:%d:%d:%d:%f:%f:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.surp, int(ind.auto_thresh), th, ind.auto_mult, n, s.win_off, lo, i1]
+	var key := "%d:%d:%d:%d:%d:%f:%f:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.surp, int(ind.auto_thresh), int(ind.weighted), th, ind.auto_mult, n, s.win_off, lo, i1]
 	if key == c.cache_key:
 		return not c.vals.is_empty()
 	if not _ensure_sim():
@@ -845,8 +864,14 @@ func _mkv_auto_thresh(ind: Indicator, s: PlotData.Series) -> float:
 		# defined): partial sums are a different scale
 		if k - ind.period >= s.win_off:
 			var ssum := 0.0
-			for j in range(k - ind.period + 1, k + 1):
-				ssum += (s.candle_at(j).close / s.candle_at(j - 1).close - 1.0) * 100.0
+			if ind.weighted:
+				var wlo := k - ind.period + 1
+				for j in range(wlo, k + 1):
+					ssum += (s.candle_at(j).close / s.candle_at(j - 1).close - 1.0) * 100.0 * float(j - wlo + 1)
+				ssum = ssum * 2.0 / (ind.period + 1)
+			else:
+				for j in range(k - ind.period + 1, k + 1):
+					ssum += (s.candle_at(j).close / s.candle_at(j - 1).close - 1.0) * 100.0
 			samples.append(absf(ssum))
 		k += step
 	if samples.size() < 8:

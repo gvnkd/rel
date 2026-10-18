@@ -66,11 +66,15 @@ data MarkovParams = MarkovParams
   -- ^ surprise reference: log-loss below this keeps lambda at mpLamHi
   , mpK       :: !Double
   -- ^ how fast lambda shrinks as surprise exceeds the reference
+  , mpWeighted :: !Bool
+  -- ^ weight the classification window: linear recency ramp (newest bar
+  -- weighs ~2x the oldest), normalized so equal returns give the same
+  -- sum as the plain window (threshold stays comparable)
   }
   deriving (Show)
 
 defaultMarkovParams :: MarkovParams
-defaultMarkovParams = MarkovParams 20 20 5.0 0.99 0.90 0.55 4.0
+defaultMarkovParams = MarkovParams 20 20 5.0 0.99 0.90 0.55 4.0 False
 
 -- clamps FFI/UI input into a workable range: lambda in (0, 1) with
 -- lamLo <= lamHi, non-negative k, positive threshold
@@ -107,8 +111,24 @@ statesOf p0 xs = VU.fromList (1 : [st i | i <- [1 .. n - 1]])
   win = mpWin p
   th = mpThresh p
   ret i = ((v VU.! i) / (v VU.! (i - 1)) - 1) * 100
-  pres = VU.fromList (scanl' (+) 0 [ret j | j <- [1 .. n - 1]])
-  driftAt i = pres VU.! i - pres VU.! max 0 (i - win)
+  rs = [ret j | j <- [1 .. n - 1]]
+  pres1 = VU.fromList (scanl' (+) 0 rs)
+  -- window [lo .. i] of returns, partial at the series start
+  winSum i =
+    let lo = max 1 (i - win + 1)
+    in pres1 VU.! i - pres1 VU.! (lo - 1)
+  driftAt i
+    | not (mpWeighted p) = winSum i
+    | otherwise =
+        -- linear recency ramp: weight (j - lo + 1) on return j, times
+        -- 2/(cnt+1) so equal returns give cnt * r (same scale as the
+        -- plain window sum); via the second prefix sum Σ j*r
+        let lo = max 1 (i - win + 1)
+            cnt = i - lo + 1
+            sr = pres1 VU.! i - pres1 VU.! (lo - 1)
+            sjr = pres2 VU.! i - pres2 VU.! (lo - 1)
+        in (sjr - fromIntegral (lo - 1) * sr) * 2 / fromIntegral (cnt + 1)
+  pres2 = VU.fromList (scanl' (+) 0 [fromIntegral j * ret j | j <- [1 .. n - 1]])
   st i = case classify th (driftAt i) of
     MBull -> 0
     MSw -> 1
