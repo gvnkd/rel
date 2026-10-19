@@ -1,5 +1,8 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 
+import Data.Aeson (Value (..))
+import qualified Data.Aeson.KeyMap as KM
 import Data.Bits (shiftL, shiftR, xor)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -21,6 +24,7 @@ import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import qualified Sim.Markov as MKV
 import Sim.Markov (MClass (..), MarkovParams (..), defaultMarkovParams, markovSeries, markovSeriesStates, statesOf)
+import Sim.Mcp.Tools (paramsFromJson)
 import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Model as MLM
 import qualified Sim.ML.Train as MLT
@@ -1052,6 +1056,49 @@ prop_mkv_partial_window =
   in all (not . isNaN) (take 3 (drop 3 (mkvBlock out 2)))
      && closeTo (b3 !! 0) (2 / 3) && closeTo (b3 !! 1) (1 / 3) && closeTo (b3 !! 2) 0.0
 
+-- --- MCP ------------------------------------------------------------------------
+
+-- underscore JSON keys map to hyphenated CLI keys and scalars render the
+-- way the CLI parser accepts them (integral numbers without decimals)
+prop_mcp_params_json_roundtrip :: Bool
+prop_mcp_params_json_roundtrip =
+  case paramsFromJson obj of
+    Left _   -> False
+    Right p  -> spSeed p == 7
+             && spCandles p == 123
+             && (spOrdersLo p, spOrdersHi p) == (30, 50)
+             && spMode p == ModeTickSteps
+             && spSinus p
+             && spClampRest p
+             && spBookDepth p == 25
+  where
+    obj = Object (KM.fromList
+      [ ("seed", Number 7)
+      , ("candles", Number 123)
+      , ("orders_per_candle", String "30,50")
+      , ("mode", String "tick-steps")
+      , ("sinus", Bool True)
+      , ("clamp_rest", Bool True)
+      , ("book_depth", Number 25)
+      ])
+
+prop_mcp_params_json_bad_mode :: Bool
+prop_mcp_params_json_bad_mode =
+  case paramsFromJson (Object (KM.fromList [("mode", String "nonsense")])) of
+    Left _  -> True
+    Right _ -> False
+
+-- the closes path of the indicator tools: entropy output is one value
+-- per input close
+prop_mcp_perm_entropy_length :: [Double] -> Bool
+prop_mcp_perm_entropy_length ds =
+  let xs = map sanitize (take 200 ds)
+      vals = rollingPermEntropy 10 3 xs
+  in length vals == length xs
+  where
+    sanitize x | isNaN x || isInfinite x = 0
+               | otherwise = x - fromIntegral (floor (abs x / 100)) * 100
+
 -- the state of bar i comes from the SUM of the last mpWin returns ending
 -- at it (partial while filling): returns [3,3,3,-3,-3,-3,3,3,3] with
 -- window 3 and thresh 5 give window sums 3, 6, 9, 3, -3, -9, -3, 3, 9 ->
@@ -1610,4 +1657,7 @@ props =
   , ("dsl_signal_monotone", property prop_dsl_signal_monotone)
   , ("dsl_backtest_fee_ledger", property prop_dsl_backtest_fee_ledger)
   , ("dsl_cross_activation", property prop_dsl_cross_activation)
+  , ("mcp_params_json_roundtrip", property prop_mcp_params_json_roundtrip)
+  , ("mcp_params_json_bad_mode", property prop_mcp_params_json_bad_mode)
+  , ("mcp_perm_entropy_length", property prop_mcp_perm_entropy_length)
   ]

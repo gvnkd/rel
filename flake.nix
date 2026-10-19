@@ -29,6 +29,10 @@
       });
 
       apps = forAllSystems (system: {
+        mcp = {
+          type = "app";
+          program = "${self.packages.${system}.sim}/bin/mcp";
+        };
         link-sim-extension = {
           type = "app";
           program = toString (
@@ -53,7 +57,7 @@
             self.packages.${system}.sim
             nixpkgs.legacyPackages.${system}.gdtoolkit_4
             (nixpkgs.legacyPackages.${system}.haskellPackages.ghcWithPackages (
-              ps: with ps; [ QuickCheck splitmix vector ]
+              ps: with ps; [ QuickCheck aeson directory splitmix vector ]
             ))
           ];
         };

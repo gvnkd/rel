@@ -60,6 +60,7 @@ var _trades_save_dialog: FileDialog
 var _trades_save_idx := -1
 
 func _ready() -> void:
+	_mcp_start()
 	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
 		w.view = view
 		w.data = data
@@ -845,6 +846,7 @@ func _shift_fft_window(ind: IndicatorWidget.Indicator, delta: int) -> void:
 
 
 func _process(delta: float) -> void:
+	_mcp_poll()
 	if not playing or paused:
 		return
 	t_acc += delta * replay_rate
@@ -1476,3 +1478,130 @@ func _levels(parts: PackedStringArray, offset: int) -> Array[Vector2]:
 			out.append(Vector2(px, v))
 		i += 4
 	return out
+
+# --- MCP bridge ---------------------------------------------------------------
+#
+# localhost TCP listener (ephemeral port, written to user://mcp_port) so
+# the `sim mcp` server and agents can talk to a live editor: list/add/
+# remove series, read the view state. One request per JSON line, one
+# reply per JSON line: {"id", "ok", "result"}.
+
+var _mcp_server := TCPServer.new()
+var _mcp_peer: StreamPeerTCP
+var _mcp_buf := ""
+
+func _mcp_start() -> void:
+	if _mcp_server.listen(0, "127.0.0.1") != OK:
+		return
+	var f := FileAccess.open("user://mcp_port", FileAccess.WRITE)
+	if f:
+		f.store_string(str(_mcp_server.get_local_port()))
+		f.close()
+
+func _mcp_poll() -> void:
+	# single-client model: a new connection replaces the previous peer
+	if _mcp_server.is_connection_available():
+		_mcp_peer = _mcp_server.take_connection()
+		_mcp_peer.set_no_delay(true)
+		_mcp_buf = ""
+	if _mcp_peer == null:
+		return
+	if _mcp_peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+		_mcp_peer = null
+		return
+	while _mcp_peer != null and _mcp_peer.get_available_bytes() > 0:
+		var b := _mcp_peer.get_u8()
+		if b == 10:
+			var line := _mcp_buf
+			_mcp_buf = ""
+			_mcp_handle(line)
+		else:
+			_mcp_buf += char(b)
+
+func _mcp_handle(line: String) -> void:
+	var req = JSON.parse_string(line)
+	if typeof(req) != TYPE_DICTIONARY:
+		return
+	_mcp_dispatch_async(req)
+
+# async wrapper: sync ops complete (and reply) inside the call; ops that
+# await (quotes/binary loads) resume and reply when done
+func _mcp_dispatch_async(req: Dictionary) -> void:
+	var result = await _mcp_dispatch(str(req.get("op", "")), req.get("args", {}))
+	_mcp_reply(req.get("id", 0), result)
+
+func _mcp_reply(id: Variant, result: Variant) -> void:
+	if _mcp_peer == null:
+		return
+	var ok := true
+	var payload: Variant = result
+	if typeof(result) == TYPE_DICTIONARY and result.has("_mcp_error"):
+		ok = false
+		payload = result["_mcp_error"]
+	_mcp_peer.put_data((JSON.stringify({"id": id, "ok": ok, "result": payload}) + "\n").to_utf8_buffer())
+
+func _mcp_dispatch(op: String, args: Dictionary) -> Variant:
+	match op:
+		"status":
+			return {
+				"series": data.series.size(),
+				"playing": playing,
+				"paused": paused,
+				"head": head,
+				"max_len": data.max_len(),
+				"follow": view.follow,
+			}
+		"list_series":
+			var out: Array = []
+			for s in data.series:
+				out.append({
+					"name": s.name,
+					"size": s.size(),
+					"tf": s.tf,
+					"store_key": s.store_key,
+					"col_pos": s.col_pos.to_html(),
+				})
+			return out
+		"add_timeline":
+			var path := str(args.get("path", ""))
+			if path.is_empty() or not FileAccess.file_exists(path):
+				return {"_mcp_error": "bad or missing path"}
+			var tl_name := str(args.get("name", path.get_basename().get_file()))
+			var idx: int = await add_timeline(tl_name, path)
+			if idx < 0:
+				return {"_mcp_error": "load failed"}
+			return {"idx": idx, "name": tl_name}
+		"remove_series":
+			var idx2 := _mcp_series_index(args)
+			if idx2 < 0:
+				return {"_mcp_error": "no such series"}
+			remove_timeline(idx2)
+			return {"removed": idx2}
+		"get_view":
+			var vi := view.visible_index_range()
+			var vp := view.visible_price_range()
+			return {
+				"px_per_index": view.px_per_index,
+				"px_per_price": view.px_per_price,
+				"follow": view.follow,
+				"visible_index": [vi.x, vi.y],
+				"visible_price": [vp.x, vp.y],
+				"decimals": view.decimals,
+			}
+		"set_follow":
+			view.follow = bool(args.get("follow", true))
+			return {"follow": view.follow}
+		"pause":
+			paused = bool(args.get("paused", true))
+			return {"paused": paused}
+		_:
+			return {"_mcp_error": "unknown op: " + op}
+
+func _mcp_series_index(args: Dictionary) -> int:
+	if args.has("idx"):
+		return int(args["idx"])
+	var name := str(args.get("name", ""))
+	for i in data.series.size():
+		if data.series[i].name == name:
+			return i
+	return -1

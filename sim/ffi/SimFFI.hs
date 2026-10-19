@@ -1,42 +1,30 @@
 module SimFFI where
 
-import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, catch, fromException, ioError, try)
-import Control.Monad (forM, unless, when)
-import qualified Data.ByteString as B
-import Data.ByteString.Builder (char8, hPutBuilder, word64LE)
+import Control.Monad (forM, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
-import qualified Data.Vector.Unboxed as VU
 import Data.Word (Word64)
+import qualified Data.Vector.Unboxed as VU
 import Foreign.C.String (CString, newCString, peekCString)
 import Foreign.C.Types (CDouble (..), CInt (..))
 import Foreign.Marshal.Array (peekArray, pokeArray)
 import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
-import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
+import Sim.Gen (GenState (..))
 import Sim.Markov (MarkovParams (..), markovSeriesStates)
-import Sim.Gen (GenState (..), initState)
-import Sim.GenH (runSimH)
-import Sim.Lvl (LvlEv, LvlSeg, trFromBook)
 import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Train as MLT
+import qualified Sim.Run as Run
 import Sim.Resume (readState, statePath, writeState)
-import Sim.Sinus (runSimSinusH)
-import qualified Sim.Strat.Backtest as STB
 import qualified Sim.Strat.Dsl as STD
 import qualified Sim.Strat.Optimize as STO
-import qualified Sim.Strat.Rules as STR
-import Sim.TickGenH (runSimTicksH)
-import Sim.Types (Candle, SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
-import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize, removeFile)
-import System.IO (BufferMode (BlockBuffering), Handle, IOMode (AppendMode, ReadWriteMode, WriteMode), SeekMode (AbsoluteSeek, SeekFromEnd), hPutStr, hSeek, hSetBuffering, hSetFileSize, withFile)
-import System.IO.Error (isDoesNotExistError, userError)
-import Text.Printf (printf)
+import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
+import System.Directory (doesFileExist)
+import System.IO.Error (isDoesNotExistError)
 
 -- params are "key=value" pairs separated by ';', keys as in the CLI
 -- without the leading "--" (e.g. "candles=1000;seed=7")
@@ -185,6 +173,12 @@ simProgress = do
 simCancel :: IO ()
 simCancel = writeIORef cancelRef True
 
+simHooks :: SimHooks
+simHooks = SimHooks
+  { hookProgress = \d t -> writeIORef progressRef (d, t)
+  , hookCancelled = readIORef cancelRef
+  }
+
 simGenerate :: CString -> CString -> IO CInt
 simGenerate paramsPtr outPtr = do
   paramsStr <- peekCString paramsPtr
@@ -194,11 +188,11 @@ simGenerate paramsPtr outPtr = do
     Right p -> do
       writeIORef progressRef (0, spCandles p + 1)
       writeIORef cancelRef False
-      result <- try (writeCsv outPath p) :: IO (Either SomeException ())
+      result <- try (Run.generateCsv simHooks outPath p) :: IO (Either SomeException ())
       case result of
         Left err
           | Just SimCancelled <- fromException err -> do
-              cleanup outPath p
+              Run.cleanupOutput outPath p
               pure 3
           | otherwise -> pure 2
         Right _ -> do
@@ -219,14 +213,13 @@ simContinue paramsPtr outPtr = do
           let p = p0 { spCandles = spCandles pForm }
           writeIORef progressRef (0, spCandles p + 1)
           writeIORef cancelRef False
-          readSidecarSize (ticksPath outPath)
-          readLevelsSize (levelsPath outPath)
-          readVevSize (vevPath outPath)
-          result <- try (appendCsv outPath p n gs) :: IO (Either SomeException (GenState, Int))
+          sizes <- Run.newSidecarSizes
+          Run.recordSidecarSizes outPath sizes
+          result <- try (Run.appendCsvRes simHooks outPath p n gs) :: IO (Either SomeException (GenState, Int))
           case result of
             Left err
               | Just SimCancelled <- fromException err -> do
-                  restoreSidecar outPath p
+                  Run.restoreSidecars outPath p sizes
                   pure 3
               | otherwise -> pure 2
             Right (gs', added) -> do
@@ -237,214 +230,6 @@ simContinue paramsPtr outPtr = do
     onMissing e
       | isDoesNotExistError e = pure (Left "no state")
       | otherwise             = ioError e
-
-writeCsv :: FilePath -> SimParams -> IO ()
-writeCsv path p = do
-  write (path ++ ".meta") (metaText p)
-  if spSinus p
-    then do
-      -- sinus output is plain candles: drop stale tick/levels/vev sidecars
-      rm (ticksPath path)
-      rm (levelsPath path)
-      rm (vevPath path)
-      cs <- runSimSinusH simHooks p 0
-      write path (csvText p cs)
-      writeState (statePath path) p (length cs) (initState p)
-    else case spMode p of
-      ModeCandles -> do
-        -- a candles-mode run leaves no sidecar: drop stale ones from an
-        -- earlier same-name tick-mode run, or the UI would load the
-        -- old ticks instead
-        rm (ticksPath path)
-        rm (levelsPath path)
-        rm (vevPath path)
-        (gs, cs) <- runSimH simHooks p (initState p)
-        write path (csvText p cs)
-        writeState (statePath path) p (length cs) gs
-      _           -> do
-        (gs, cs) <- withFile (ticksPath path) WriteMode $ \h -> do
-          hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
-          hPutStr h (tickHeader (spBookDepth p) ++ "\n")
-          withFile (levelsPath path) WriteMode $ \lh -> do
-            hSetBuffering lh (BlockBuffering (Just (1024 * 1024)))
-            hPutStr lh (lvlHeader ++ "\n")
-            withVev (vevPath path) True $ \vh _ -> do
-              (gs', cs', nEv) <- runSimTicksH simHooks (emitTick h) (emitLvlSeg (spPriceScale p) lh vh) p 0 (initState p) tr0
-              patchVevCount vh (fromIntegral nEv)
-              pure (gs', cs')
-        write path (csvText p cs)
-        writeState (statePath path) p (length cs) gs
-  where
-    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
-    write fp s = withFile fp WriteMode $ \h -> hPutStr h s
-    emitTick h t = hPutBuilder h (tickRowB (spPriceScale p) (spBookDepth p) t <> char8 '\n')
-    -- the seed book (start bid/ask) opens its level lifetimes at 0
-    tr0 = trFromBook 0 0 (gsBook (initState p))
-    simHooks = SimHooks
-      { hookProgress = \d t -> writeIORef progressRef (d, t)
-      , hookCancelled = readIORef cancelRef
-      }
-
--- resume from a snapshot: generate more candles with the snapshot's
--- parameters, append the candles rows to the csv (creating it with a
--- header when missing), and stream the tick rows onto the sidecar
--- (creating it with a header when missing). The state snapshot is NOT
--- written here -- only after both files are complete. Returns the final
--- state and how many candles were produced.
-appendCsv :: FilePath -> SimParams -> Int -> GenState -> IO (GenState, Int)
-appendCsv path p done gs0 = do
-  if spSinus p
-    then do
-      rm (ticksPath path)
-      rm (levelsPath path)
-      rm (vevPath path)
-      cs <- runSimSinusH simHooks p done
-      appendCandles path p cs
-      pure (gs0, length cs)
-    else case spMode p of
-      ModeCandles -> do
-        rm (ticksPath path)
-        rm (levelsPath path)
-        rm (vevPath path)
-        (gs, cs) <- runSimH simHooks p gs0
-        appendCandles path p cs
-        pure (gs, length cs)
-      _           -> do
-        exists <- doesFileExist sidecar
-        lexists <- doesFileExist lvls
-        (gs, cs) <- withFile sidecar AppendMode $ \h -> do
-          hSetBuffering h (BlockBuffering (Just (1024 * 1024)))
-          unless exists $ hPutStr h (tickHeader (spBookDepth p) ++ "\n")
-          withFile lvls AppendMode $ \lh -> do
-            hSetBuffering lh (BlockBuffering (Just (1024 * 1024)))
-            unless lexists $ hPutStr lh (lvlHeader ++ "\n")
-            withVev (vevPath path) False $ \vh evBase -> do
-              let tr0 = trFromBook (fromIntegral evBase) done (gsBook gs0)
-              (gs', cs', nEv) <- runSimTicksH simHooks (emitTick h) (emitLvlSeg (spPriceScale p) lh vh) p done gs0 tr0
-              patchVevCount vh (fromIntegral nEv)
-              pure (gs', cs')
-        appendCandles path p cs
-        pure (gs, length cs)
-  where
-    sidecar = ticksPath path
-    lvls = levelsPath path
-    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
-    emitTick h t = hPutBuilder h (tickRowB (spPriceScale p) (spBookDepth p) t <> char8 '\n')
-    simHooks = SimHooks
-      { hookProgress = \d t -> writeIORef progressRef (d, t)
-      , hookCancelled = readIORef cancelRef
-      }
-
--- the level sink: the csv row plus the lifetime's contiguous
--- volume-change events into the binary sidecar
-emitLvlSeg :: Int -> Handle -> Handle -> (LvlSeg, [LvlEv]) -> IO ()
-emitLvlSeg scale lh vh (seg, evs) = do
-  hPutBuilder lh (lvlRowB scale seg <> char8 '\n')
-  mapM_ (hPutBuilder vh . vevRecB) evs
-
-patchVevCount :: Handle -> Word64 -> IO ()
-patchVevCount vh n = do
-  hSeek vh AbsoluteSeek 8
-  hPutBuilder vh (word64LE n)
-
--- open the .vev sidecar: fresh = write the header and start counting at
--- 0; append = read the record count and seek to the end. Returns the
--- handle and the starting record count (the tracker continues its event
--- indexing from it)
-withVev :: FilePath -> Bool -> (Handle -> Word64 -> IO a) -> IO a
-withVev path fresh io = do
-  exists <- doesFileExist path
-  if fresh || not exists
-    then withFile path WriteMode $ \vh -> do
-      hSetBuffering vh (BlockBuffering (Just (1024 * 1024)))
-      hPutBuilder vh vevHeader
-      io vh 0
-    else withFile path ReadWriteMode $ \vh -> do
-      hSetBuffering vh (BlockBuffering (Just (1024 * 1024)))
-      hSeek vh AbsoluteSeek 8
-      cntBytes <- B.hGet vh 8
-      hSeek vh SeekFromEnd 0
-      io vh (decodeLE64 cntBytes)
-
-decodeLE64 :: B.ByteString -> Word64
-decodeLE64 = B.foldl' (\acc w -> acc * 256 + fromIntegral w) 0 . B.reverse
-
-appendCandles :: FilePath -> SimParams -> [Candle] -> IO ()
-appendCandles path p cs = do
-  exists <- doesFileExist path
-  withFile path AppendMode $ \h ->
-    hPutStr h $ (if exists then "" else csvHeader) ++ csvRowsText p cs
-  where
-    csvHeader = "open,high,low,close,vol\n"
-
--- the sidecar sizes before a resume run, recorded by restoreSidecar's
--- caller via readSidecarSize/readLevelsSize
-sidecarSizeRef :: IORef (Maybe Integer)
-sidecarSizeRef = unsafePerformIO (newIORef Nothing)
-{-# NOINLINE sidecarSizeRef #-}
-
-levelsSizeRef :: IORef (Maybe Integer)
-levelsSizeRef = unsafePerformIO (newIORef Nothing)
-{-# NOINLINE levelsSizeRef #-}
-
-vevSizeRef :: IORef (Maybe Integer)
-vevSizeRef = unsafePerformIO (newIORef Nothing)
-{-# NOINLINE vevSizeRef #-}
-
-readSidecarSize :: FilePath -> IO ()
-readSidecarSize path = do
-  exists <- doesFileExist path
-  sz <- if exists then Just <$> getFileSize path else pure Nothing
-  writeIORef sidecarSizeRef sz
-
-readLevelsSize :: FilePath -> IO ()
-readLevelsSize path = do
-  exists <- doesFileExist path
-  sz <- if exists then Just <$> getFileSize path else pure Nothing
-  writeIORef levelsSizeRef sz
-
-readVevSize :: FilePath -> IO ()
-readVevSize path = do
-  exists <- doesFileExist path
-  sz <- if exists then Just <$> getFileSize path else pure Nothing
-  writeIORef vevSizeRef sz
-
--- undo partially streamed sidecars after a cancellation: truncate all
--- three back to the recorded sizes (or remove a file that did not exist
--- before). The .vev count header is not patched on cancel, but the
--- truncation removes the partial records so the count stays consistent
-restoreSidecar :: FilePath -> SimParams -> IO ()
-restoreSidecar path p
-  | spSinus p = pure ()
-  | otherwise = case spMode p of
-      ModeCandles -> pure ()
-      _           -> do
-        sz <- readIORef sidecarSizeRef
-        case sz of
-          Nothing -> rm sidecar
-          Just n  -> withFile sidecar AppendMode (`hSetFileSize` n)
-        lsz <- readIORef levelsSizeRef
-        case lsz of
-          Nothing -> rm lvls
-          Just n  -> withFile lvls AppendMode (`hSetFileSize` n)
-        vsz <- readIORef vevSizeRef
-        case vsz of
-          Nothing -> rm vevp
-          Just n  -> withFile vevp AppendMode (`hSetFileSize` n)
-  where
-    sidecar = ticksPath path
-    lvls = levelsPath path
-    vevp = vevPath path
-    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
-
--- remove partial output after a cancellation (missing files ignored)
-cleanup :: FilePath -> SimParams -> IO ()
-cleanup path p = mapM_ rm (path : (path ++ ".meta") : sidecar)
-  where
-    sidecar = case spMode p of
-      ModeCandles -> []
-      _           -> [ticksPath path | not (spSinus p)] ++ [levelsPath path | not (spSinus p)] ++ [vevPath path | not (spSinus p)]
-    rm fp = removeFile fp `catch` \e -> unless (isDoesNotExistError e) (ioError e)
 
 -- --- ML training FFI -------------------------------------------------------
 
@@ -616,7 +401,7 @@ simStratDsl paramsPtr = do
   case parseDslParams paramsStr of
     Left _  -> pure 1
     Right p -> do
-      result <- try (runDslBacktest p) :: IO (Either SomeException ())
+      result <- try (Run.runDslBacktest (dspData p) (dspOut p) (dspSpec p) (dspFee p)) :: IO (Either SomeException ())
       case result of
         Left _    -> pure 2
         Right _   -> pure 0
@@ -644,76 +429,8 @@ parseDslParams s = do
       [(x, "")] -> Just x
       _         -> Nothing
 
-runDslBacktest :: DslParams -> IO ()
-runDslBacktest p = do
-  parsed <- MLD.loadBars (dspData p)
-  bars <- case parsed of
-    Left err -> ioError (userError err)
-    Right bs -> pure bs
-  let closes = VU.fromList (map MLD.barC bars)
-      vols = VU.fromList (map MLD.barV bars)
-      n = VU.length closes
-      warmup = STD.dslMaxPeriod (dspSpec p) - 1
-  when (n < warmup + 12) (ioError (userError "not enough candles for the strategy warm-up"))
-  createDirectoryIfMissing True (dspOut p)
-  let (sig, causes) = STD.dslSignalCause (dspSpec p) closes
-      (bt, trades) = STB.backtestWithTrades (dspFee p) closes vols sig causes (warmup, n - 1)
-      met = STB.brMetrics bt
-      eqPath = dspOut p ++ "/equity_0.csv"
-      specText = STD.dslText (dspSpec p)
-      js = intercalate ","
-        [ "\"seed\":0"
-        , "\"slots\":" ++ jsonStr specText
-        , "\"valCalmar\":" ++ show (STB.bmCalmar met)
-        , "\"pnl\":" ++ show (STB.bmPnl met)
-        , "\"maxDD\":" ++ show (STB.bmMaxDD met)
-        , "\"calmar\":" ++ show (STB.bmCalmar met)
-        , "\"trades\":" ++ show (STB.bmTrades met)
-        , "\"equity\":\"equity_0.csv\""
-        , "\"cand\":\"cand_0.csv\""
-        , "\"test\":\"test_0.csv\""
-        ]
-  withFile (dspOut p ++ "/strat_0.json") WriteMode $ \h ->
-    hPutStr h ("{" ++ js ++ "}\n")
-  withFile eqPath WriteMode $ \h -> do
-    hPutStr h "open,high,low,close,vol\n"
-    hPutStr h (concatMap eqRow (VU.toList (STB.brEquity bt)))
-  withFile (dspOut p ++ "/cand_0.csv") WriteMode $ \h -> do
-    hPutStr h "candidate,val_calmar\n"
-    hPutStr h ("1," ++ printf "%.6g" (STB.bmCalmar met) ++ "\n")
-  withFile (dspOut p ++ "/test_0.csv") WriteMode $ \h -> do
-    hPutStr h "close,equity,pos\n"
-    hPutStr h (concatMap testRow (zip3 (VU.toList (STB.brCloses bt))
-                                       (VU.toList (STB.brEquity bt))
-                                       (VU.toList (STB.brPos bt))))
-  withFile (dspOut p ++ "/trades_0.bin") WriteMode $ \h ->
-    hPutBuilder h (tradesBin trades)
-  where
-    eqRow e =
-      let s = printf "%.5f" e
-      in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
-    testRow (c, e, po) = printf "%.5f,%.6g,%d\n" c e po
-
--- minimal JSON string escaping (DSL specs contain newlines)
-jsonStr :: String -> String
-jsonStr s = "\"" ++ concatMap esc s ++ "\""
-  where
-    esc '\n' = "\\n"
-    esc c | c == '"' || c == '\\' = ['\\', c]
-          | otherwise = [c]
-
 runStratBatch :: StratParams -> IO ()
 runStratBatch p = do
-  parsed <- MLD.loadBars (stpData p)
-  bars <- case parsed of
-    Left err -> ioError (userError err)
-    Right bs -> pure bs
-  let closes = VU.fromList (map MLD.barC bars)
-      vols = VU.fromList (map MLD.barV bars)
-  case STO.optSplits (stpOpt p) (VU.length closes) of
-    Left err -> ioError (userError err)
-    Right _  -> pure ()
-  createDirectoryIfMissing True (stpOut p)
   let cands = max 1 (STO.opCandidates (stpOpt p))
       n = max 1 (stpSessions p)
   stRefs <- forM [0 .. n - 1] $ \k -> do
@@ -723,78 +440,26 @@ runStratBatch p = do
     pure (StratSessionState (stpSeedBase p + fromIntegral k) c cands b s)
   writeIORef stratSessionsRef stRefs
   writeIORef stratProgressRef (0, n * cands)
-  doneRef <- newIORef 0
-  barrier <- newEmptyMVar
-  _ <- forM stRefs $ \st -> forkIO $ do
-    r <- try (STO.optimizeSession (stratHooks st) (stpOpt p) closes vols (ssSeed st))
-    case r of
-      Left err -> writeIORef (ssStatus st)
-        (case fromException err of
-           Just SimCancelled -> "cancelled"
-           _                 -> "error")
-      Right res -> do
-        writeIORef (ssStatus st) "done"
-        writeStratResult (stpOut p) res
-    finished <- atomicModifyIORef' doneRef (\d -> (d + 1, d + 1))
-    when (finished == n) (putMVar barrier ())
-  takeMVar barrier
-  pure ()
-  where
-    stratHooks st = STO.OptHooks
-      { STO.ohProgress = \c _ -> do
-          writeIORef (ssCand st) c
-          _ <- atomicModifyIORef' stratProgressRef (\(d, t) -> ((d + 1, t), ()))
-          pure ()
-      , STO.ohBest = \cm -> do
-          best <- readIORef (ssBest st)
-          when (cm > best) (writeIORef (ssBest st) cm)
-      , STO.ohCancelled = readIORef stratCancelRef
-      }
-
--- per-session artifacts: metrics json (the winning spec + test metrics),
--- the test equity curve as a candles csv, the val-Calmar-per-candidate
--- history and the per-test-step series (close, equity, position) for the
--- strategy page's plot widgets
-writeStratResult :: FilePath -> STO.OptResult -> IO ()
-writeStratResult out r = do
-  let bt = STO.orTest r
-      met = STB.brMetrics bt
-      seed = STO.orSeed r
-      spec = STR.stratText (STO.orStrat r)
-      eqPath = out ++ "/equity_" ++ show seed ++ ".csv"
-      js = intercalate ","
-        [ "\"seed\":" ++ show seed
-        , "\"slots\":\"" ++ spec ++ "\""
-        , "\"valCalmar\":" ++ show (STO.orValCalmar r)
-        , "\"pnl\":" ++ show (STB.bmPnl met)
-        , "\"maxDD\":" ++ show (STB.bmMaxDD met)
-        , "\"calmar\":" ++ show (STB.bmCalmar met)
-        , "\"trades\":" ++ show (STB.bmTrades met)
-        , "\"equity\":\"equity_" ++ show seed ++ ".csv\""
-        , "\"cand\":\"cand_" ++ show seed ++ ".csv\""
-        , "\"test\":\"test_" ++ show seed ++ ".csv\""
+  let sessions =
+        [ (ssSeed st, STO.OptHooks
+            { STO.ohProgress = \c _ -> do
+                writeIORef (ssCand st) c
+                _ <- atomicModifyIORef' stratProgressRef (\(d, t) -> ((d + 1, t), ()))
+                pure ()
+            , STO.ohBest = \cm -> do
+                best <- readIORef (ssBest st)
+                when (cm > best) (writeIORef (ssBest st) cm)
+            , STO.ohCancelled = readIORef stratCancelRef
+            })
+        | st <- stRefs
         ]
-  withFile (out ++ "/strat_" ++ show seed ++ ".json") WriteMode $ \h ->
-    hPutStr h ("{" ++ js ++ "}\n")
-  withFile eqPath WriteMode $ \h -> do
-    hPutStr h "open,high,low,close,vol\n"
-    hPutStr h (concatMap eqRow (VU.toList (STB.brEquity bt)))
-  withFile (out ++ "/cand_" ++ show seed ++ ".csv") WriteMode $ \h -> do
-    hPutStr h "candidate,val_calmar\n"
-    hPutStr h (concatMap candRow (zip [(1 :: Int) ..] (VU.toList (STO.orCandCalmar r))))
-  withFile (out ++ "/test_" ++ show seed ++ ".csv") WriteMode $ \h -> do
-    hPutStr h "close,equity,pos\n"
-    hPutStr h (concatMap testRow (zip3 (VU.toList (STB.brCloses bt))
-                                       (VU.toList (STB.brEquity bt))
-                                       (VU.toList (STB.brPos bt))))
-  withFile (out ++ "/trades_" ++ show seed ++ ".bin") WriteMode $ \h ->
-    hPutBuilder h (tradesBin (STO.orTrades r))
-  where
-    eqRow e =
-      let s = printf "%.5f" e
-      in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
-    candRow (c, v) = show c ++ "," ++ printf "%.6g" v ++ "\n"
-    testRow (c, e, p) = printf "%.5f,%.6g,%d\n" c e p
+  Run.runStratBatch (stpOpt p) (stpData p) (stpOut p) sessions
+  -- reflect per-session completion in the status table (cancelled/error
+  -- sessions simply produced no artifacts)
+  forM stRefs $ \st -> do
+    done <- doesFileExist (stpOut p ++ "/strat_" ++ show (ssSeed st) ++ ".json")
+    writeIORef (ssStatus st) (if done then "done" else "cancelled")
+  pure ()
 
 parseStratParams :: String -> Either String StratParams
 parseStratParams s = do
@@ -899,14 +564,6 @@ simMlTrain paramsPtr = do
 
 runMlBatch :: MlParams -> IO ()
 runMlBatch p = do
-  parsed <- MLD.loadBars (mlpData p)
-  bars <- case parsed of
-    Left err -> ioError (userError err)
-    Right bs -> pure bs
-  md <- case MLT.prepareData (mlpTrain p) bars of
-    Left err -> ioError (userError err)
-    Right d  -> pure d
-  createDirectoryIfMissing True (mlpOut p)
   let epochs = MLT.tpEpochs (mlpTrain p)
       n = max 1 (mlpSessions p)
   stRefs <- forM [0 .. n - 1] $ \k -> do
@@ -916,78 +573,24 @@ runMlBatch p = do
     pure (MlSessionState (mlpSeedBase p + fromIntegral k) e epochs b s)
   writeIORef mlSessionsRef stRefs
   writeIORef mlProgressRef (0, n * epochs)
-  doneRef <- newIORef 0
-  barrier <- newEmptyMVar
-  _ <- forM stRefs $ \st -> forkIO $ do
-    r <- try (MLT.trainSession (mlHooks st) (mlpTrain p) md (msSeed st))
-    case r of
-      Left err -> writeIORef (msStatus st)
-        (case fromException err of
-           Just SimCancelled -> "cancelled"
-           _                 -> "error")
-      Right Nothing -> writeIORef (msStatus st) "cancelled"
-      Right (Just sr) -> do
-        writeIORef (msStatus st) "done"
-        writeMlResult (mlpOut p) sr
-    finished <- atomicModifyIORef' doneRef (\d -> (d + 1, d + 1))
-    when (finished == n) (putMVar barrier ())
-  takeMVar barrier
-  pure ()
-  where
-    mlHooks st = MLT.TrainHooks
-      { MLT.thProgress = \e _ -> do
-          writeIORef (msEpoch st) e
-          _ <- atomicModifyIORef' mlProgressRef (\(d, t) -> ((d + 1, t), ()))
-          pure ()
-      , MLT.thBest = \vc -> do
-          best <- readIORef (msBest st)
-          when (vc > best) (writeIORef (msBest st) vc)
-      , MLT.thCancelled = readIORef mlCancelRef
-      }
-
--- per-session artifacts: metrics json, the equity curve as a candles csv
--- (o=h=l=c=equity) so the chart can load it as a regular timeline, the
--- validation-Calmar-per-epoch history, and the per-test-step series
--- (close, equity, predicted class) for the ML page's own plot widgets
-writeMlResult :: FilePath -> MLT.SessionResult -> IO ()
-writeMlResult out sr = do
-  let pr = MLT.srTest sr
-      met = MLT.prMetrics pr
-      seed = MLT.srSeed sr
-      eqPath = out ++ "/equity_" ++ show seed ++ ".csv"
-      js = intercalate ","
-        [ "\"seed\":" ++ show seed
-        , "\"epochs\":" ++ show (MLT.srEpochs sr)
-        , "\"bestEpoch\":" ++ show (MLT.srBestEpoch sr)
-        , "\"valCalmar\":" ++ show (if VU.null (MLT.srHistory sr) then 0 else VU.maximum (MLT.srHistory sr))
-        , "\"pnl\":" ++ show (MLT.mPnl met)
-        , "\"maxDD\":" ++ show (MLT.mMaxDD met)
-        , "\"calmar\":" ++ show (MLT.mCalmar met)
-        , "\"accuracy\":" ++ show (MLT.mAccuracy met)
-        , "\"trades\":" ++ show (MLT.mTrades met)
-        , "\"equity\":\"equity_" ++ show seed ++ ".csv\""
-        , "\"hist\":\"hist_" ++ show seed ++ ".csv\""
-        , "\"test\":\"test_" ++ show seed ++ ".csv\""
+  let sessions =
+        [ (msSeed st, MLT.TrainHooks
+            { MLT.thProgress = \e _ -> do
+                writeIORef (msEpoch st) e
+                _ <- atomicModifyIORef' mlProgressRef (\(d, t) -> ((d + 1, t), ()))
+                pure ()
+            , MLT.thBest = \vc -> do
+                best <- readIORef (msBest st)
+                when (vc > best) (writeIORef (msBest st) vc)
+            , MLT.thCancelled = readIORef mlCancelRef
+            })
+        | st <- stRefs
         ]
-  withFile (out ++ "/ml_" ++ show seed ++ ".json") WriteMode $ \h ->
-    hPutStr h ("{" ++ js ++ "}\n")
-  withFile eqPath WriteMode $ \h -> do
-    hPutStr h "open,high,low,close,vol\n"
-    hPutStr h (concatMap eqRow (VU.toList (MLT.prEquity pr)))
-  withFile (out ++ "/hist_" ++ show seed ++ ".csv") WriteMode $ \h -> do
-    hPutStr h "epoch,val_calmar\n"
-    hPutStr h (concatMap histRow (zip [(1 :: Int) ..] (VU.toList (MLT.srHistory sr))))
-  withFile (out ++ "/test_" ++ show seed ++ ".csv") WriteMode $ \h -> do
-    hPutStr h "close,equity,pred\n"
-    hPutStr h (concatMap testRow (zip3 (VU.toList (MLT.prCloses pr))
-                                       (VU.toList (MLT.prEquity pr))
-                                       (VU.toList (MLT.prPreds pr))))
-  where
-    eqRow e =
-      let s = printf "%.5f" e
-      in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
-    histRow (e, v) = show e ++ "," ++ printf "%.6g" v ++ "\n"
-    testRow (c, e, p) = printf "%.5f,%.6g,%d\n" c e p
+  Run.runMlBatch (mlpTrain p) (mlpData p) (mlpOut p) sessions
+  forM stRefs $ \st -> do
+    done <- doesFileExist (mlpOut p ++ "/ml_" ++ show (msSeed st) ++ ".json")
+    writeIORef (msStatus st) (if done then "done" else "cancelled")
+  pure ()
 
 parseMlParams :: String -> Either String MlParams
 parseMlParams s = do
@@ -1026,9 +629,9 @@ parseMlParams s = do
   where
     kv = kvPairs s
     readK :: Read a => String -> a -> Either String a
-    readK k d = maybe (Right d) (readTK k) (lookup k kv)
+    readK k d = maybe (Right d) (readTK k) (lookup k (kvPairs s))
     readKD :: String -> Double -> Either String Double
-    readKD k d = maybe (Right d) (readTK k) (lookup k kv)
+    readKD k d = maybe (Right d) (readTK k) (lookup k (kvPairs s))
     readTK :: Read a => String -> String -> Either String a
     readTK k v = maybe (Left ("bad " ++ k)) Right (readV v)
     parseInts :: String -> [Int] -> String -> Either String [Int]

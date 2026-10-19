@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "rel-sim": {
+      "type": "local",
+      "command": [
+        "nix",
+        "run",
+        "/home/pion/work/dev/rel#mcp"
+      ],
+      "enabled": true
+    }
+  }
+}
