@@ -129,16 +129,19 @@ Indicators live in the right-click chart menu (`add SMA` / `add FFT` /
 `add MACD` / `add RSI` / `add BB` / `add VOL`);
 per-indicator period/params, color,
 delete). The math runs in Haskell behind the FFI (`Sim.Fft`, `Sim.Entropy`,
-`Sim.Ind`), the widget only draws. Pane-drawn indicators (MACD, RSI,
-volume) each get their own sub-pane below the price chart; the panes
-stack vertically (chart pane → pane 1 → … → pane N) and each has a
-collapse/expand button at its top right. The cursor tableau (top right) appends each enabled
-indicator's value at the hovered candle (or the replay head): `KS 0.871`,
-`Temp 0.412`, `CECP H0.812 C0.103`, `SMA 1.02195`, etc. Values are blank
-during warm-up / outside the indicator's range. The chart itself is the
-top pane of the stack; every pane (chart included) has a collapse button
-at its top right, and any pane's top edge drags to resize it vertically
-(the chart pane takes the remaining space).
+`Sim.Ind`), the widget only draws. The chart and its sub-panes form one
+vertical stack: the chart pane on top (the price graph), then one pane
+per pane-drawn indicator (MACD, RSI, volume) in indicator order. Every
+pane — chart included — has a collapse/expand button at its top right,
+and any pane's top edge drags to resize it vertically (the chart pane
+takes the remaining space). The crosshair is shared across the whole
+stack: the vertical line runs through the chart and every sub-pane, so
+the hovered candle lines up everywhere. The cursor tableau (top right)
+appends each enabled indicator's value at the hovered candle (or the
+replay head): `KS 0.871`, `Temp 0.412`, `CECP H0.812 C0.103`, `SMA
+1.02195`, etc. Values are blank during warm-up / outside the indicator's
+range. Recursive indicators (EMA/MACD/RSI) seed once at the series start,
+so their values are stable under panning.
 
 - **SMA** — simple moving average of closes over `period` candles,
   drawn on the price scale.
@@ -156,9 +159,7 @@ at its top right, and any pane's top edge drags to resize it vertically
   price scale (mid = the indicator color, bands lightened).
 - **VOL** — per-candle volume bars in a sub-pane (up/down series
   colors), like MACD/RSI; added by default, removable like any
-  indicator. The crosshair is shared across the whole stack: the
-  vertical line runs through the chart and every sub-pane, so the
-  hovered candle lines up everywhere.
+  indicator (the `V` key toggles it).
 - **FFT** — Fourier fit + forecast over a draggable window. Two dashed
   vertical handle lines (`s:` / `e:`) mark the window; drag them to move
   the edges, or enable `lock` to drag the whole range at a fixed width.
