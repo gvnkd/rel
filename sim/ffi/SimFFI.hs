@@ -15,6 +15,7 @@ import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import qualified Sim.DtwIndex as DTW
+import Sim.Dtw (Prefix, mkPrefix, pfLen)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..))
@@ -791,64 +792,55 @@ simDtwScan paramsPtr = do
 runDtwScanBatch :: DtwParams -> IO ()
 runDtwScanBatch p = do
   cacheRef <- newIORef Map.empty
-  loadedA <- mapM (loadCloses cacheRef) (dpDataA p)
-  loadedB <- mapM (loadCloses cacheRef) (dpDataB p)
+  loadedA <- mapM (loadPrefix cacheRef) (dpDataA p)
+  loadedB <- mapM (loadPrefix cacheRef) (dpDataB p)
   let pairsA = catMaybes (zipWith (\tf mv -> fmap (\v -> (tf, v)) mv) (dpTFsA p) loadedA)
       pairsB = catMaybes (zipWith (\tf mv -> fmap (\v -> (tf, v)) mv) (dpTFsB p) loadedB)
   if null pairsA || null pairsB
     then ioError (userError "dtw: no usable series in dataa/datab")
-    else runDtwPairs pairsA pairsB
+    else do
+      let plans = Run.dtwJobs pairsA pairsB (dpWins p) (dpBandF p) (dpStepF p) (dpMaxC p) (dpPaaN p) (dpCardN p)
+          planSp pl = DTW.ScanParams (Run.dpWin pl) (Run.dpBand pl) (Run.dpPaa pl) (Run.dpCard pl) (Run.dpStep pl) (Run.dpMaxCand pl)
+          planNWin (pl, pfa, pfb) =
+            if DTW.scanValid (planSp pl) (pfLen pfa) (pfLen pfb)
+              then length [0, Run.dpStep pl .. pfLen pfa - Run.dpWin pl]
+              else 0
+      stRefs <- forM plans $ \job@(pl, _, _) -> do
+        d <- newIORef 0
+        b <- newIORef (1 / 0)
+        s <- newIORef "run"
+        pure (DtwSessionState (Run.dpTfA pl) (Run.dpTfB pl) (Run.dpWin pl) (planNWin job) d b s, job)
+      writeIORef dtwSessionsRef (map fst stRefs)
+      writeIORef dtwProgressRef (0, sum (map (\(st, _) -> dsWindows st) stRefs))
+      let mkHooks st = Run.DtwHooks
+            { Run.dwProgress = \d _ -> do
+                writeIORef (dsDone st) d
+                _ <- atomicModifyIORef' dtwProgressRef (\(done, tot) -> ((done + 1, tot), ()))
+                pure ()
+            , Run.dwBest = \best -> do
+                cur <- readIORef (dsBest st)
+                when (best < cur) (writeIORef (dsBest st) best)
+            , Run.dwCancelled = readIORef dtwCancelRef
+            }
+          jobs = [ (pl, pfa, pfb, mkHooks st) | (st, (pl, pfa, pfb)) <- stRefs ]
+      Run.runDtwBatch (dpOut p) jobs
+      forM stRefs $ \(st, (pl, _, _)) -> do
+        done <- doesFileExist (dpOut p ++ "/dtw_" ++ Run.dpTfA pl ++ "_" ++ Run.dpTfB pl ++ "_" ++ show (Run.dpWin pl) ++ ".json")
+        writeIORef (dsStatus st) (if done then "done" else if dsWindows st == 0 then "short" else "cancelled")
+      pure ()
   where
-  runDtwPairs pairsA pairsB = do
-    let bandOf win = if dpBandF p > 0 then dpBandF p else max 1 (win `div` 4)
-        stepOf win = if dpStepF p > 0 then dpStepF p else max 1 (win `div` 4)
-        plans =
-          [ ( Run.DtwPlan tfA tfB win (bandOf win) (dpPaaN p) (dpCardN p) (stepOf win) (dpMaxC p)
-            , ca, cb )
-          | (tfA, ca) <- pairsA
-          , (tfB, cb) <- pairsB
-          , win <- dpWins p
-          ]
-        planSp (pl, _, _) = DTW.ScanParams (Run.dpWin pl) (Run.dpBand pl) (Run.dpPaa pl) (Run.dpCard pl) (Run.dpStep pl) (Run.dpMaxCand pl)
-        planNWin (pl, ca, cb) =
-          if DTW.scanValid (planSp (pl, ca, cb)) (VU.length ca) (VU.length cb)
-            then length [0, Run.dpStep pl .. VU.length ca - Run.dpWin pl]
-            else 0
-    stRefs <- forM plans $ \job@(pl, _, _) -> do
-      d <- newIORef 0
-      b <- newIORef (1 / 0)
-      s <- newIORef "run"
-      pure (DtwSessionState (Run.dpTfA pl) (Run.dpTfB pl) (Run.dpWin pl) (planNWin job) d b s, job)
-    writeIORef dtwSessionsRef (map fst stRefs)
-    writeIORef dtwProgressRef (0, sum (map (\(st, _) -> dsWindows st) stRefs))
-    let mkHooks st = Run.DtwHooks
-          { Run.dwProgress = \d _ -> do
-              writeIORef (dsDone st) d
-              _ <- atomicModifyIORef' dtwProgressRef (\(done, tot) -> ((done + 1, tot), ()))
-              pure ()
-          , Run.dwBest = \best -> do
-              cur <- readIORef (dsBest st)
-              when (best < cur) (writeIORef (dsBest st) best)
-          , Run.dwCancelled = readIORef dtwCancelRef
-          }
-        jobs = [ (pl, ca, cb, mkHooks st) | (st, (pl, ca, cb)) <- stRefs ]
-    Run.runDtwBatch (dpOut p) jobs
-    forM stRefs $ \(st, (pl, _, _)) -> do
-      done <- doesFileExist (dpOut p ++ "/dtw_" ++ Run.dpTfA pl ++ "_" ++ Run.dpTfB pl ++ "_" ++ show (Run.dpWin pl) ++ ".json")
-      writeIORef (dsStatus st) (if done then "done" else if dsWindows st == 0 then "short" else "cancelled")
-    pure ()
-  loadCloses :: IORef (Map.Map FilePath (VU.Vector Double)) -> FilePath -> IO (Maybe (VU.Vector Double))
-  loadCloses _ "" = pure Nothing
-  loadCloses cacheRef path = do
+  loadPrefix :: IORef (Map.Map FilePath Prefix) -> FilePath -> IO (Maybe Prefix)
+  loadPrefix _ "" = pure Nothing
+  loadPrefix cacheRef path = do
     cached <- readIORef cacheRef
     case Map.lookup path cached of
       Just v  -> pure (Just v)
       Nothing -> do
-        parsed <- MLD.loadBars path
+        parsed <- MLD.loadCloses path
         case parsed of
-          Left _    -> pure Nothing
-          Right bars -> do
-            let v = VU.fromList (map MLD.barC bars)
+          Left _     -> pure Nothing
+          Right cls -> do
+            let v = mkPrefix cls
             modifyIORef' cacheRef (Map.insert path v)
             pure (Just v)
 

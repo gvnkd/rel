@@ -12,6 +12,7 @@ module Sim.ML.Data
   , parseBars
   , loadBars
   , parseBarsBinary
+  , loadCloses
   , FeatureSet (..)
   , buildFeatures
   ) where
@@ -26,6 +27,7 @@ import GHC.Float (castWord64ToDouble)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import Sim.Entropy (rollingPermEntropy)
+import System.IO (IOMode (ReadMode), withBinaryFile)
 
 -- one candle as doubles; ML pipeline works in returns/ratios, so no
 -- integer Price/scale is needed here
@@ -187,6 +189,109 @@ loadBars path = do
   if B.length bs >= 68 && (getU32 bs 0 == magicRelQ || getU32 bs 0 == magicRelS)
     then pure (parseBarsBinary bs)
     else pure (parseBars (BC8.unpack bs))
+
+-- closes-only variant for the DTW scanner: accepts ANY prices (the Bar
+-- parser gates on positivity for return-ratio features, which would
+-- silently drop modulated/negative series) and STREAMS the csv from the
+-- handle in 8MB chunks — unpacking a 1.7GB file to String would transiently
+-- cost tens of GB. Binary stores are read whole (their record layout is
+-- fixed, so the closes come out as one unboxed generate).
+loadCloses :: FilePath -> IO (Either String (VU.Vector Double))
+loadCloses path =
+  withBinaryFile path ReadMode $ \h -> do
+    headBs <- B.hGet h 68
+    if B.length headBs >= 68 && (getU32 headBs 0 == magicRelQ || getU32 headBs 0 == magicRelS)
+      then do
+        rest <- B.hGetContents h
+        pure (closesBinary (headBs <> rest))
+      else do
+        chunks <- streamCsv h headBs []
+        pure $ case chunks of
+          [] -> Left "no parseable candle rows"
+          cs -> Right (VU.concat (reverse cs))
+  where
+  closesBinary bs
+    | B.length bs < 64              = Left "binary too short"
+    | getU32 bs 0 /= magicRelQ && getU32 bs 0 /= magicRelS = Left "bad magic"
+    | getU32 bs 4 /= 1              = Left "unsupported binary version"
+    | B.length bs < 64 + n * recLen = Left "truncated candle records"
+    | otherwise = Right (VU.generate n (\k -> getF64 bs (64 + k * recLen + 32)))
+    where
+    n = fromIntegral (getU64 bs 16)
+    recLen = 48
+  streamCsv h carry acc = do
+    chunk <- B.hGetSome h (8 * 1024 * 1024)
+    if B.null chunk
+      then do
+        v <- forceVec (parseLines carry)
+        pure (if VU.null v then acc else v : acc)
+      else do
+        let c = carry <> chunk
+            -- NOTE: B.spanEnd leaks here (bytestring internals retain the
+            -- buffer per iteration with a general predicate — measured
+            -- +45MB/iteration); elemIndexEnd is memrchr-based
+            (complete, carry') = case B.elemIndexEnd 10 c of
+              Nothing -> (B.empty, c)
+              Just i  -> (B.take i c, B.drop (i + 1) c)
+        v <- forceVec (parseLines complete)
+        -- force BEFORE accumulating: an unforced VU.fromList thunk would
+        -- pin the underlying chunk buffer and retain every 8MB block
+        streamCsv h carry' (if VU.null v then acc else v : acc)
+  forceVec vs = do
+    let v = VU.fromList vs
+        n = VU.length v
+    n `seq` pure v
+  parseLines bs
+    | B.null bs = []
+    | otherwise =
+        let (line, rest1) = B.break (== 10) bs
+            rest = B.drop 1 rest1
+        in case closeOf line of
+             Just c  -> c : parseLines rest
+             Nothing -> parseLines rest
+  -- close = 4th field (sim csv) or 5th (real-quotes with timestamp);
+  -- comma-scan instead of BC8.split — splitting allocated ~7 ByteStrings
+  -- per row (multi-GB of churn on 30M-row files)
+  closeOf line = case field 4 line of
+    Just c  -> Just c
+    Nothing -> field 5 line
+  field k bs
+    | k <= 1 = takeField bs
+    | otherwise = case B.elemIndex 44 bs of
+        Nothing -> Nothing
+        Just i  -> field (k - 1) (B.drop (i + 1) bs)
+  takeField bs =
+    let w = B.takeWhile (/= 44) bs
+    in if B.null w then Nothing else readDbl w
+  -- direct ByteString -> Double parse: going through `reads . unpack`
+  -- allocates a String per row (~12GB of churn on a 30M-row file, kept
+  -- in the GC arena footprint). Handles [-]ddd[.fff][e[-]dd].
+  readDbl w0 = do
+    let (neg, w1) = case B.uncons w0 of
+          Just (45, r) -> (True, r)
+          _            -> (False, w0)
+        (ip, r1) = B.span isDig w1
+    if B.null ip then Nothing else Just ()
+    let iv = B.foldl' (\a c -> a * 10 + toD c) 0 ip
+        (fv, flen, r2) = case B.uncons r1 of
+          Just (46, r) -> let (f, r') = B.span isDig r
+                          in (B.foldl' (\a c -> a * 10 + toD c) 0 f, B.length f, r')
+          _            -> (0, 0, r1)
+        base = (iv + fv / (10 ^ flen)) * (if neg then -1 else 1)
+    case B.uncons r2 of
+      Just (101, rexp) -> do  -- 'e'
+        let (eneg, ew) = case B.uncons rexp of
+              Just (45, r)  -> (True, r)
+              Just (43, r)  -> (False, r)
+              _             -> (False, rexp)
+            (eip, _) = B.span isDig ew
+        if B.null eip then Nothing else Just ()
+        let e = B.foldl' (\a c -> a * 10 + toI c) 0 eip :: Int
+        pure (base * (10 ^^ (if eneg then negate e else e)))
+      _ -> pure base
+  isDig c = c >= 48 && c <= 57
+  toD c = fromIntegral (c - 48) :: Double
+  toI c = fromIntegral (c - 48) :: Int
 
 parseBarsBinary :: B.ByteString -> Either String [Bar]
 parseBarsBinary bs

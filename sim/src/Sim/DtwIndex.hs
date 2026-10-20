@@ -18,17 +18,18 @@ module Sim.DtwIndex
   , breakpoints
   , buildFp
   , scanValid
-  , mkIndex
   , wordAt
   , wordOfZ
   , neighborWords
   , scanWindows
   ) where
 
-import qualified Data.Map.Strict as Map
+import Control.Monad.ST (runST)
+import Data.Bits (shiftL)
 import qualified Data.Set as Set
 import Data.Word (Word64)
 import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Unboxed.Mutable as VUM
 import Sim.Dtw (Prefix, mkPrefix, pfLen, zslice, stepCost, subseqAt)
 
 data ScanParams = ScanParams
@@ -88,10 +89,6 @@ buildFp pf win p card
   where
   n = pfLen pf
 
--- inverted index: word -> positions
-mkIndex :: VU.Vector Word64 -> Map.Map Word64 [Int]
-mkIndex ws = Map.fromListWith (++) [ (w, [j]) | (j, w) <- zip [0 ..] (VU.toList ws) ]
-
 digitAt :: Int -> Int -> Word64 -> Int
 digitAt card k w = fromIntegral (w `div` fromIntegral (card ^ k) `mod` fromIntegral card)
 
@@ -129,20 +126,54 @@ dedupeW = go Set.empty
     | Set.member x seen = go seen rest
     | otherwise = x : go (Set.insert x seen) rest
 
--- precomputed per-series-B state for a scan (prefix + fingerprint index
--- + last valid candidate start); one ctx serves every A window
+-- precomputed per-series-B state for a scan: the series prefix plus a
+-- DENSE counting-sort fingerprint index (offsets + positions vectors,
+-- ~15 bytes/position — a Data.Map of the same data costs ~10x more,
+-- which matters at 30M-row series). One ctx serves every A window.
 data ScanCtx = ScanCtx
-  { scPfb  :: Prefix
-  , scIdx  :: Map.Map Word64 [Int]
-  , scJMax :: !Int
+  { scPfb   :: Prefix
+  , scOff   :: !(VU.Vector Int)  -- wordSpace+1 bucket offsets into scPos
+  , scPos   :: !(VU.Vector Int)  -- positions grouped by fingerprint word
+  , scSpace :: !Int              -- card^p word space
+  , scJMax  :: !Int
   } deriving (Show)
 
-buildCtx :: ScanParams -> VU.Vector Double -> ScanCtx
-buildCtx sp b = ScanCtx pfb idx jMax
+buildCtx :: ScanParams -> Prefix -> ScanCtx
+buildCtx sp pfb = runST $ do
+  let ws = buildFp pfb win p card
+      n = VU.length ws
+      space = card ^ p
+  cnt <- VUM.replicate space 0
+  VU.forM_ ws $ \w -> do
+    let k = fromIntegral w
+    c <- VUM.read cnt k
+    VUM.write cnt k (c + 1)
+  offs <- VU.unsafeFreeze cnt
+  let starts = VU.scanl' (+) 0 offs
+  cursor <- VU.thaw (VU.init starts)
+  pos <- VUM.new n
+  VU.imapM_ (\j w -> do
+    let k = fromIntegral w
+    c <- VUM.read cursor k
+    VUM.write pos c j
+    VUM.write cursor k (c + 1)) ws
+  frozenPos <- VU.unsafeFreeze pos
+  pure (ScanCtx pfb starts frozenPos space jMax)
   where
-  pfb = mkPrefix b
-  idx = mkIndex (buildFp pfb (scWin sp) (scPaa sp) (scCard sp))
-  jMax = VU.length b - scWin sp - 2 * scBand sp
+  win = scWin sp
+  band = scBand sp
+  p = scPaa sp
+  card = scCard sp
+  jMax = pfLen pfb - win - 2 * band
+
+bucketOf :: ScanCtx -> Word64 -> [Int]
+bucketOf ctx w
+  | k < 0 || k >= scSpace ctx = []
+  | otherwise = VU.toList (VU.slice o (o' - o) (scPos ctx))
+  where
+  k = fromIntegral w
+  o = scOff ctx VU.! k
+  o' = scOff ctx VU.! (k + 1)
 
 -- match the A window starting at i (length scWin) against B; returns
 -- (i, bestJ, perStepDist) with bestJ = -1 when no candidate verified
@@ -150,8 +181,8 @@ matchAt :: ScanParams -> ScanCtx -> Prefix -> Int -> (Int, Int, Double)
 matchAt sp ctx pfa i =
   let z = zslice pfa i (scWin sp)
       w = wordOfZ z (scPaa sp) (scCard sp)
-      buckets = Map.findWithDefault [] w (scIdx ctx)
-        : map (\nw -> Map.findWithDefault [] nw (scIdx ctx)) (neighborWords (scPaa sp) (scCard sp) w)
+      buckets = bucketOf ctx w
+        : map (bucketOf ctx) (neighborWords (scPaa sp) (scCard sp) w)
       inRange js = [j | j <- js, j <= scJMax ctx]
       cands = take (scMaxCand sp) (dedupeOrd (concatMap inRange buckets))
       verified = [ (j, d)
@@ -169,6 +200,7 @@ scanValid sp na nb =
   scWin sp `mod` scPaa sp == 0
     && scPaa sp >= 1 && scPaa sp <= 12
     && scCard sp >= 3 && scCard sp <= 8
+    && scCard sp ^ scPaa sp <= (1 :: Int) `shiftL` 24
     && na >= scWin sp
     && nb >= scWin sp + 2 * scBand sp
 
@@ -183,7 +215,7 @@ scanWindows sp a b
   na = VU.length a
   nb = VU.length b
   pfa = mkPrefix a
-  ctx = buildCtx sp b
+  ctx = buildCtx sp (mkPrefix b)
   matches = VU.fromList (map (matchAt sp ctx pfa) [0, scStep sp .. na - scWin sp])
   best = case [m | m@(_, j, _) <- VU.toList matches, j >= 0] of
     [] -> Nothing

@@ -22,6 +22,7 @@ module Sim.Run
   , DtwPlan (..)
   , DtwHooks (..)
   , runDtwBatch
+  , dtwJobs
   , writeDtwResult
     -- strategy optimizer + DSL
   , runStratBatch
@@ -29,7 +30,7 @@ module Sim.Run
   , writeStratResult
   ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, catch, fromException, ioError, throwIO, try)
 import Control.Monad (forM, forM_, unless, when)
@@ -40,7 +41,7 @@ import Data.List (intercalate)
 import qualified Data.Vector.Unboxed as VU
 import Data.Word (Word64)
 import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
-import Sim.Dtw (mkPrefix)
+import Sim.Dtw (Prefix, pfLen)
 import Sim.DtwIndex (ScanParams (..), ScanResult (..))
 import qualified Sim.DtwIndex as DTW
 import Sim.Gen (GenState (..), initState)
@@ -314,16 +315,16 @@ data DtwHooks = DtwHooks
 
 -- run all plans in parallel (one forkIO each); blocks until every session
 -- finishes (cancelled sessions return Nothing and write no artifacts).
--- Each plan carries its own A/B closes vectors so one batch can scan a
--- whole timeframe-permutation grid.
-runDtwBatch :: FilePath -> [(DtwPlan, VU.Vector Double, VU.Vector Double, DtwHooks)] -> IO ()
+-- Each plan carries shared A/B prefixes so one batch can scan a whole
+-- timeframe-permutation grid without rebuilding them per session.
+runDtwBatch :: FilePath -> [(DtwPlan, Prefix, Prefix, DtwHooks)] -> IO ()
 runDtwBatch out jobs = do
   createDirectoryIfMissing True out
   doneRef <- newIORef 0
   barrier <- newEmptyMVar
   let n = length jobs
-  forM jobs $ \(pl, closesA, closesB, hooks) -> forkIO $ do
-    r <- try (runDtwSession hooks (planScanParams pl) closesA closesB) :: IO (Either SomeException (Maybe ScanResult))
+  forM jobs $ \(pl, pfa, pfb, hooks) -> forkIO $ do
+    r <- try (runDtwSession hooks (planScanParams pl) pfa pfb) :: IO (Either SomeException (Maybe ScanResult))
     case r of
       Right (Just res) -> writeDtwResult out pl res
       _                -> pure ()
@@ -331,39 +332,74 @@ runDtwBatch out jobs = do
     when (finished == n) (putMVar barrier ())
   takeMVar barrier
 
+-- the full tfA x tfB x windows job list (shared by the FFI and the CLI)
+dtwJobs :: [(String, Prefix)] -> [(String, Prefix)] -> [Int] -> Int -> Int -> Int -> Int -> Int -> [(DtwPlan, Prefix, Prefix)]
+dtwJobs pairsA pairsB wins bandF stepF maxC paaN cardN =
+  [ ( DtwPlan tfA tfB win (bandOf win) paaN cardN (stepOf win) maxC
+    , pfa, pfb )
+  | (tfA, pfa) <- pairsA
+  , (tfB, pfb) <- pairsB
+  , win <- wins
+  ]
+  where
+  bandOf win = if bandF > 0 then bandF else max 1 (win `div` 4)
+  stepOf win = if stepF > 0 then stepF else max 1 (win `div` 4)
+
 planScanParams :: DtwPlan -> ScanParams
 planScanParams pl = ScanParams (dpWin pl) (dpBand pl) (dpPaa pl) (dpCard pl) (dpStep pl) (dpMaxCand pl)
 
--- hooked scan: one matchAt per stepped A window, progress + cancel polled
--- every 16 windows. Nothing when cancelled or params/series invalid.
-runDtwSession :: DtwHooks -> ScanParams -> VU.Vector Double -> VU.Vector Double -> IO (Maybe ScanResult)
-runDtwSession hooks sp a b
-  | not (DTW.scanValid sp (VU.length a) (VU.length b)) = pure Nothing
+-- hooked scan: the window list is split into chunks (matchAt is pure) and
+-- the chunks run on all capabilities; progress fires per finished chunk,
+-- cancel is polled before each chunk spawn. Nothing when cancelled or
+-- params/series invalid.
+runDtwSession :: DtwHooks -> ScanParams -> Prefix -> Prefix -> IO (Maybe ScanResult)
+runDtwSession hooks sp pfa pfb
+  | not (DTW.scanValid sp (pfLen pfa) (pfLen pfb)) = pure Nothing
   | otherwise = do
-      let pfa = mkPrefix a
-          ctx = DTW.buildCtx sp b
-          wins = [0, scStep sp .. VU.length a - scWin sp]
+      let ctx = DTW.buildCtx sp pfb
+          wins = [0, scStep sp .. pfLen pfa - scWin sp]
           total = length wins
-      go pfa ctx wins total 0 [] (1 / 0)
-  where
-  go _ _ [] total _ acc bestD = do
-    dwProgress hooks total total
-    dwBest hooks bestD
-    let matches = VU.fromList (reverse acc)
-        bestEntry = case [m | m@(_, j, _) <- acc, j >= 0] of
-          [] -> Nothing
-          m0 : ms -> Just (foldl' (\e@(_, _, da) m@(_, _, d') -> if d' < da then m else e) m0 ms)
-    pure (Just (ScanResult matches bestEntry))
-  go pfa ctx (i : rest) total done acc bestD = do
-    cancelled <- if done `mod` 16 == 0 then dwCancelled hooks else pure False
-    if cancelled
-      then throwIO SimCancelled
-      else do
-        let (i', j, d) = DTW.matchAt sp ctx pfa i
-            bestD' = if d == d && d < bestD then d else bestD
-        dwProgress hooks (done + 1) total
-        when (done `mod` 64 == 0) (dwBest hooks bestD')
-        go pfa ctx rest total (done + 1) ((i', j, d) : acc) bestD'
+      caps <- getNumCapabilities
+      doneRef <- newIORef 0
+      let nChunks = max 1 (min total (caps * 4))
+          chunkSz = max 64 (total `div` nChunks + 1)
+          chunks = chunksOf chunkSz wins
+      mvs <- forM chunks $ \ws -> do
+        mv <- newEmptyMVar
+        cancelled <- dwCancelled hooks
+        if cancelled
+          then putMVar mv []
+          else do
+            _ <- forkIO $ do
+              let res = map (DTW.matchAt sp ctx pfa) ws
+                  force = foldl' (\acc (_, _, d) -> acc + d) 0 res
+              force `seq` putMVar mv res
+            pure ()
+        pure mv
+      results <- forM mvs $ \mv -> do
+        res <- takeMVar mv
+        d <- atomicModifyIORef' doneRef (\x -> let x' = x + length res in (x', x'))
+        dwProgress hooks d total
+        pure res
+      let flat = concat results
+      if length flat < total
+        then throwIO SimCancelled
+        else do
+          let matches = VU.fromList flat
+              found = [m | m@(_, j, _) <- flat, j >= 0]
+              bestEntry = case found of
+                [] -> Nothing
+                m0 : ms -> Just (foldl' (\e@(_, _, da) m@(_, _, d') -> if d' < da then m else e) m0 ms)
+              bestD = case bestEntry of
+                Just (_, _, d) -> d
+                Nothing        -> 1 / 0
+          dwProgress hooks total total
+          dwBest hooks bestD
+          pure (Just (ScanResult matches bestEntry))
+
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf _ [] = []
+chunksOf k xs = let (a, b) = splitAt k xs in a : chunksOf k b
 
 -- per-session artifacts: summary json + the position-line csv
 writeDtwResult :: FilePath -> DtwPlan -> ScanResult -> IO ()

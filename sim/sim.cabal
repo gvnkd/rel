@@ -65,6 +65,16 @@ executable mcp
     default-language: Haskell2010
     ghc-options:      -Wall -Wcompat -O2
 
+executable dtw
+    hs-source-dirs:   app
+    main-is:          DtwMain.hs
+    build-depends:    base,
+                      containers,
+                      directory,
+                      rel-sim
+    default-language: Haskell2010
+    ghc-options:      -Wall -Wcompat -O2 -threaded -rtsopts -with-rtsopts=-N
+
 foreign-library simffi
     type:             native-shared
     hs-source-dirs:   ffi

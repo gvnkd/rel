@@ -37,8 +37,11 @@ extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
 __attribute__((constructor)) static void simffi_init(void) {
-	int argc = 0;
-	char *argv[] = { nullptr };
+	// "+RTS -N -RTS": enable all CPU capabilities — otherwise the RTS
+	// starts with one capability and every forkIO batch (ML trainer,
+	// strat optimizer, DTW scan) runs single-core
+	int argc = 4;
+	char *argv[] = { (char *)"rel-sim", (char *)"+RTS", (char *)"-N", (char *)"-RTS", nullptr };
 	char **argv_ptr = argv;
 	hs_init(&argc, &argv_ptr);
 }
