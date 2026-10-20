@@ -18,6 +18,11 @@ module Sim.Run
     -- ML trainer
   , runMlBatch
   , writeMlResult
+    -- DTW correlation scan
+  , DtwPlan (..)
+  , DtwHooks (..)
+  , runDtwBatch
+  , writeDtwResult
     -- strategy optimizer + DSL
   , runStratBatch
   , runDslBacktest
@@ -26,8 +31,8 @@ module Sim.Run
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, catch, fromException, ioError, try)
-import Control.Monad (forM, unless, when)
+import Control.Exception (SomeException, catch, fromException, ioError, throwIO, try)
+import Control.Monad (forM, forM_, unless, when)
 import qualified Data.ByteString as B
 import Data.ByteString.Builder (char8, hPutBuilder, word64LE)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -35,6 +40,9 @@ import Data.List (intercalate)
 import qualified Data.Vector.Unboxed as VU
 import Data.Word (Word64)
 import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
+import Sim.Dtw (mkPrefix)
+import Sim.DtwIndex (ScanParams (..), ScanResult (..))
+import qualified Sim.DtwIndex as DTW
 import Sim.Gen (GenState (..), initState)
 import Sim.GenH (runSimH)
 import Sim.Lvl (LvlEv, LvlSeg, trFromBook)
@@ -281,6 +289,105 @@ writeMlResult out sr = do
       in s ++ "," ++ s ++ "," ++ s ++ "," ++ s ++ ",0\n"
     histRow (e, v) = show e ++ "," ++ printf "%.6g" v ++ "\n"
     testRow (c, e, p) = printf "%.5f,%.6g,%d\n" c e p
+
+-- --- DTW correlation scan ---------------------------------------------------
+
+-- one scan session: series A (tfA) windows against series B (tfB) at one
+-- window length. Artifacts per session: <out>/dtw_<tfA>_<tfB>_<win>.json
+-- (summary) and .csv (the position line: one row per stepped A window).
+data DtwPlan = DtwPlan
+  { dpTfA      :: !String
+  , dpTfB      :: !String
+  , dpWin      :: !Int
+  , dpBand     :: !Int
+  , dpPaa      :: !Int
+  , dpCard     :: !Int
+  , dpStep     :: !Int
+  , dpMaxCand  :: !Int
+  } deriving (Show)
+
+data DtwHooks = DtwHooks
+  { dwProgress  :: Int -> Int -> IO ()
+  , dwBest      :: Double -> IO ()
+  , dwCancelled :: IO Bool
+  }
+
+-- run all plans in parallel (one forkIO each); blocks until every session
+-- finishes (cancelled sessions return Nothing and write no artifacts)
+runDtwBatch :: FilePath -> VU.Vector Double -> VU.Vector Double -> [(DtwPlan, DtwHooks)] -> IO ()
+runDtwBatch out closesA closesB plans = do
+  createDirectoryIfMissing True out
+  doneRef <- newIORef 0
+  barrier <- newEmptyMVar
+  let n = length plans
+  forM plans $ \(pl, hooks) -> forkIO $ do
+    r <- try (runDtwSession hooks (planScanParams pl) closesA closesB) :: IO (Either SomeException (Maybe ScanResult))
+    case r of
+      Right (Just res) -> writeDtwResult out pl res
+      _                -> pure ()
+    finished <- atomicModifyIORef' doneRef (\d -> (d + 1, d + 1))
+    when (finished == n) (putMVar barrier ())
+  takeMVar barrier
+
+planScanParams :: DtwPlan -> ScanParams
+planScanParams pl = ScanParams (dpWin pl) (dpBand pl) (dpPaa pl) (dpCard pl) (dpStep pl) (dpMaxCand pl)
+
+-- hooked scan: one matchAt per stepped A window, progress + cancel polled
+-- every 16 windows. Nothing when cancelled or params/series invalid.
+runDtwSession :: DtwHooks -> ScanParams -> VU.Vector Double -> VU.Vector Double -> IO (Maybe ScanResult)
+runDtwSession hooks sp a b
+  | not (DTW.scanValid sp (VU.length a) (VU.length b)) = pure Nothing
+  | otherwise = do
+      let pfa = mkPrefix a
+          ctx = DTW.buildCtx sp b
+          wins = [0, scStep sp .. VU.length a - scWin sp]
+          total = length wins
+      go pfa ctx wins total 0 [] (1 / 0)
+  where
+  go _ _ [] total _ acc bestD = do
+    dwProgress hooks total total
+    dwBest hooks bestD
+    let matches = VU.fromList (reverse acc)
+        bestEntry = case [m | m@(_, j, _) <- acc, j >= 0] of
+          [] -> Nothing
+          m0 : ms -> Just (foldl' (\e@(_, _, da) m@(_, _, d') -> if d' < da then m else e) m0 ms)
+    pure (Just (ScanResult matches bestEntry))
+  go pfa ctx (i : rest) total done acc bestD = do
+    cancelled <- if done `mod` 16 == 0 then dwCancelled hooks else pure False
+    if cancelled
+      then throwIO SimCancelled
+      else do
+        let (i', j, d) = DTW.matchAt sp ctx pfa i
+            bestD' = if d == d && d < bestD then d else bestD
+        dwProgress hooks (done + 1) total
+        when (done `mod` 64 == 0) (dwBest hooks bestD')
+        go pfa ctx rest total (done + 1) ((i', j, d) : acc) bestD'
+
+-- per-session artifacts: summary json + the position-line csv
+writeDtwResult :: FilePath -> DtwPlan -> ScanResult -> IO ()
+writeDtwResult out pl res = do
+  let base = "dtw_" ++ dpTfA pl ++ "_" ++ dpTfB pl ++ "_" ++ show (dpWin pl)
+      entries = [ (i, j, d) | (i, j, d) <- VU.toList (srMatches res), j >= 0, d == d ]
+      found = length entries
+      js = intercalate ","
+        [ "\"tfA\":\"" ++ dpTfA pl ++ "\""
+        , "\"tfB\":\"" ++ dpTfB pl ++ "\""
+        , "\"win\":" ++ show (dpWin pl)
+        , "\"band\":" ++ show (dpBand pl)
+        , "\"windows\":" ++ show (VU.length (srMatches res))
+        , "\"found\":" ++ show found
+        , "\"best\":" ++ bestJson
+        , "\"csv\":\"" ++ base ++ ".csv\""
+        ]
+      bestJson = case srBest res of
+        Just (i, j, d) | d == d ->
+          "{\"i\":" ++ show i ++ ",\"j\":" ++ show j ++ ",\"dist\":" ++ show d ++ "}"
+        _ -> "null"
+  withFile (out ++ "/" ++ base ++ ".json") WriteMode $ \h ->
+    hPutStr h ("{" ++ js ++ "}\n")
+  withFile (out ++ "/" ++ base ++ ".csv") WriteMode $ \h -> do
+    hPutStr h "i,j,dist\n"
+    forM_ entries $ \(i, j, d) -> hPutStr h (show i ++ "," ++ show j ++ "," ++ show d ++ "\n")
 
 -- --- strategy optimizer -----------------------------------------------------
 

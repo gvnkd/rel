@@ -4,6 +4,7 @@ import Control.Exception (SomeException, catch, fromException, ioError, try)
 import Control.Monad (forM, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
+import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
 import qualified Data.Vector.Unboxed as VU
 import Foreign.C.String (CString, newCString, peekCString)
@@ -12,6 +13,7 @@ import Foreign.Marshal.Array (peekArray, pokeArray)
 import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
+import qualified Sim.DtwIndex as DTW
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..))
@@ -25,7 +27,7 @@ import qualified Sim.Strat.Dsl as STD
 import qualified Sim.Strat.Optimize as STO
 import Sim.Types (SimHooks (..), SimMode (..), SimParams (..), SimCancelled (..))
 import System.Directory (doesFileExist)
-import System.IO.Error (isDoesNotExistError)
+import System.IO.Error (isDoesNotExistError, userError)
 
 -- params are "key=value" pairs separated by ';', keys as in the CLI
 -- without the leading "--" (e.g. "candles=1000;seed=7")
@@ -353,6 +355,39 @@ foreign export ccall "sim_ml_sessions" simMlSessions :: IO CString
 -- request cancellation of the in-flight batch (idempotent)
 foreign export ccall "sim_ml_cancel" simMlCancel :: IO ()
 
+-- --- DTW correlation scan FFI ------------------------------------------------
+
+-- start a batch of parallel DTW scan sessions: series A (tf atf) windows
+-- against series B (tf btf) at each requested window length. The call
+-- BLOCKS until all sessions finish (run it on a worker thread); progress
+-- is polled via sim_dtw_progress and the per-session table via
+-- sim_dtw_sessions. Each session writes <out>/dtw_<atf>_<btf>_<win>.json
+-- (summary + best match) and <out>/dtw_<atf>_<btf>_<win>.csv (position
+-- line: one row per stepped A window).
+--
+-- params (key=value pairs separated by ';'):
+--   dataa=<path>         candles csv (sim or real-quotes) or .rbin — required
+--   datab=<path>         same for series B — required
+--   out=<dir>            results directory — required
+--   atf=<label>          timeframe label of series A (default "A")
+--   btf=<label>          timeframe label of series B (default "B")
+--   windows="64,128"     window lengths (default "128")
+--   band=N               Sakoe-Chiba band (default win/4 per window)
+--   step=N               A-window slide step (default win/4 per window)
+--   maxcand=N            candidate verifications cap per window (default 64)
+--   paa=N                fingerprint segments (default 8, must divide win)
+--   card=N               quantization cardinality 3..8 (default 8)
+--
+-- returns 0 on success (all sessions completed, some may be cancelled),
+-- 1 on bad params, 2 on data/IO failure, 3 when cancelled
+foreign export ccall "sim_dtw_scan" simDtwScan :: CString -> IO CInt
+
+foreign export ccall "sim_dtw_progress" simDtwProgress :: IO CDouble
+
+foreign export ccall "sim_dtw_sessions" simDtwSessions :: IO CString
+
+foreign export ccall "sim_dtw_cancel" simDtwCancel :: IO ()
+
 -- --- strategy optimizer FFI ------------------------------------------------
 
 -- start a batch of parallel SMA-cross strategy optimization sessions on
@@ -667,6 +702,159 @@ runMlBatch p = do
     done <- doesFileExist (mlpOut p ++ "/ml_" ++ show (msSeed st) ++ ".json")
     writeIORef (msStatus st) (if done then "done" else "cancelled")
   pure ()
+
+-- --- DTW scan implementation --------------------------------------------------
+
+data DtwSessionState = DtwSessionState
+  { dsWin     :: !Int
+  , dsWindows :: !Int
+  , dsDone    :: !(IORef Int)
+  , dsBest    :: !(IORef Double)
+  , dsStatus  :: !(IORef String)
+  }
+
+{-# NOINLINE dtwProgressRef #-}
+dtwProgressRef :: IORef (Int, Int)
+dtwProgressRef = unsafePerformIO (newIORef (0, 0))
+
+{-# NOINLINE dtwCancelRef #-}
+dtwCancelRef :: IORef Bool
+dtwCancelRef = unsafePerformIO (newIORef False)
+
+{-# NOINLINE dtwSessionsRef #-}
+dtwSessionsRef :: IORef [DtwSessionState]
+dtwSessionsRef = unsafePerformIO (newIORef [])
+
+simDtwProgress :: IO CDouble
+simDtwProgress = do
+  (done, total) <- readIORef dtwProgressRef
+  pure (CDouble (if total <= 0 then 0 else min 1 (fromIntegral done / fromIntegral total)))
+
+simDtwCancel :: IO ()
+simDtwCancel = writeIORef dtwCancelRef True
+
+simDtwSessions :: IO CString
+simDtwSessions = do
+  ss <- readIORef dtwSessionsRef
+  parts <- mapM sessionJson ss
+  newCString ("[" ++ intercalate "," parts ++ "]")
+  where
+    sessionJson st = do
+      d <- readIORef (dsDone st)
+      b <- readIORef (dsBest st)
+      s <- readIORef (dsStatus st)
+      let b' = if isInfinite b || b /= b then 0 else b
+      pure $ "{\"win\":" ++ show (dsWin st)
+          ++ ",\"windows\":" ++ show (dsWindows st)
+          ++ ",\"done\":" ++ show d
+          ++ ",\"best\":" ++ show b'
+          ++ ",\"status\":\"" ++ s ++ "\"}"
+
+data DtwParams = DtwParams
+  { dpDataA   :: !FilePath
+  , dpDataB   :: !FilePath
+  , dpOut     :: !FilePath
+  , dpTfAL    :: !String
+  , dpTfBL    :: !String
+  , dpWins    :: ![Int]
+  , dpBandF   :: !Int
+  , dpStepF   :: !Int
+  , dpMaxC    :: !Int
+  , dpPaaN    :: !Int
+  , dpCardN   :: !Int
+  }
+
+simDtwScan :: CString -> IO CInt
+simDtwScan paramsPtr = do
+  paramsStr <- peekCString paramsPtr
+  case parseDtwParams paramsStr of
+    Left _  -> pure 1
+    Right p -> do
+      writeIORef dtwCancelRef False
+      result <- try (runDtwScanBatch p) :: IO (Either SomeException ())
+      case result of
+        Left err
+          | Just SimCancelled <- fromException err -> pure 3
+          | otherwise                            -> pure 2
+        Right _ -> pure 0
+
+runDtwScanBatch :: DtwParams -> IO ()
+runDtwScanBatch p = do
+  barsA <- MLD.loadBars (dpDataA p)
+  barsB <- MLD.loadBars (dpDataB p)
+  case (barsA, barsB) of
+    (Right as, Right bs) -> do
+      let closesA = VU.fromList (map MLD.barC as)
+          closesB = VU.fromList (map MLD.barC bs)
+          bandOf win = if dpBandF p > 0 then dpBandF p else max 1 (win `div` 4)
+          stepOf win = if dpStepF p > 0 then dpStepF p else max 1 (win `div` 4)
+          plans =
+            [ Run.DtwPlan (dpTfAL p) (dpTfBL p) win (bandOf win) (dpPaaN p) (dpCardN p) (stepOf win) (dpMaxC p)
+            | win <- dpWins p
+            ]
+          planSp pl = DTW.ScanParams (Run.dpWin pl) (Run.dpBand pl) (Run.dpPaa pl) (Run.dpCard pl) (Run.dpStep pl) (Run.dpMaxCand pl)
+          planNWin pl =
+            if DTW.scanValid (planSp pl) (VU.length closesA) (VU.length closesB)
+              then length [0, Run.dpStep pl .. VU.length closesA - Run.dpWin pl]
+              else 0
+      stRefs <- forM plans $ \pl -> do
+        d <- newIORef 0
+        b <- newIORef (1 / 0)
+        s <- newIORef "run"
+        pure (DtwSessionState (Run.dpWin pl) (planNWin pl) d b s, pl)
+      writeIORef dtwSessionsRef (map fst stRefs)
+      writeIORef dtwProgressRef (0, sum (map (\(st, _) -> dsWindows st) stRefs))
+      let sessions =
+            [ ( pl
+              , Run.DtwHooks
+                  { Run.dwProgress = \d _ -> do
+                      writeIORef (dsDone st) d
+                      _ <- atomicModifyIORef' dtwProgressRef (\(done, tot) -> ((done + 1, tot), ()))
+                      pure ()
+                  , Run.dwBest = \best -> do
+                      cur <- readIORef (dsBest st)
+                      when (best < cur) (writeIORef (dsBest st) best)
+                  , Run.dwCancelled = readIORef dtwCancelRef
+                  })
+            | (st, pl) <- stRefs
+            ]
+      Run.runDtwBatch (dpOut p) closesA closesB sessions
+      forM stRefs $ \(st, pl) -> do
+        done <- doesFileExist (dpOut p ++ "/dtw_" ++ Run.dpTfA pl ++ "_" ++ Run.dpTfB pl ++ "_" ++ show (Run.dpWin pl) ++ ".json")
+        writeIORef (dsStatus st) (if done then "done" else if dsWindows st == 0 then "short" else "cancelled")
+      pure ()
+    _ -> ioError (userError "dtw: failed to load dataa/datab")
+
+parseDtwParams :: String -> Either String DtwParams
+parseDtwParams s = do
+  let kv = kvPairs s
+      look k = lookup k kv
+  dataA  <- maybe (Left "missing dataa=") Right (look "dataa")
+  dataB  <- maybe (Left "missing datab=") Right (look "datab")
+  outDir <- maybe (Left "missing out=") Right (look "out")
+  let tfA   = fromMaybe "A" (look "atf")
+      tfB   = fromMaybe "B" (look "btf")
+  wins   <- case look "windows" of
+    Nothing -> Right [128]
+    Just v | Just ws <- mapM readInt (split ',' v), not (null ws), all (> 0) ws -> Right ws
+           | otherwise -> Left "bad windows"
+  band   <- readK "band" 0
+  step   <- readK "step" 0
+  maxc   <- readK "maxcand" 64
+  paaN   <- readK "paa" 8
+  cardN  <- readK "card" 8
+  pure (DtwParams dataA dataB outDir tfA tfB wins band step maxc paaN cardN)
+  where
+  readK :: Read a => String -> a -> Either String a
+  readK k d = case lookup k (kvPairs s) of
+    Nothing -> Right d
+    Just v  -> maybe (Left ("bad " ++ k)) Right (readV v)
+  readV v = case reads v of
+    [(x, "")] -> Just x
+    _         -> Nothing
+  readInt v = case reads v of
+    [(x, "")] -> Just (x :: Int)
+    _         -> Nothing
 
 parseMlParams :: String -> Either String MlParams
 parseMlParams s = do
