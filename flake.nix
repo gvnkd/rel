@@ -57,7 +57,7 @@
             self.packages.${system}.sim
             nixpkgs.legacyPackages.${system}.gdtoolkit_4
             (nixpkgs.legacyPackages.${system}.haskellPackages.ghcWithPackages (
-              ps: with ps; [ QuickCheck aeson directory splitmix vector ]
+              ps: with ps; [ QuickCheck aeson bytestring containers directory network scientific splitmix text vector ]
             ))
           ];
         };

@@ -22,6 +22,8 @@ import Sim.Gen
 import Sim.GenH (runSimH)
 import qualified Sim.Ind as IND
 import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
+import Sim.Dtw (dtwPath, mkPrefix, stepCost, subseqAt, zslice)
+import Sim.DtwIndex (ScanParams (..), ScanResult (..), neighborWords, scanWindows, wordAt, wordOfZ)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import qualified Sim.Markov as MKV
 import Sim.Markov (MClass (..), MarkovParams (..), defaultMarkovParams, markovSeries, markovSeriesStates, statesOf)
@@ -1700,6 +1702,135 @@ prop_ind_bb_flat =
       (m, u, l) = b VU.! 59
   in abs (m - 1.2345) < 1e-12 && abs (u - 1.2345) < 1e-12 && abs (l - 1.2345) < 1e-12
 
+-- --- DTW props -----------------------------------------------------------
+
+-- warping path: unit steps, monotone both axes, fixed endpoints, and the
+-- reported cost equals the summed per-cell squared distances along it
+prop_dtw_path_valid :: Property
+prop_dtw_path_valid =
+  forAll (chooseInt (2, 30)) $ \m ->
+  forAll (chooseInt (2, 10)) $ \slack ->
+  forAll (vectorOf m (choose (-5.0, 5.0))) $ \as ->
+  forAll (vectorOf (m + slack) (choose (-5.0, 5.0))) $ \bs ->
+    let r = max slack 1
+        a = VU.fromList as
+        b = VU.fromList bs
+        (cost, path) = dtwPath a b r
+        cells = [ (a VU.! i, b VU.! j) | (i, j) <- path ]
+        walkSum = sum [ (x - y) ^ 2 | (x, y) <- cells ]
+        stepsOk = and [ let di = abs (i2 - i1); dj = abs (j2 - j1)
+                        in di <= 1 && dj <= 1 && di + dj >= 1
+                      | ((i1, j1), (i2, j2)) <- zip path (tail path) ]
+        monoOk = and [ i1 <= i2 && j1 <= j2 | ((i1, j1), (i2, j2)) <- zip path (tail path) ]
+    in not (null path)
+       && head path == (0, 0)
+       && last path == (m - 1, m + slack - 1)
+       && stepsOk && monoOk
+       && abs (cost - walkSum) < 1e-9 * max 1 (abs walkSum)
+
+-- z-normalization factors out any affine Y-deformation: a*x+b matches x
+-- at ~zero DTW cost
+prop_dtw_affine_invariance :: Property
+prop_dtw_affine_invariance =
+  forAll (vectorOf 32 (choose (-3.0, 3.0))) $ \xs ->
+    let a = VU.fromList xs
+        pf = mkPrefix a
+        b = VU.map (\x -> 2.5 * x - 7.0) a
+        (cost, path) = dtwPath (zslice pf 0 32) (zslice (mkPrefix b) 0 32) 4
+    in stepCost (cost, path) < 1e-10
+
+-- X-deformation: a resampled (stretched) copy of the same wave aligns at
+-- ~zero cost when the band covers the accumulated drift
+-- X-deformation: a stretched-by-duplication copy of the same wave (each
+-- value kept, duplicates monotone, drift < band) aligns at zero cost
+prop_dtw_stretch_invariance :: Bool
+prop_dtw_stretch_invariance =
+  let wave t = sin (2 * pi * t / 20)
+      x = VU.generate 80 (wave . fromIntegral)
+      y = VU.generate 88 (\j -> x VU.! min 79 (j - j `div` 11))
+      (cost, path) = dtwPath x y 8
+  in stepCost (cost, path) < 1e-10
+
+-- zslice: mean 0, std 1
+prop_dtw_zslice_stats :: Property
+prop_dtw_zslice_stats =
+  forAll (vectorOf 24 (choose (1.0, 100.0))) $ \xs ->
+    let z = zslice (mkPrefix (VU.fromList xs)) 3 20
+        mu = VU.sum z / 20
+        var = VU.sum (VU.map (\v -> (v - mu) ^ 2) z) / 20
+    in abs mu < 1e-9 && abs (sqrt var - 1) < 1e-9
+
+-- fingerprint of a window is identical whether computed from the raw
+-- series prefix or from an explicit z-sliced window
+prop_dtw_fp_consistent :: Property
+prop_dtw_fp_consistent =
+  forAll (vectorOf 40 (choose (-2.0, 2.0))) $ \xs ->
+    let pf = mkPrefix (VU.fromList xs)
+    in and [ wordAt pf j 16 4 6 == wordOfZ (zslice pf j 16) 4 6 | j <- [0, 7 .. 24] ]
+
+-- index-based candidate search: never reports better than the brute-force
+-- optimum, and recalls the exact optimum whenever a genuinely close match
+-- exists (per-step distance below the fingerprint quantization floor).
+-- Arbitrary noise optima are not fingerprint-recoverable and are not
+-- claimed.
+prop_dtw_index_matches_bruteforce :: Property
+prop_dtw_index_matches_bruteforce =
+  forAll (chooseInt (24, 48)) $ \na ->
+  forAll (chooseInt (60, 120)) $ \nb ->
+  forAll (vectorOf na (choose (-4.0, 4.0))) $ \as ->
+  forAll (vectorOf nb (choose (-4.0, 4.0))) $ \bs ->
+    let a = VU.fromList as
+        b = VU.fromList bs
+        win = 16
+        band = 3
+        close = 0.02
+        sp = ScanParams win band 4 4 3 1000
+        res = scanWindows sp a b
+        pfb = mkPrefix b
+        jMax = nb - win - 2 * band
+        ok (i, j, d) =
+          let ds = bruteList i
+              db = if null ds then 1 / 0
+                   else minimum (map snd ds)
+          in if j >= 0
+               then -- found: plausible distance, and exact recall when close
+                    not (null ds)
+                    && any (\(j', d') -> j' == j && abs (d' - d) < 1e-9) ds
+                    && db <= d + 1e-9
+                    && (db >= close || abs (d - db) < 1e-9)
+               else -- no candidate survived: then no close match may exist
+                    db >= close || null ds
+        bruteList i =
+          let z = zslice (mkPrefix a) i win
+          in [ (j, stepCost r) | j <- [0 .. jMax]
+             , Just r <- [subseqAt z pfb j band] ]
+        entries = VU.toList (srMatches res)
+    in not (null entries) && all ok entries
+
+-- planted-shape recovery in a random walk (autocorrelated, like prices):
+-- an affinely transformed, mildly stretched copy of an A window planted
+-- into unrelated walk is found at the planted position with small cost
+prop_dtw_scan_finds_planted :: Bool
+prop_dtw_scan_finds_planted =
+  let mkWalk seed = VU.scanl' (+) 0 (VU.fromList (take 1500 (drop seed lcgNoise)))
+      a = mkWalk 100
+      win = 64
+      band = 16
+      plant j0 = VU.generate win $ \k ->
+        let pos = fromIntegral k * 1.1 :: Double
+            src = j0 + floor pos
+            frac = pos - fromIntegral (floor pos)
+            v = (1 - frac) * (a VU.! src) + frac * (a VU.! (src + 1))
+        in 1.7 * v + 30.0
+      b0 = mkWalk 2000
+      b = VU.concat [VU.slice 0 150 b0, plant 20, VU.slice (150 + win) (1500 - 150 - win) b0]
+      sp = ScanParams win band 8 8 4 64
+      res = scanWindows sp a b
+      plantedEntry = [ (i, j, d) | (i, j, d) <- VU.toList (srMatches res), i == 20 ]
+  in case plantedEntry of
+       [(_, j, d)] -> j >= 150 - band && j <= 150 + win && d < 0.1
+       _ -> False
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -1816,6 +1947,13 @@ props =
   , ("dsl_signal_monotone", property prop_dsl_signal_monotone)
   , ("dsl_backtest_fee_ledger", property prop_dsl_backtest_fee_ledger)
   , ("dsl_cross_activation", property prop_dsl_cross_activation)
+  , ("dtw_path_valid", prop_dtw_path_valid)
+  , ("dtw_affine_invariance", property prop_dtw_affine_invariance)
+  , ("dtw_stretch_invariance", property prop_dtw_stretch_invariance)
+  , ("dtw_zslice_stats", property prop_dtw_zslice_stats)
+  , ("dtw_fp_consistent", property prop_dtw_fp_consistent)
+  , ("dtw_index_matches_bruteforce", prop_dtw_index_matches_bruteforce)
+  , ("dtw_scan_finds_planted", property prop_dtw_scan_finds_planted)
   , ("mcp_params_json_roundtrip", property prop_mcp_params_json_roundtrip)
   , ("mcp_params_json_bad_mode", property prop_mcp_params_json_bad_mode)
   , ("mcp_perm_entropy_length", property prop_mcp_perm_entropy_length)

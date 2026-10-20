@@ -20,6 +20,8 @@ library
                       Sim.Fft
                       Sim.Ind
                       Sim.Markov
+                      Sim.Dtw
+                      Sim.DtwIndex
                       Sim.ML.Data
                       Sim.ML.Model
                       Sim.ML.Train
