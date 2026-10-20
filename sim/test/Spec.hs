@@ -20,6 +20,7 @@ import qualified Data.Vector.Unboxed as VU
 import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, rampMass, refinePeaks, solveLS)
 import Sim.Gen
 import Sim.GenH (runSimH)
+import qualified Sim.Ind as IND
 import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import qualified Sim.Markov as MKV
@@ -1551,6 +1552,154 @@ prop_dsl_cross_activation =
      && head fires >= 5  -- first possible valid diff index for sma(5)
      && VU.length sig == 100
 
+-- --- Sim.Ind: SMA / EMA / MACD / RSI / Bollinger --------------------------
+
+prop_ind_sma_matches_naive :: Property
+prop_ind_sma_matches_naive =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs ->
+  forAll (chooseInt (1, 20)) $ \w ->
+    let v = VU.fromList xs
+        s = IND.smaSeries w v
+        naive i = sum (VU.toList (VU.slice (i - w + 1) w v)) / fromIntegral w
+    in VU.length s == VU.length v
+       && and [ if i < w - 1
+                  then isNaN (s VU.! i)
+                  else abs (s VU.! i - naive i) < 1e-9
+              | i <- [0 .. VU.length v - 1] ]
+
+-- the chart indicator and the strat backtest share the SMA convention
+-- (prefix-sum running sum, NaN while i < w - 1): identical output
+-- (NaN-aware: NaN /= NaN in a plain list compare)
+prop_ind_sma_matches_strat :: Property
+prop_ind_sma_matches_strat =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs ->
+  forAll (chooseInt (1, 20)) $ \w ->
+    let v = VU.fromList xs
+        same a b = (isNaN a && isNaN b) || a == b
+    in and (VU.toList (VU.zipWith same (IND.smaSeries w v) (STB.smaSeries w v)))
+
+prop_ind_ema_seed_and_step :: Property
+prop_ind_ema_seed_and_step =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs0 ->
+  forAll (chooseInt (2, 12)) $ \p ->
+    let xs = take 200 xs0
+        v = VU.fromList xs
+        n = VU.length v
+        e = IND.emaSeries p v
+        k = 2.0 / (fromIntegral p + 1.0)
+        seed = sum (take p xs) / fromIntegral p
+    in VU.length e == n
+       && (if n < p
+             then all isNaN (VU.toList e)
+             else all isNaN (VU.toList (VU.take (p - 1) e))
+                  && abs (e VU.! (p - 1) - seed) < 1e-9
+                  && and [ abs (e VU.! i - (k * (v VU.! i) + (1 - k) * e VU.! (i - 1))) < 1e-12
+                         | i <- [p .. n - 1] ])
+
+prop_ind_macd_invariants :: Property
+prop_ind_macd_invariants =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs0 ->
+  forAll (chooseInt (1, 8)) $ \f ->
+  forAll (chooseInt (1, 16)) $ \s ->
+  forAll (chooseInt (1, 8)) $ \g ->
+    let xs = take 200 xs0
+        v = VU.fromList xs
+        n = VU.length v
+        rows = IND.macdSeries f s g v
+        ef = IND.emaSeries f v
+        es = IND.emaSeries s v
+    in VU.length rows == n
+       && and [ let (m, sg, h) = rows VU.! i
+                    d = ef VU.! i - es VU.! i
+                in if isNaN d
+                     then isNaN m && isNaN sg && isNaN h
+                     else abs (m - d) < 1e-9
+                          && if isNaN sg then isNaN h else abs (h - (m - sg)) < 1e-9
+              | i <- [0 .. n - 1] ]
+
+-- signal warm-up: NaN while i < slow-1 + sig-1, valid from there
+prop_ind_macd_warmup :: Bool
+prop_ind_macd_warmup =
+  let v = VU.fromList [100 + 0.3 * fromIntegral i | i <- [0 .. 99 :: Int]]
+      rows = IND.macdSeries 12 26 9 v
+      ok i = let (_, sg, _) = rows VU.! i in not (isNaN sg)
+  in VU.length rows == 100
+     && not (any ok [0 .. 32])
+     && ok 33
+
+prop_ind_rsi_bounds :: Property
+prop_ind_rsi_bounds =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs ->
+  forAll (chooseInt (1, 20)) $ \p ->
+    let v = VU.fromList xs
+        r = IND.rsiSeries p v
+    in VU.length r == VU.length v
+       && all (\x -> isNaN x || (x >= 0 && x <= 100)) (VU.toList r)
+
+prop_ind_rsi_trends :: Bool
+prop_ind_rsi_trends =
+  let up = VU.fromList [1.0 + 0.01 * fromIntegral i | i <- [0 .. 99 :: Int]]
+      dn = VU.fromList [2.0 - 0.01 * fromIntegral i | i <- [0 .. 99 :: Int]]
+      flat = VU.replicate 50 1.5
+  in IND.rsiSeries 14 up VU.! 99 == 100.0
+     && IND.rsiSeries 14 dn VU.! 99 == 0.0
+     && IND.rsiSeries 14 flat VU.! 49 == 50.0
+
+-- the Wilder recursion matches a naive list implementation
+prop_ind_rsi_matches_wilder :: Property
+prop_ind_rsi_matches_wilder =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs0 ->
+  forAll (chooseInt (1, 20)) $ \p ->
+    let xs = take 120 xs0
+        v = VU.fromList xs
+        n = length xs
+        r = VU.toList (IND.rsiSeries p v)
+        diffs = zipWith (-) (tail xs) xs
+        gains = map (max 0.0) diffs
+        losses = map (max 0.0 . negate) diffs
+        avg as = sum as / fromIntegral p
+        rsiOf g l
+          | l == 0.0 = if g == 0.0 then 50.0 else 100.0
+          | otherwise = 100.0 - 100.0 / (1.0 + g / l)
+        loop _ _ [] = []
+        loop g l ((dg, dl) : rest) =
+          let g' = (g * fromIntegral (p - 1) + dg) / fromIntegral p
+              l' = (l * fromIntegral (p - 1) + dl) / fromIntegral p
+          in (g', l') : loop g' l' rest
+        avgs = (avg (take p gains), avg (take p losses))
+               : loop (avg (take p gains)) (avg (take p losses)) (drop p (zip gains losses))
+        naive = map (uncurry rsiOf) avgs
+    in if n < p + 1
+         then all isNaN r
+         else and [ abs (r !! (p + j) - naive !! j) < 1e-9
+                  | j <- [0 .. length naive - 1] ]
+
+prop_ind_bb_matches_naive :: Property
+prop_ind_bb_matches_naive =
+  forAll (listOf1 (choose (0.5, 2.0))) $ \xs ->
+  forAll (chooseInt (1, 20)) $ \p ->
+  forAll (choose (0.5, 4.0)) $ \m ->
+    let v = VU.fromList xs
+        n = VU.length v
+        b = IND.bollingerSeries p m v
+        mid = IND.smaSeries p v
+        sd i = sqrt (sum [ (v VU.! j - mid VU.! i) ^ 2 | j <- [i - p + 1 .. i] ] / fromIntegral p)
+    in VU.length b == n
+       && and [ let (mo, u, l) = b VU.! i
+                in if i < p - 1
+                     then isNaN mo && isNaN u && isNaN l
+                     else abs (mo - mid VU.! i) < 1e-9
+                          && abs (u - (mid VU.! i + m * sd i)) < 1e-9
+                          && abs (l - (mid VU.! i - m * sd i)) < 1e-9
+              | i <- [0 .. n - 1] ]
+
+prop_ind_bb_flat :: Bool
+prop_ind_bb_flat =
+  let v = VU.replicate 60 1.2345
+      b = IND.bollingerSeries 20 2.0 v
+      (m, u, l) = b VU.! 59
+  in abs (m - 1.2345) < 1e-12 && abs (u - 1.2345) < 1e-12 && abs (l - 1.2345) < 1e-12
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -1617,6 +1766,16 @@ props =
   , ("cecp_iid_noise_corner", property prop_cecp_iid_noise_corner)
   , ("cecp_rolling_matches_window", property prop_cecp_rolling_matches_window)
   , ("cecp_rolling_invalid", property prop_cecp_rolling_invalid)
+  , ("ind_sma_matches_naive", property prop_ind_sma_matches_naive)
+  , ("ind_sma_matches_strat", property prop_ind_sma_matches_strat)
+  , ("ind_ema_seed_and_step", property prop_ind_ema_seed_and_step)
+  , ("ind_macd_invariants", property prop_ind_macd_invariants)
+  , ("ind_macd_warmup", property prop_ind_macd_warmup)
+  , ("ind_rsi_bounds", property prop_ind_rsi_bounds)
+  , ("ind_rsi_trends", property prop_ind_rsi_trends)
+  , ("ind_rsi_matches_wilder", property prop_ind_rsi_matches_wilder)
+  , ("ind_bb_matches_naive", property prop_ind_bb_matches_naive)
+  , ("ind_bb_flat", property prop_ind_bb_flat)
   , ("mkv_classify_boundaries", property prop_mkv_classify_boundaries)
   , ("mkv_output_length", property prop_mkv_output_length)
   , ("mkv_bsbp_matches_window", property prop_mkv_bsbp_matches_window)

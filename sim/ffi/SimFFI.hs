@@ -15,6 +15,7 @@ import Sim.Cli (applyArgs)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..))
+import Sim.Ind (bollingerSeries, macdSeries, rsiSeries, smaSeries)
 import Sim.Markov (MarkovParams (..), markovSeriesStates)
 import qualified Sim.ML.Data as MLD
 import qualified Sim.ML.Train as MLT
@@ -123,6 +124,81 @@ simCecp ptr (CInt count) (CInt win) (CInt m) out
       let pairs = rollingCECP (fromIntegral win) (fromIntegral m) (map (\(CDouble d) -> d) closes)
           vals = concatMap (\(h, c) -> [CDouble h, CDouble c]) pairs
       if length pairs /= fromIntegral count
+        then pure 0
+        else do
+          pokeArray out vals
+          pure (CInt (fromIntegral (length vals)))
+
+-- simple moving average over closes: writes `count` doubles into out
+-- (NaN until the window fills), returns count on success, 0 on invalid
+-- input
+foreign export ccall "sim_sma" simSma
+  :: Ptr CDouble -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simSma :: Ptr CDouble -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simSma ptr (CInt count) (CInt period) out
+  | count <= 0 || period <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let vals = VU.toList (smaSeries (fromIntegral period) (VU.fromList (map (\(CDouble d) -> d) closes)))
+      if length vals /= fromIntegral count
+        then pure 0
+        else do
+          pokeArray out (map CDouble vals)
+          pure (CInt (fromIntegral count))
+
+-- MACD over closes: writes 3 * `count` doubles into out — (macd, signal,
+-- hist) interleaved per candle, NaN warm-up — returns 3 * count on
+-- success, 0 on invalid input
+foreign export ccall "sim_macd" simMacd
+  :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simMacd :: Ptr CDouble -> CInt -> CInt -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simMacd ptr (CInt count) (CInt fast) (CInt slow) (CInt sig) out
+  | count <= 0 || fast <= 0 || slow <= 0 || sig <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let rows = macdSeries (fromIntegral fast) (fromIntegral slow) (fromIntegral sig)
+            (VU.fromList (map (\(CDouble d) -> d) closes))
+          vals = concatMap (\(m, s, h) -> [CDouble m, CDouble s, CDouble h]) (VU.toList rows)
+      if VU.length rows /= fromIntegral count
+        then pure 0
+        else do
+          pokeArray out vals
+          pure (CInt (fromIntegral (length vals)))
+
+-- Wilder's RSI over closes: writes `count` doubles into out (NaN for
+-- i < period), returns count on success, 0 on invalid input
+foreign export ccall "sim_rsi" simRsi
+  :: Ptr CDouble -> CInt -> CInt -> Ptr CDouble -> IO CInt
+
+simRsi :: Ptr CDouble -> CInt -> CInt -> Ptr CDouble -> IO CInt
+simRsi ptr (CInt count) (CInt period) out
+  | count <= 0 || period <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let vals = VU.toList (rsiSeries (fromIntegral period) (VU.fromList (map (\(CDouble d) -> d) closes)))
+      if length vals /= fromIntegral count
+        then pure 0
+        else do
+          pokeArray out (map CDouble vals)
+          pure (CInt (fromIntegral count))
+
+-- Bollinger bands over closes: writes 3 * `count` doubles into out —
+-- (mid, upper, lower) interleaved per candle, NaN warm-up — returns
+-- 3 * count on success, 0 on invalid input
+foreign export ccall "sim_bb" simBb
+  :: Ptr CDouble -> CInt -> CInt -> CDouble -> Ptr CDouble -> IO CInt
+
+simBb :: Ptr CDouble -> CInt -> CInt -> CDouble -> Ptr CDouble -> IO CInt
+simBb ptr (CInt count) (CInt period) (CDouble mult) out
+  | count <= 0 || period <= 0 = pure 0
+  | otherwise = do
+      closes <- peekArray (fromIntegral count) ptr
+      let rows = bollingerSeries (fromIntegral period) mult
+            (VU.fromList (map (\(CDouble d) -> d) closes))
+          vals = concatMap (\(m, u, l) -> [CDouble m, CDouble u, CDouble l]) (VU.toList rows)
+      if VU.length rows /= fromIntegral count
         then pure 0
         else do
           pokeArray out vals

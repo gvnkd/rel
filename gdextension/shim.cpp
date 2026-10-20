@@ -25,6 +25,10 @@ extern "C" int sim_fft_best(const double *closes, int count, int predict, int rm
 extern "C" int sim_perm_entropy(const double *closes, int count, int window, int m, double *out);
 extern "C" int sim_cecp(const double *closes, int count, int window, int m, double *out);
 extern "C" int sim_markov(const int *states, int count, int window, int surpwin, double lam_hi, double lam_lo, double s_ref, double k, double *out);
+extern "C" int sim_sma(const double *closes, int count, int period, double *out);
+extern "C" int sim_macd(const double *closes, int count, int fast, int slow, int sig, double *out);
+extern "C" int sim_rsi(const double *closes, int count, int period, double *out);
+extern "C" int sim_bb(const double *closes, int count, int period, double mult, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
@@ -51,6 +55,10 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("fft_forecast", "closes", "start", "end", "predict", "waves", "edge_w"), &SimNative::fft_forecast);
 		godot::ClassDB::bind_method(godot::D_METHOD("perm_entropy", "closes", "window", "m"), &SimNative::perm_entropy);
 		godot::ClassDB::bind_method(godot::D_METHOD("cecp", "closes", "window", "m"), &SimNative::cecp);
+		godot::ClassDB::bind_method(godot::D_METHOD("sma", "closes", "period"), &SimNative::sma);
+		godot::ClassDB::bind_method(godot::D_METHOD("macd", "closes", "fast", "slow", "sig"), &SimNative::macd);
+		godot::ClassDB::bind_method(godot::D_METHOD("rsi", "closes", "period"), &SimNative::rsi);
+		godot::ClassDB::bind_method(godot::D_METHOD("bb", "closes", "period", "mult"), &SimNative::bb);
 		godot::ClassDB::bind_method(godot::D_METHOD("markov", "states", "window", "surpwin", "lam_hi", "lam_lo", "s_ref", "k"), &SimNative::markov);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_train", "params"), &SimNative::ml_train);
 		godot::ClassDB::bind_method(godot::D_METHOD("ml_progress"), &SimNative::ml_progress);
@@ -164,6 +172,50 @@ public:
 			return out;
 		out.resize(2 * (int)closes.size());
 		int got = sim_cecp(closes.ptr(), (int)closes.size(), (int)window, (int)m, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
+	}
+
+	// simple moving average: one double per candle, NaN warm-up
+	godot::PackedFloat64Array sma(const godot::PackedFloat64Array &closes, int64_t period) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || period < 1)
+			return out;
+		out.resize((int)closes.size());
+		int got = sim_sma(closes.ptr(), (int)closes.size(), (int)period, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
+	}
+
+	// MACD: (macd, signal, hist) interleaved per candle, NaN warm-up
+	godot::PackedFloat64Array macd(const godot::PackedFloat64Array &closes, int64_t fast, int64_t slow, int64_t sig) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || fast < 1 || slow < 1 || sig < 1)
+			return out;
+		out.resize(3 * (int)closes.size());
+		int got = sim_macd(closes.ptr(), (int)closes.size(), (int)fast, (int)slow, (int)sig, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
+	}
+
+	// Wilder's RSI: one double per candle, NaN for i < period
+	godot::PackedFloat64Array rsi(const godot::PackedFloat64Array &closes, int64_t period) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || period < 1)
+			return out;
+		out.resize((int)closes.size());
+		int got = sim_rsi(closes.ptr(), (int)closes.size(), (int)period, out.ptrw());
+		out.resize(got < 0 ? 0 : got);
+		return out;
+	}
+
+	// Bollinger bands: (mid, upper, lower) interleaved per candle, NaN warm-up
+	godot::PackedFloat64Array bb(const godot::PackedFloat64Array &closes, int64_t period, double mult) {
+		godot::PackedFloat64Array out;
+		if (closes.is_empty() || period < 1)
+			return out;
+		out.resize(3 * (int)closes.size());
+		int got = sim_bb(closes.ptr(), (int)closes.size(), (int)period, mult, out.ptrw());
 		out.resize(got < 0 ? 0 : got);
 		return out;
 	}

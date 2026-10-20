@@ -4,8 +4,7 @@ const PlotDataScript := preload("res://plot_data.gd")
 
 const ZOOM_FACTOR := 1.2
 const VOL_GRIP := 4.0
-const VOL_SNAP := 0.02
-const VOL_MAX_FRAC := 0.6
+const MIN_GRAPH_H := 80.0
 const RMB_CLICK_TOL := 4.0
 
 @export var replay_rate := 60.0
@@ -13,9 +12,17 @@ const RMB_CLICK_TOL := 4.0
 var view := ChartView.new()
 var data: PlotData = PlotDataScript.new()
 
-var vol_frac := 0.2
-var vol_collapsed := false
-var vol_dragging := false
+# sub-pane stack in stack order: the chart pane (flex, header + graph)
+# first, then one pane per pane-drawn indicator (MACD/RSI/VOLUME), in
+# indicator order. chart.gd owns the layout (heights, rects, collapse
+# buttons, grip drags); SubPaneWidget only draws
+const PANE_MIN_H := 28.0
+const PANE_MAX_H := 600.0
+
+var _panes: Array = []
+var _chart_pane: SubPaneWidget
+var chart_collapsed := false
+var _pane_drag: SubPaneWidget = null
 
 var head := -1
 var playing := false
@@ -44,7 +51,6 @@ const PALETTE: Array[Color] = [
 @onready var grid: GridWidget = $Grid
 @onready var series_widget: SeriesWidget = $Series
 @onready var indicator_widget: IndicatorWidget = $Indicators
-@onready var volume_widget: VolumeWidget = $Volume
 @onready var book_widget: OrderBookWidget = $Book
 @onready var cross_widget: CrossWidget = $Cross
 @onready var cursor_widget: CursorWidget = $Cursor
@@ -61,11 +67,17 @@ var _trades_save_idx := -1
 
 func _ready() -> void:
 	_mcp_start()
-	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
+	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
 		w.view = view
 		w.data = data
 	trades_widget.trades_sets = _trades_sets
-	_sync_volume()
+	cross_widget.panes = _panes
+	_chart_pane = _make_pane("chart", null)
+	_panes.append(_chart_pane)
+	# chart chrome above the graph widgets (header strip), the rest of the
+	# panes below the crosshair/cursor overlays
+	move_child(_chart_pane, indicator_widget.get_index() + 1)
+	_sync_panes()
 	_sync_mode_hud()
 	_sync_indicator_hud()
 	cursor_widget.cross = cross_widget
@@ -196,7 +208,7 @@ func _on_menu_trades_remove(k: int) -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
 		view.layout(size)
-		_sync_volume()
+		_sync_panes()
 		_refresh()
 
 func _input(event: InputEvent) -> void:
@@ -213,49 +225,54 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton:
 		var button := event as InputEventMouseButton
 		if button.pressed and not _over_ui(button.position):
+			# event positions are viewport-global; all chart geometry
+			# (view rects, pane rects) is chart-local — the chart sits
+			# below the main tab bar, so convert before hit tests
+			var pos: Vector2 = button.position - get_screen_position()
 			if button.button_index == MOUSE_BUTTON_WHEEL_UP:
-				view.zoom_x_at(button.position, ZOOM_FACTOR)
+				view.zoom_x_at(pos, ZOOM_FACTOR)
 				_refresh()
 			elif button.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				view.zoom_x_at(button.position, 1.0 / ZOOM_FACTOR)
+				view.zoom_x_at(pos, 1.0 / ZOOM_FACTOR)
 				_refresh()
 			elif button.button_index == MOUSE_BUTTON_LEFT:
-				var hit: Array = indicator_widget.fft_handle_at(button.position)
-				if not hit.is_empty():
-					_begin_fft_drag(hit)
-				elif button.double_click and _near_vol_grip(button.position):
-					_toggle_volume()
-				elif _near_vol_grip(button.position):
-					vol_dragging = true
+				var pane: SubPaneWidget = _pane_btn_at(pos)
+				if pane != null:
+					_toggle_pane(pane)
+				else:
+					var hit: Array = indicator_widget.fft_handle_at(pos)
+					if not hit.is_empty():
+						_begin_fft_drag(hit)
+					elif _pane_grip_at(pos) != null:
+						if button.double_click:
+							_toggle_pane(_pane_grip_at(pos))
+						else:
+							_pane_drag = _pane_grip_at(pos)
 			elif button.button_index == MOUSE_BUTTON_RIGHT:
 				_rmb_down = true
-				_rmb_down_pos = button.position
+				_rmb_down_pos = pos
 		elif not button.pressed:
 			if button.button_index == MOUSE_BUTTON_LEFT:
-				vol_dragging = false
+				_pane_drag = null
 				if not _fft_drag.is_empty():
 					_fft_drag = []
 					Input.set_default_cursor_shape(Input.CURSOR_ARROW)
-				if vol_frac < VOL_SNAP:
-					vol_collapsed = true
-				_sync_volume()
 			elif button.button_index == MOUSE_BUTTON_RIGHT:
-				if _rmb_down and button.position.distance_to(_rmb_down_pos) < RMB_CLICK_TOL:
-					_open_popup(button.position)
+				var pos: Vector2 = button.position - get_screen_position()
+				if _rmb_down and pos.distance_to(_rmb_down_pos) < RMB_CLICK_TOL:
+					_open_popup(pos)
 				_rmb_down = false
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
-		cross_widget.mouse = motion.position
+		var pos: Vector2 = motion.position - get_screen_position()
+		cross_widget.mouse = pos
 		if not _fft_drag.is_empty():
-			_drag_fft_to(motion.position)
-		elif vol_dragging:
-			var plot_h := maxf(view.plot_rect.size.y, 1.0)
-			vol_collapsed = false
-			vol_frac = clampf((view.plot_rect.end.y - motion.position.y) / plot_h, 0.0, VOL_MAX_FRAC)
-			_sync_volume()
+			_drag_fft_to(pos)
+		elif _pane_drag != null:
+			_drag_pane_to(_pane_drag, pos)
 		elif not sim_window.is_dragging() and not _over_ui(motion.position):
 			if motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
-				view.scale_by(motion.relative, motion.position)
+				view.scale_by(motion.relative, pos)
 				view.follow = false
 			elif motion.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE) != 0 or pan_mode:
 				view.pan_by(motion.relative)
@@ -280,30 +297,134 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	elif key.keycode == KEY_F1:
 		sim_window.toggle()
 	elif key.keycode == KEY_V:
-		_toggle_volume()
+		# toggle the first volume indicator, like any other indicator
+		for ind in indicator_widget.indicators:
+			if ind.kind == "VOLUME":
+				ind.enabled = not ind.enabled
+				_sync_indicator_hud()
+				_sync_panes()
+				_refresh()
+				break
 
-func vol_pane_h() -> float:
-	if vol_collapsed:
-		return 0.0
-	return view.plot_rect.size.y * vol_frac
+# --- sub-pane stack ---------------------------------------------------------
 
-func _near_vol_grip(pos: Vector2) -> bool:
-	var r := view.plot_rect
-	return pos.x >= r.position.x and pos.x <= r.end.x \
-		and absf(pos.y - (r.end.y - vol_pane_h())) <= VOL_GRIP
+func _make_pane(kind: String, ind: IndicatorWidget.Indicator) -> SubPaneWidget:
+	var p := SubPaneWidget.new()
+	p.kind = kind
+	p.ind = ind
+	p.view = view
+	p.data = data
+	p.indicators = indicator_widget
+	add_child(p)
+	return p
 
-func _toggle_volume() -> void:
-	vol_collapsed = not vol_collapsed
-	if not vol_collapsed and vol_frac < VOL_SNAP:
-		vol_frac = 0.2
-	_sync_volume()
+# hit test for the collapse/expand buttons; returns the pane or null
+func _pane_btn_at(pos: Vector2) -> SubPaneWidget:
+	for p in _panes:
+		if p.button_rect().has_point(pos):
+			return p
+	return null
 
-func _sync_volume() -> void:
-	if volume_widget == null:
+# hit test for the resize grips: the top edge of any fixed pane (the
+# chart pane is flex — it absorbs the space the grips give/take)
+func _pane_grip_at(pos: Vector2) -> SubPaneWidget:
+	for i in range(1, _panes.size()):
+		var p: SubPaneWidget = _panes[i]
+		var r := p.pane_rect
+		if pos.x >= r.position.x and pos.x <= r.end.x \
+			and absf(pos.y - r.position.y) <= VOL_GRIP:
+			return p
+	return null
+
+func _toggle_pane(p: SubPaneWidget) -> void:
+	if p == _chart_pane:
+		chart_collapsed = not chart_collapsed
+		_sync_panes()
 		return
-	volume_widget.pane_h = vol_pane_h()
-	volume_widget.collapsed = vol_collapsed
-	indicator_widget.vol_pane_h = vol_pane_h()
+	p.ind.pane_collapsed = not p.ind.pane_collapsed
+	_sync_panes()
+
+# vertical grip drag: the pane under the cursor takes/loses height, the
+# chart absorbs the difference
+func _drag_pane_to(pane: SubPaneWidget, pos: Vector2) -> void:
+	if pane == _chart_pane:
+		return
+	var h := clampf(pane.pane_rect.end.y - pos.y, PANE_MIN_H, PANE_MAX_H)
+	pane.ind.pane_h = h
+	pane.ind.pane_collapsed = h < SubPaneWidget.HEADER_H + 8.0
+	_sync_panes()
+
+# reconciles the pane list with the indicator list (chart first, then one
+# pane per MACD/RSI/VOLUME indicator in indicator order), computes
+# heights/rects and drives the view (set_header_h/set_pane_h)
+func _sync_panes() -> void:
+	if _chart_pane == null:
+		return
+	# rebuild the wanted pane list in indicator order (mutate `_panes` in
+	# place: cross_widget shares the array by identity)
+	var wanted: Array = []
+	for ind in indicator_widget.indicators:
+		if ind.kind != "MACD" and ind.kind != "RSI" and ind.kind != "VOLUME":
+			continue
+		var found: SubPaneWidget = null
+		for p in _panes:
+			if p != _chart_pane and p.ind == ind:
+				found = p
+		if found == null:
+			found = _make_pane(ind.kind, ind)
+		wanted.append(found)
+	for p in _panes:
+		if p != _chart_pane and not wanted.has(p):
+			remove_child(p)
+			p.queue_free()
+	_panes.clear()
+	_panes.append(_chart_pane)
+	_panes.append_array(wanted)
+	# child draw order: chart chrome above the graph widgets, then the
+	# panes, all below the crosshair/cursor overlays
+	move_child(_chart_pane, indicator_widget.get_index() + 1)
+	var idx := _chart_pane.get_index() + 1
+	for p in wanted:
+		move_child(p, idx)
+		idx += 1
+	# heights of the fixed panes; the graph keeps at least MIN_GRAPH_H by
+	# shrinking panes bottom-up to the header-strip minimum
+	var heights := {}
+	var total := 0.0
+	for i in range(1, _panes.size()):
+		var p: SubPaneWidget = _panes[i]
+		var h := SubPaneWidget.HEADER_H
+		if not p.ind.pane_collapsed and p.ind.enabled:
+			h = maxf(p.ind.pane_h, PANE_MIN_H)
+		heights[p] = h
+		total += h
+	view.set_header_h(0.0 if chart_collapsed else SubPaneWidget.HEADER_H)
+	if chart_collapsed:
+		# panes fill everything below the chart header strip
+		view.set_pane_h(maxf(view.full_rect.size.y - SubPaneWidget.HEADER_H, 0.0))
+	else:
+		var max_total := maxf(view.full_rect.size.y - SubPaneWidget.HEADER_H - MIN_GRAPH_H, SubPaneWidget.HEADER_H)
+		var excess := total - max_total
+		var i := _panes.size() - 1
+		while excess > 0.0 and i >= 1:
+			var p: SubPaneWidget = _panes[i]
+			var cut: float = minf(heights[p] - SubPaneWidget.HEADER_H, excess)
+			if cut > 0.0:
+				heights[p] -= cut
+				excess -= cut
+			i -= 1
+		view.set_pane_h(mini(total, max_total))
+	# chart pane rect covers the header strip + graph (or just the header
+	# when collapsed); fixed panes stack below it
+	var stack_top := maxf(view.plot_rect.end.y, SubPaneWidget.HEADER_H)
+	_chart_pane.collapsed = chart_collapsed
+	_chart_pane.pane_rect = Rect2(view.full_rect.position.x, 0.0, view.full_rect.size.x, stack_top)
+	var y := stack_top
+	for i in range(1, _panes.size()):
+		var p: SubPaneWidget = _panes[i]
+		p.collapsed = p.ind.pane_collapsed
+		p.pane_rect = Rect2(view.full_rect.position.x, y, view.full_rect.size.x, heights[p])
+		y += heights[p]
 	_refresh()
 
 func _sync_mode_hud() -> void:
@@ -334,6 +455,12 @@ func _ind_label(ind: IndicatorWidget.Indicator) -> String:
 		return "OBVOL %s%s" % ["snap" if ind.obvol_mode == 1 else "life", " b%.4f" % ind.bucket if ind.bucket > 0.0 else ""]
 	if ind.kind == "MKV":
 		return "MKV (%d, s%d, t%s%s)" % [ind.period, ind.surp, "auto" if ind.auto_thresh else "%.3g" % ind.thresh, " w" if ind.weighted else ""]
+	if ind.kind == "MACD":
+		return "MACD (%d/%d/%d)" % [ind.fast, ind.slow, ind.sig]
+	if ind.kind == "BB":
+		return "BB (%d, %.1f)" % [ind.period, ind.mult]
+	if ind.kind == "VOLUME":
+		return "VOL"
 	return "%s (%d)" % [ind.kind, ind.period]
 
 func _open_popup(at: Vector2) -> void:
@@ -382,6 +509,18 @@ func _rebuild_menu() -> void:
 	var b_mkv := Button.new()
 	b_mkv.text = "add MKV"
 	b_mkv.pressed.connect(_on_add_mkv)
+	var b_macd := Button.new()
+	b_macd.text = "add MACD"
+	b_macd.pressed.connect(_on_add_macd)
+	var b_rsi := Button.new()
+	b_rsi.text = "add RSI"
+	b_rsi.pressed.connect(_on_add_rsi)
+	var b_bb := Button.new()
+	b_bb.text = "add BB"
+	b_bb.pressed.connect(_on_add_bb)
+	var b_vol := Button.new()
+	b_vol.text = "add VOL"
+	b_vol.pressed.connect(_on_add_vol)
 	add_row.add_child(b_sma)
 	add_row.add_child(b_fft)
 	add_row.add_child(b_ks)
@@ -390,6 +529,12 @@ func _rebuild_menu() -> void:
 	add_row.add_child(b_obvol)
 	add_row.add_child(b_mkv)
 	_menu_box.add_child(add_row)
+	var add_row2 := HBoxContainer.new()
+	add_row2.add_child(b_macd)
+	add_row2.add_child(b_rsi)
+	add_row2.add_child(b_bb)
+	add_row2.add_child(b_vol)
+	_menu_box.add_child(add_row2)
 	_add_section("trades overlays")
 	if _trades_sets.is_empty():
 		var tnone := Label.new()
@@ -517,6 +662,17 @@ func _build_indicator_row(i: int) -> void:
 		_add_spin(grid, "auto x", ind.auto_mult, _on_menu_mkv_auto_mult.bind(i), 0.5, 30.0)
 	elif ind.kind == "OBVOL":
 		_add_spin(grid, "bucket", ind.bucket, _on_menu_obvol_bucket.bind(i), 0.00001)
+	elif ind.kind == "MACD":
+		_add_spin(grid, "fast", ind.fast, _on_menu_macd_fast.bind(i), 1.0, 500.0)
+		_add_spin(grid, "slow", ind.slow, _on_menu_macd_slow.bind(i), 1.0, 1000.0)
+		_add_spin(grid, "signal", ind.sig, _on_menu_macd_sig.bind(i), 1.0, 500.0)
+	elif ind.kind == "RSI":
+		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
+	elif ind.kind == "BB":
+		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
+		_add_spin(grid, "mult", ind.mult, _on_menu_bb_mult.bind(i), 0.1, 10.0)
+	elif ind.kind == "VOLUME":
+		pass
 	else:
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 	if grid.get_child_count() > 0:
@@ -575,6 +731,7 @@ func _on_menu_mode(idx: int) -> void:
 func _on_menu_ind_toggle(on: bool, i: int) -> void:
 	indicator_widget.indicators[i].enabled = on
 	_sync_indicator_hud()
+	_sync_panes()
 	_refresh()
 
 func _on_menu_fft_lock(on: bool, i: int) -> void:
@@ -628,6 +785,7 @@ func _on_menu_ind_delete(i: int) -> void:
 	indicator_widget.remove_indicator(i)
 	_rebuild_menu()
 	_sync_indicator_hud()
+	_sync_panes()
 	_refresh()
 
 func _on_menu_sma_period(v: float, i: int) -> void:
@@ -706,6 +864,56 @@ func _on_add_obvol() -> void:
 	_rebuild_menu()
 	_sync_indicator_hud()
 	_refresh()
+
+func _on_add_macd() -> void:
+	indicator_widget.add_indicator("MACD", 0)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_sync_panes()
+	_refresh()
+
+func _on_add_rsi() -> void:
+	indicator_widget.add_indicator("RSI", 14)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_sync_panes()
+	_refresh()
+
+func _on_add_bb() -> void:
+	indicator_widget.add_indicator("BB", 20)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_refresh()
+
+func _on_add_vol() -> void:
+	indicator_widget.add_indicator("VOLUME", 0)
+	_rebuild_menu()
+	_sync_indicator_hud()
+	_sync_panes()
+	_refresh()
+
+func _on_menu_macd_fast(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].fast = maxi(1, int(v))
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_macd_slow(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].slow = maxi(1, int(v))
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_macd_sig(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].sig = maxi(1, int(v))
+		_sync_indicator_hud()
+		_refresh()
+
+func _on_menu_bb_mult(v: float, i: int) -> void:
+	if i < indicator_widget.indicators.size():
+		indicator_widget.indicators[i].mult = maxf(0.1, v)
+		_refresh()
 
 func _on_menu_mkv_surp(v: float, i: int) -> void:
 	if i < indicator_widget.indicators.size():
@@ -867,8 +1075,10 @@ func _refresh() -> void:
 	if grid == null:
 		return
 	_ensure_windows()
-	for w in [grid, series_widget, indicator_widget, volume_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
+	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
 		w.queue_redraw()
+	for p in _panes:
+		p.queue_redraw()
 
 # sliding window refill for binary-backed (real quotes) series: keeps
 # `s.candles` covering the visible range (and the replay head) plus a pad
@@ -1332,7 +1542,8 @@ func _fit_view(s) -> void:
 		for c in s.candles:
 			lo = minf(lo, c.low)
 			hi = maxf(hi, c.high)
-	view.fit_prices(lo, hi, view.plot_rect.size.y - vol_pane_h())
+	# plot_rect already excludes the sub-pane stack
+	view.fit_prices(lo, hi, view.plot_rect.size.y)
 
 func _update_book() -> void:
 	book_widget.clear()

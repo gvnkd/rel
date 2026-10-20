@@ -42,7 +42,7 @@ func _draw() -> void:
 		var txt := "%s  O %s  H %s  L %s  C %s  V %s" % [s.name,
 			view.fmt_price(c.open), view.fmt_price(c.high),
 			view.fmt_price(c.low), view.fmt_price(c.close),
-			VolumeWidget.fmt_vol(c.vol)]
+			SubPaneWidget.fmt_vol(c.vol)]
 		if indicators != null and indicators.enabled:
 			for ind in indicators.indicators:
 				if not ind.enabled:
@@ -57,11 +57,19 @@ func _draw() -> void:
 				elif ind.kind == "CECP":
 					txt += "  CECP H%.3f C%.3f" % [v[0], v[1]]
 				elif ind.kind == "OBVOL":
-					txt += "  OBVOL B%s A%s" % [VolumeWidget.fmt_vol(int(v[0])), VolumeWidget.fmt_vol(int(v[1]))]
+					txt += "  OBVOL B%s A%s" % [SubPaneWidget.fmt_vol(int(v[0])), SubPaneWidget.fmt_vol(int(v[1]))]
 				elif ind.kind == "MKV":
 					# the 3x3 matrix is drawn as a panel under the
 					# tableau, not inline text
 					mkv_panels.append([s, ind, i, v as Array])
+				elif ind.kind == "BB":
+					txt += "  BB %s (%s..%s)" % [view.fmt_price(v[0]), view.fmt_price(v[1]), view.fmt_price(v[2])]
+				elif ind.kind == "MACD":
+					txt += "  MACD %s/%s h%s" % [view.fmt_price(v[0]), view.fmt_price(v[1]), view.fmt_price(v[2])]
+				elif ind.kind == "RSI":
+					txt += "  RSI %.1f" % float(v)
+				elif ind.kind == "VOLUME":
+					txt += "  VOL %s" % SubPaneWidget.fmt_vol(float(v))
 				else:
 					txt += "  %s %s" % [ind.kind, view.fmt_price(float(v))]
 		lines.append([txt, s.col_pos])

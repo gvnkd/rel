@@ -6,7 +6,14 @@ const MARGIN_BOTTOM := 26.0
 
 var book_width := 180.0
 
+# full_rect = chart pane (graph + its header strip) + the sub-pane stack
+# below; plot_rect = the graph area only (full_rect minus pane_h and
+# header_h). Price mapping operates on plot_rect, index mapping is
+# identical everywhere (panes share the graph's x axis)
+var full_rect := Rect2()
 var plot_rect := Rect2()
+var pane_h := 0.0
+var header_h := 0.0
 
 var px_per_index := 22.0
 var px_per_price := 100000.0
@@ -19,7 +26,22 @@ var follow := true
 var decimals := -1
 
 func layout(size: Vector2) -> void:
-	plot_rect = Rect2(MARGIN_LEFT, 0.0, maxf(size.x - MARGIN_LEFT - book_width, 0.0), maxf(size.y - MARGIN_BOTTOM, 0.0))
+	full_rect = Rect2(MARGIN_LEFT, 0.0, maxf(size.x - MARGIN_LEFT - book_width, 0.0), maxf(size.y - MARGIN_BOTTOM, 0.0))
+	_update_plot_rect()
+
+# total height of the sub-pane stack; re-derives the graph rect
+func set_pane_h(h: float) -> void:
+	pane_h = h
+	_update_plot_rect()
+
+# height of the chart pane's header strip; the graph starts below it
+func set_header_h(h: float) -> void:
+	header_h = h
+	_update_plot_rect()
+
+func _update_plot_rect() -> void:
+	plot_rect = Rect2(full_rect.position + Vector2(0.0, header_h),
+		Vector2(full_rect.size.x, maxf(1.0, full_rect.size.y - pane_h - header_h)))
 
 func index_to_x(i: float) -> float:
 	return plot_rect.position.x + (i - base_index) * px_per_index

@@ -29,6 +29,15 @@ class Indicator:
 	var weighted := false
 	var locked := false
 	var opt_score := -1.0
+	# MACD periods (fast/slow/signal); BB: band width multiplier
+	var fast := 12
+	var slow := 26
+	var sig := 9
+	var mult := 2.0
+	# sub-pane collapse state + height (MACD/RSI draw in their own pane
+	# below the graph; the pane stack lives in chart.gd)
+	var pane_collapsed := false
+	var pane_h := 90.0
 	# OBVOL: price bucket size in display units; 0 = exact price levels.
 	# Volumes resting at prices closer than this merge into one line
 	var bucket := 0.0
@@ -46,6 +55,9 @@ class IndCache:
 	var vals := PackedFloat64Array()
 	var vals_off := 0
 	var vals2 := PackedFloat64Array()
+	# third output line (BB lower band; MACD histogram) — MACD/BB FFI
+	# calls return 3 values interleaved per candle
+	var vals3 := PackedFloat64Array()
 	var fit := PackedFloat64Array()
 	var forecast := PackedFloat64Array()
 	# OBVOL: flat segment list, 5 doubles each (side, price, i0, i1, alpha)
@@ -109,7 +121,6 @@ var view: ChartView
 var data: PlotData
 var enabled := true
 var indicators: Array[Indicator] = []
-var vol_pane_h := 0.0
 var _sim: Object = null
 
 func _ensure_sim() -> bool:
@@ -124,6 +135,7 @@ func _ready() -> void:
 	mouse_filter = MOUSE_FILTER_IGNORE
 	if indicators.is_empty():
 		add_indicator("SMA", 20)
+		add_indicator("VOLUME", 0)
 
 func add_indicator(kind: String, period: int) -> void:
 	var ind := Indicator.new()
@@ -161,12 +173,11 @@ func color_for(s: PlotData.Series, idx: int) -> Color:
 	var si := data.series.find(s)
 	return IND_COLORS[(idx + maxi(si, 0)) % IND_COLORS.size()]
 
-# plot rect excluding the volume pane at the bottom — the 0..1 overlays
-# (KS/TEMP/CECP) map into this so the volume widget (drawn on top) can't
-# cover them
+# the plot rect already excludes the sub-pane stack (chart.gd drives
+# view.set_pane_h), so the 0..1 overlays (KS/TEMP/CECP) map into it
+# directly
 func overlay_rect() -> Rect2:
-	var r := view.plot_rect
-	return Rect2(r.position, Vector2(r.size.x, maxf(1.0, r.size.y - vol_pane_h)))
+	return view.plot_rect
 
 func _draw() -> void:
 	if not enabled or view == null or data == null:
@@ -201,25 +212,14 @@ func _draw() -> void:
 			if ind.kind == "OBVOL":
 				_draw_obvol(ind, s, k)
 				continue
-			if s.size() < ind.period:
+			if ind.kind == "MACD" or ind.kind == "RSI":
+				continue  # drawn in their own sub-pane below the graph
+			if ind.kind == "BB":
+				_draw_bb(ind, s, k)
 				continue
-			var col := color_for(s, k)
-			var last := mini(i1, s.size() - 1)
-			if last < i0:
+			if ind.kind == "SMA":
+				_draw_sma(ind, s, k)
 				continue
-			var pts := PackedVector2Array()
-			var win_lo := maxi(0, i0 - ind.period + 1)
-			var sum := 0.0
-			for j in range(win_lo, i0):
-				sum += s.candle_at(j).close
-			for i in range(i0, last + 1):
-				sum += s.candle_at(i).close
-				if i - ind.period >= win_lo:
-					sum -= s.candle_at(i - ind.period).close
-				if i >= win_lo + ind.period - 1:
-					pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, view.price_to_y(sum / ind.period)))
-			if pts.size() >= 2:
-				draw_polyline(pts, col, 1.5)
 
 func _draw_fft(ind: Indicator, s: PlotData.Series, k: int) -> void:
 	var n: int = s.size()
@@ -684,6 +684,180 @@ func _obvol_ensure_snap(ind: Indicator, s: PlotData.Series, lo: int, hi: int, c:
 func _obvol_close(pieces: Array, gk: int, o: Array) -> void:
 	pieces.append([1.0 if gk >= OBVOL_SIDE_BIT else 0.0, float(o[3]), int(o[0]), int(o[1]), float(o[2])])
 
+# --- SMA / BB / MACD / RSI (math in Haskell Sim.Ind, via the FFI) ---------
+
+func _closes_slice(s: PlotData.Series, lo: int, hi: int) -> PackedFloat64Array:
+	var closes := PackedFloat64Array()
+	closes.resize(hi - lo + 1)
+	for i in range(lo, hi + 1):
+		closes[i - lo] = s.candle_at(i).close
+	return closes
+
+# splits a 3-interleaved FFI result into vals/vals2/vals3; on a size
+# mismatch vals is cleared so the caller's "not empty" check fails
+func _split3(all: PackedFloat64Array, count: int, c: IndCache) -> void:
+	if all.size() != 3 * count:
+		c.vals = PackedFloat64Array()
+		return
+	c.vals.resize(count)
+	c.vals2.resize(count)
+	c.vals3.resize(count)
+	for j in count:
+		c.vals[j] = all[3 * j]
+		c.vals2[j] = all[3 * j + 1]
+		c.vals3[j] = all[3 * j + 2]
+
+# cache-end padding for the path-dependent ensures: refills reach
+# block-rounded ends so pans/zooms inside a block reuse the cache
+const IND_BLK := 512
+
+# the last LOADED candle: for store-backed series s.size() is the total
+# store count, which can run past the loaded window — clamp to the window
+# or candle_at would read out of bounds
+func _win_hi(s: PlotData.Series) -> int:
+	if s.store != null:
+		return s.win_off + s.candles.size() - 1
+	return s.size() - 1
+
+# SMA is window-local (prefix sums): the margin below i0 is exact, no
+# path dependence
+func _sma_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 1:
+		return false
+	i1 = mini(i1, _win_hi(s))
+	if i1 < 0:
+		return false
+	var lo := maxi(0, i0 - ind.period + 1)
+	var c := _cache_for(ind, s)
+	var key := "sma:%d:%d:%d:%d:%d:%d" % [data.series.find(s), ind.period, n, s.win_off, lo, i1]
+	if key == c.cache_key:
+		return not c.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var ret: Variant = _sim.call("sma", _closes_slice(s, lo, i1), ind.period)
+	var vals: PackedFloat64Array = ret as PackedFloat64Array
+	if vals.size() == i1 - lo + 1:
+		c.vals = vals
+		c.vals_off = lo
+	else:
+		c.vals = PackedFloat64Array()
+	c.cache_key = key
+	return not c.vals.is_empty()
+
+# EMA/MACD/RSI recursions seed at the SLICE start — anchoring the slice at
+# the visible left edge would reseed on every pan and the leftmost values
+# would drift. Anchor at the series/window start instead (win_off is 0
+# for memory series, so those are exact everywhere) and pad the cache end
+# to block boundaries
+func _macd_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 1:
+		return false
+	var lo := s.win_off
+	var hi := mini(_win_hi(s), i1 / IND_BLK * IND_BLK + IND_BLK - 1)
+	if hi < lo:
+		return false
+	var c := _cache_for(ind, s)
+	var key := "macd:%d:%d:%d:%d:%d:%d:%d" % [data.series.find(s), ind.fast, ind.slow, ind.sig, n, s.win_off, hi]
+	if key == c.cache_key:
+		return not c.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var ret: Variant = _sim.call("macd", _closes_slice(s, lo, hi), ind.fast, ind.slow, ind.sig)
+	_split3(ret as PackedFloat64Array, hi - lo + 1, c)
+	c.vals_off = lo
+	c.cache_key = key
+	return not c.vals.is_empty()
+
+func _rsi_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 1:
+		return false
+	var lo := s.win_off
+	var hi := mini(_win_hi(s), i1 / IND_BLK * IND_BLK + IND_BLK - 1)
+	if hi < lo:
+		return false
+	var c := _cache_for(ind, s)
+	var key := "rsi:%d:%d:%d:%d:%d" % [data.series.find(s), ind.period, n, s.win_off, hi]
+	if key == c.cache_key:
+		return not c.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var ret: Variant = _sim.call("rsi", _closes_slice(s, lo, hi), ind.period)
+	var vals: PackedFloat64Array = ret as PackedFloat64Array
+	if vals.size() == hi - lo + 1:
+		c.vals = vals
+		c.vals_off = lo
+	else:
+		c.vals = PackedFloat64Array()
+	c.cache_key = key
+	return not c.vals.is_empty()
+
+func _bb_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
+	var n: int = s.size()
+	if n < 1:
+		return false
+	i1 = mini(i1, _win_hi(s))
+	if i1 < 0:
+		return false
+	var lo := maxi(0, i0 - ind.period + 1)
+	var c := _cache_for(ind, s)
+	var key := "bb:%d:%d:%f:%d:%d:%d:%d" % [data.series.find(s), ind.period, ind.mult, n, s.win_off, lo, i1]
+	if key == c.cache_key:
+		return not c.vals.is_empty()
+	if not _ensure_sim():
+		return false
+	var ret: Variant = _sim.call("bb", _closes_slice(s, lo, i1), ind.period, ind.mult)
+	_split3(ret as PackedFloat64Array, i1 - lo + 1, c)
+	c.vals_off = lo
+	c.cache_key = key
+	return not c.vals.is_empty()
+
+# SMA overlay (price-scaled line)
+func _draw_sma(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := mini(int(ceil(ir.y)), s.size() - 1)
+	if i1 < i0 or not _sma_ensure(ind, s, i0, i1):
+		return
+	var c := _cache_for(ind, s)
+	var col := color_for(s, k)
+	var pts := PackedVector2Array()
+	for i in range(i0, i1 + 1):
+		if i < c.vals_off or i - c.vals_off >= c.vals.size():
+			continue
+		var v: float = c.vals[i - c.vals_off]
+		if is_nan(v):
+			continue
+		pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, view.price_to_y(v)))
+	if pts.size() >= 2:
+		draw_polyline(pts, col, 1.5)
+
+# Bollinger bands overlay: mid line + upper/lower band (price-scaled)
+func _draw_bb(ind: Indicator, s: PlotData.Series, k: int) -> void:
+	var ir := view.visible_index_range()
+	var i0 := maxi(0, int(floor(ir.x)))
+	var i1 := mini(int(ceil(ir.y)), s.size() - 1)
+	if i1 < i0 or not _bb_ensure(ind, s, i0, i1):
+		return
+	var c := _cache_for(ind, s)
+	var col := color_for(s, k)
+	for line in 3:
+		var pts := PackedVector2Array()
+		for i in range(i0, i1 + 1):
+			if i < c.vals_off or i - c.vals_off >= c.vals.size():
+				continue
+			var v: float = c.vals[i - c.vals_off] if line == 0 else (c.vals2[i - c.vals_off] if line == 1 else c.vals3[i - c.vals_off])
+			if is_nan(v):
+				continue
+			pts.append(Vector2(view.index_to_x(i) + view.px_per_index / 2.0, view.price_to_y(v)))
+		if pts.size() >= 2:
+			if line == 0:
+				draw_polyline(pts, col, 1.5)
+			else:
+				draw_polyline(pts, col.lightened(0.55), 1.2)
+
 # fills the per-series cache for [lo, i1] when its key is stale; false
 # when the value line cannot be computed (missing FFI, short series)
 func _ks_ensure(ind: Indicator, s: PlotData.Series, i0: int, i1: int) -> bool:
@@ -924,12 +1098,49 @@ func value_at(ind: Indicator, s: PlotData.Series, i: int) -> Variant:
 	if ind.kind == "SMA":
 		if i < ind.period - 1:
 			return null
-		if s.store != null and (i - ind.period + 1 < s.win_off or i >= s.win_off + s.candles.size()):
+		var c := _cache_for(ind, s)
+		if i < c.vals_off or i >= c.vals_off + c.vals.size():
+			if not _sma_ensure(ind, s, i, i):
+				return null
+		var sv: float = c.vals[i - c.vals_off]
+		return null if is_nan(sv) else sv
+	if ind.kind == "BB":
+		if i < ind.period - 1:
 			return null
-		var sum := 0.0
-		for j in range(i - ind.period + 1, i + 1):
-			sum += s.candle_at(j).close
-		return sum / ind.period
+		var cb := _cache_for(ind, s)
+		if i < cb.vals_off or i >= cb.vals_off + cb.vals.size():
+			if not _bb_ensure(ind, s, i, i):
+				return null
+		var mid: float = cb.vals[i - cb.vals_off]
+		var up: float = cb.vals2[i - cb.vals_off]
+		var lo2: float = cb.vals3[i - cb.vals_off]
+		if is_nan(mid) or is_nan(up) or is_nan(lo2):
+			return null
+		return [mid, up, lo2]
+	if ind.kind == "MACD":
+		if i < ind.slow + ind.sig - 2:
+			return null
+		var cm := _cache_for(ind, s)
+		if i < cm.vals_off or i >= cm.vals_off + cm.vals.size():
+			if not _macd_ensure(ind, s, i, i):
+				return null
+		var m: float = cm.vals[i - cm.vals_off]
+		var sg: float = cm.vals2[i - cm.vals_off]
+		var h: float = cm.vals3[i - cm.vals_off]
+		if is_nan(m) or is_nan(sg) or is_nan(h):
+			return null
+		return [m, sg, h]
+	if ind.kind == "VOLUME":
+		return s.candle_at(i).vol
+	if ind.kind == "RSI":
+		if i < ind.period:
+			return null
+		var cr := _cache_for(ind, s)
+		if i < cr.vals_off or i >= cr.vals_off + cr.vals.size():
+			if not _rsi_ensure(ind, s, i, i):
+				return null
+		var rv: float = cr.vals[i - cr.vals_off]
+		return null if is_nan(rv) else rv
 	if ind.kind == "KS":
 		var c := _cache_for(ind, s)
 		if i < c.vals_off or i >= c.vals_off + c.vals.size():
