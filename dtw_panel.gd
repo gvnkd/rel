@@ -1,12 +1,13 @@
 class_name DtwPanel
 extends Control
 
-# DTW correlation scan panel: slide windows over series A, find
-# best-matching parts of series B (affine Y-deformation and time warp
-# within the band factored out). One FFI call runs all requested window
-# lengths in parallel; artifacts land in user://dtwdata/<run>/.
+# DTW correlation scan panel. File mode: scan the two picked files as one
+# (tfA, tfB) pair. Grid mode: pick two series loaded in the chart — every
+# timeframe of A is scanned against every timeframe of B in one batch
+# (store-backed series use their per-TF rbin caches, sim series are
+# materialized to temp csvs). Artifacts land in user://dtwdata/<run>/.
 
-const TF_CHOICES := ["1m", "5m", "1h", "2h", "1d", "1w"]
+const TFS: Array[String] = QuoteStore.TFS
 
 const PARAM_FIELDS := [
 	["windows", "windows", "64,128,256,512"],
@@ -30,6 +31,8 @@ var _data_a: LineEdit
 var _data_b: LineEdit
 var _tf_a: OptionButton
 var _tf_b: OptionButton
+var _series_a: OptionButton
+var _series_b: OptionButton
 var _dialog: FileDialog
 var _picking_for := ""
 var _thread: Thread
@@ -59,22 +62,34 @@ func _build_ui() -> void:
 	grid.columns = 2
 	box.add_child(grid)
 
+	var sa_label := Label.new()
+	sa_label.text = "series A"
+	grid.add_child(sa_label)
+	_series_a = OptionButton.new()
+	grid.add_child(_series_a)
+
+	var sb_label := Label.new()
+	sb_label.text = "series B"
+	grid.add_child(sb_label)
+	_series_b = OptionButton.new()
+	grid.add_child(_series_b)
+
 	_data_a = _add_data_row(grid, "series A csv", "a")
 	_data_b = _add_data_row(grid, "series B csv", "b")
 
 	var tfa_label := Label.new()
-	tfa_label.text = "tf A"
+	tfa_label.text = "tf A (file mode)"
 	grid.add_child(tfa_label)
 	_tf_a = OptionButton.new()
-	for t in TF_CHOICES:
+	for t in TFS:
 		_tf_a.add_item(t)
 	grid.add_child(_tf_a)
 
 	var tfb_label := Label.new()
-	tfb_label.text = "tf B"
+	tfb_label.text = "tf B (file mode)"
 	grid.add_child(tfb_label)
 	_tf_b = OptionButton.new()
-	for t in TF_CHOICES:
+	for t in TFS:
 		_tf_b.add_item(t)
 	_tf_b.selected = 1
 	grid.add_child(_tf_b)
@@ -113,6 +128,24 @@ func _build_ui() -> void:
 	_dialog.filters = PackedStringArray(["*.csv ; CSV candles", "*.rbin ; Binary candles"])
 	_dialog.file_selected.connect(_on_data_picked)
 	add_child(_dialog)
+	_refresh_series_pickers()
+
+func _chart() -> Variant:
+	return get_tree().root.find_child("Chart", true, false)
+
+func _refresh_series_pickers() -> void:
+	for ob in [_series_a, _series_b]:
+		ob.clear()
+		ob.add_item("(file below)")
+	var chart: Variant = _chart()
+	if chart == null or not chart.has_method("get"):
+		return
+	var data: Variant = chart.get("data")
+	if data == null:
+		return
+	for s in data.series:
+		_series_a.add_item(s.name)
+		_series_b.add_item(s.name)
 
 func _add_data_row(grid: GridContainer, label_text: String, tag: String) -> LineEdit:
 	var label := Label.new()
@@ -146,16 +179,119 @@ func _on_data_picked(path: String) -> void:
 	else:
 		_data_b.text = path
 
+func _grid_mode() -> bool:
+	return _series_a.selected > 0 and _series_b.selected > 0
+
+# resolve one chart series into {tf: data path} for every timeframe.
+# store-backed series reuse the per-TF rbin caches (building missing ones
+# down the aggregation chain); sim series are materialized to temp csvs.
+func _materialize_series(s: PlotData.Series, tmp_dir: String) -> Dictionary:
+	var out := {}
+	if s.store != null:
+		var is_rbin: bool = s.store_key.to_lower().ends_with(".rbin")
+		for tf in TFS:
+			var p := ""
+			if is_rbin:
+				p = s.store_key if tf == "1m" else QuoteStore.cache_path(s.store_key, tf)
+				if tf != "1m" and not FileAccess.file_exists(p):
+					var pf := FileAccess.open(s.store_key, FileAccess.READ)
+					if pf == null:
+						continue
+					var ph := QuoteStore._peek_header(pf)
+					pf.close()
+					if ph.is_empty():
+						continue
+					var chain: Array[String] = []
+					var t := tf
+					while t != "1m":
+						chain.push_front(t)
+						t = QuoteStore._parent_tf(t)
+					var parent := s.store_key
+					var ok := true
+					for ct in chain:
+						var cpath := QuoteStore.cache_path(s.store_key, ct)
+						_update_status("building %s for %s…" % [ct, s.name])
+						var err: int = await QuoteStore.new()._aggregate_tf_async(parent, cpath, ct, ph["dec"], Callable())
+						if err != OK:
+							ok = false
+							break
+						parent = cpath
+					if not ok:
+						continue
+			else:
+				p = QuoteStore.cache_path(s.store_key, tf)
+				if not FileAccess.file_exists(p):
+					_update_status("building %s for %s…" % [tf, s.name])
+					var err2: int = await QuoteStore.new().ensure_tf_async(s.store_key, tf, Callable())
+					if err2 != OK:
+						continue
+			if FileAccess.file_exists(p):
+				out[tf] = ProjectSettings.globalize_path(p)
+	else:
+		var src: Array[Candle] = s._base if not s._base.is_empty() else s.candles
+		for tf in TFS:
+			var g: int = QuoteStore.TF_MINUTES[tf]
+			var p2 := "%s/%s_%s.csv" % [tmp_dir, s.name.validate_filename(), tf]
+			if _write_agg_csv(src, g, p2):
+				out[tf] = ProjectSettings.globalize_path(p2)
+	return out
+
+# chunked sim aggregation into a candles csv; false when nothing written
+func _write_agg_csv(src: Array[Candle], g: int, path: String) -> bool:
+	if src.is_empty():
+		return false
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_line("open,high,low,close,vol")
+	var i := 0
+	var buf := PackedStringArray()
+	while i < src.size():
+		var c := src[i]
+		var hi := c.high
+		var lo := c.low
+		var cl := c.close
+		var vol: int = c.vol
+		var last := mini(i + g - 1, src.size() - 1)
+		for j in range(i + 1, last + 1):
+			hi = maxf(hi, src[j].high)
+			lo = minf(lo, src[j].low)
+			cl = src[j].close
+			vol += src[j].vol
+		buf.append("%.5f,%.5f,%.5f,%.5f,%d" % [c.open, hi, lo, cl, vol])
+		if buf.size() >= 4096:
+			f.store_string("\n".join(buf) + "\n")
+			buf.clear()
+		i += g
+	if not buf.is_empty():
+		f.store_string("\n".join(buf) + "\n")
+	f.close()
+	return i > 0
+
 func _run_dir() -> String:
 	return "%s/%s" % [DATA_DIR, _run_name]
 
-func _params_string() -> String:
+func _params_string(paths_a: Dictionary, paths_b: Dictionary) -> String:
 	var parts: PackedStringArray = []
-	parts.append("dataa=%s" % _data_a.text.strip_edges())
-	parts.append("datab=%s" % _data_b.text.strip_edges())
+	if _grid_mode():
+		var ta: PackedStringArray = []
+		var tb: PackedStringArray = []
+		var pa: PackedStringArray = []
+		var pb: PackedStringArray = []
+		for tf in TFS:
+			ta.append(tf)
+			tb.append(tf)
+			pa.append(paths_a.get(tf, ""))
+			pb.append(paths_b.get(tf, ""))
+		parts.append("tfs=%s" % ",".join(ta))
+		parts.append("dataa=%s" % ",".join(pa))
+		parts.append("datab=%s" % ",".join(pb))
+	else:
+		parts.append("dataa=%s" % _data_a.text.strip_edges())
+		parts.append("datab=%s" % _data_b.text.strip_edges())
+		parts.append("atf=%s" % TFS[_tf_a.selected])
+		parts.append("btf=%s" % TFS[_tf_b.selected])
 	parts.append("out=%s" % ProjectSettings.globalize_path(_run_dir()))
-	parts.append("atf=%s" % TF_CHOICES[_tf_a.selected])
-	parts.append("btf=%s" % TF_CHOICES[_tf_b.selected])
 	for key in fields:
 		parts.append("%s=%s" % [key, fields[key].text.strip_edges()])
 	return ";".join(parts)
@@ -169,17 +305,47 @@ func _on_scan() -> void:
 	if not sim_available:
 		_update_status("cannot scan: SimNative extension missing")
 		return
-	if _data_a.text.strip_edges().is_empty() or not FileAccess.file_exists(_data_a.text.strip_edges()):
-		_update_status("pick an existing series A file first")
-		return
-	if _data_b.text.strip_edges().is_empty() or not FileAccess.file_exists(_data_b.text.strip_edges()):
-		_update_status("pick an existing series B file first")
-		return
-	_run_name = "run%d" % (Time.get_ticks_msec() % 100000)
+	_run_scan()
+
+func _run_scan() -> void:
+	var paths_a := {}
+	var paths_b := {}
+	if _grid_mode():
+		_refresh_series_pickers()
+		if _series_a.selected <= 0 or _series_b.selected <= 0:
+			_update_status("pick chart series for both A and B (or use file mode)")
+			return
+		var chart: Variant = _chart()
+		var data: Variant = chart.get("data")
+		if data == null:
+			_update_status("chart has no data")
+			return
+		var sa: Array = data.series
+		var s_a: PlotData.Series = sa[_series_a.selected - 1]
+		var s_b: PlotData.Series = sa[_series_b.selected - 1]
+		_run_name = "grid%d" % (Time.get_ticks_msec() % 100000)
+		var tmp := ProjectSettings.globalize_path("%s/%s" % [DATA_DIR, _run_name])
+		DirAccess.make_dir_recursive_absolute(tmp)
+		_update_status("materializing %s…" % s_a.name)
+		paths_a = await _materialize_series(s_a, tmp)
+		_update_status("materializing %s…" % s_b.name)
+		paths_b = await _materialize_series(s_b, tmp)
+		if paths_a.is_empty() or paths_b.is_empty():
+			_update_status("could not materialize chart series")
+			return
+	else:
+		if _data_a.text.strip_edges().is_empty() or not FileAccess.file_exists(_data_a.text.strip_edges()):
+			_update_status("pick an existing series A file first")
+			return
+		if _data_b.text.strip_edges().is_empty() or not FileAccess.file_exists(_data_b.text.strip_edges()):
+			_update_status("pick an existing series B file first")
+			return
+		_run_name = "run%d" % (Time.get_ticks_msec() % 100000)
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(_run_dir()))
+	_update_status("starting scan %s…" % _run_name)
 	_scan_btn.text = "Cancel"
 	_thread = Thread.new()
-	var start_err: int = _thread.start(Callable(_sim, "dtw_scan").bind(_params_string()))
+	var start_err: int = _thread.start(Callable(_sim, "dtw_scan").bind(_params_string(paths_a, paths_b)))
 	if start_err != OK:
 		_thread = null
 		_scan_btn.text = "Scan"
@@ -226,8 +392,8 @@ func _refresh_table(live: Array) -> void:
 		var s: Dictionary = entry
 		var row := HBoxContainer.new()
 		var lab := Label.new()
-		lab.text = "w%d" % s["win"]
-		lab.custom_minimum_size.x = 44
+		lab.text = "%s/%s w%d" % [s.get("tfA", "?"), s.get("tfB", "?"), s["win"]]
+		lab.custom_minimum_size.x = 90
 		row.add_child(lab)
 		var prog := Label.new()
 		prog.text = "%d/%d" % [s["done"], s["windows"]]
@@ -241,7 +407,7 @@ func _refresh_table(live: Array) -> void:
 		var chart_btn := Button.new()
 		chart_btn.text = "chart"
 		chart_btn.tooltip_text = "load the match-position line as a chart timeline"
-		var base := "dtw_%s_%s_%d" % [TF_CHOICES[_tf_a.selected], TF_CHOICES[_tf_b.selected], s["win"]]
+		var base := "dtw_%s_%s_%d" % [s.get("tfA", ""), s.get("tfB", ""), s["win"]]
 		var json_path := "%s/%s.json" % [ProjectSettings.globalize_path(_run_dir()), base]
 		chart_btn.disabled = not FileAccess.file_exists(json_path)
 		chart_btn.pressed.connect(_on_chart_pressed.bind(base))
@@ -278,7 +444,7 @@ func _on_chart_pressed(base: String) -> void:
 		var j := parts[1].to_float()
 		out.store_line("%.5f,%.5f,%.5f,%.5f,0" % [j, j, j, j])
 	out.close()
-	var chart := get_tree().root.find_child("Chart", true, false)
+	var chart: Variant = _chart()
 	if chart == null:
 		_update_status("chart tab not found")
 		return

@@ -71,6 +71,7 @@ foreign-library simffi
     other-modules:    SimFFI
     build-depends:    base,
                       bytestring,
+                      containers,
                       directory,
                       rel-sim,
                       vector

@@ -1,4 +1,4 @@
-[gd_scene load_steps=3 format=3 uid="uid://d4tw7p2y9k1cd"]
+[gd_scene load_steps=3 format=3 uid="uid://f2mn5qpd5kl"]
 
 [ext_resource type="Script" path="res://dtw_page.gd" id="1_page"]
 [ext_resource type="Script" path="res://dtw_panel.gd" id="2_panel"]

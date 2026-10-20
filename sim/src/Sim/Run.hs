@@ -313,14 +313,16 @@ data DtwHooks = DtwHooks
   }
 
 -- run all plans in parallel (one forkIO each); blocks until every session
--- finishes (cancelled sessions return Nothing and write no artifacts)
-runDtwBatch :: FilePath -> VU.Vector Double -> VU.Vector Double -> [(DtwPlan, DtwHooks)] -> IO ()
-runDtwBatch out closesA closesB plans = do
+-- finishes (cancelled sessions return Nothing and write no artifacts).
+-- Each plan carries its own A/B closes vectors so one batch can scan a
+-- whole timeframe-permutation grid.
+runDtwBatch :: FilePath -> [(DtwPlan, VU.Vector Double, VU.Vector Double, DtwHooks)] -> IO ()
+runDtwBatch out jobs = do
   createDirectoryIfMissing True out
   doneRef <- newIORef 0
   barrier <- newEmptyMVar
-  let n = length plans
-  forM plans $ \(pl, hooks) -> forkIO $ do
+  let n = length jobs
+  forM jobs $ \(pl, closesA, closesB, hooks) -> forkIO $ do
     r <- try (runDtwSession hooks (planScanParams pl) closesA closesB) :: IO (Either SomeException (Maybe ScanResult))
     case r of
       Right (Just res) -> writeDtwResult out pl res
