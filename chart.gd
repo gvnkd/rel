@@ -56,6 +56,8 @@ const PALETTE: Array[Color] = [
 @onready var cursor_widget: CursorWidget = $Cursor
 @onready var sim_window: ToolWindow = $SimWindow
 @onready var sim_panel: SimPanel = $SimWindow/Box/SimPanel
+@onready var series_window: ToolWindow = $SeriesWindow
+@onready var series_panel: SeriesPanel = $SeriesWindow/Box/SeriesPanel
 @onready var trades_widget: TradesWidget = $Trades
 
 # backtest trades overlays: shared with trades_widget by array identity.
@@ -83,9 +85,16 @@ func _ready() -> void:
 	cursor_widget.cross = cross_widget
 	cursor_widget.indicators = indicator_widget
 	view.layout(size)
-	sim_panel.timeline_added.connect(_on_timeline_added)
-	sim_panel.timeline_removed.connect(_on_timeline_removed)
-	sim_panel.timeline_toggled.connect(_on_timeline_toggled)
+	sim_panel.generated.connect(_on_sim_generated)
+	series_panel.chart = self
+	series_panel.series_toggled.connect(set_timeline_visible)
+	series_panel.series_removed.connect(_on_series_removed)
+	series_panel.series_loaded.connect(_on_series_loaded)
+	series_panel.color_picked.connect(_on_menu_series_color)
+	series_panel.ind_color_picked.connect(_on_menu_ind_color)
+	series_panel.series_reset.connect(_on_series_reset)
+	series_panel.series_saved.connect(_on_menu_series_save)
+	series_panel.tf_picked.connect(_on_menu_series_tf)
 	_menu = PopupPanel.new()
 	var panel := PanelContainer.new()
 	_menu_box = VBoxContainer.new()
@@ -280,7 +289,8 @@ func _input(event: InputEvent) -> void:
 		_refresh()
 
 func _over_ui(pos: Vector2) -> bool:
-	return sim_window.visible and sim_window.get_global_rect().has_point(pos)
+	return (sim_window.visible and sim_window.get_global_rect().has_point(pos)) \
+		or (series_window.visible and series_window.get_global_rect().has_point(pos))
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
@@ -562,10 +572,8 @@ func _rebuild_menu() -> void:
 	tload.text = "load trades…"
 	tload.pressed.connect(func() -> void: _trades_dialog.popup_centered(Vector2i(700, 500)))
 	_menu_box.add_child(tload)
-	if not data.series.is_empty():
-		_add_section("series")
-		for i in data.series.size():
-			_build_series_row(i)
+	if series_panel != null:
+		series_panel.refresh()
 
 func _add_section(title: String) -> void:
 	if _menu_box.get_child_count() > 0:
@@ -677,51 +685,6 @@ func _build_indicator_row(i: int) -> void:
 		_add_spin(grid, "period", ind.period, _on_menu_sma_period.bind(i))
 	if grid.get_child_count() > 0:
 		_menu_box.add_child(grid)
-
-func _build_series_row(i: int) -> void:
-	var s: PlotData.Series = data.series[i]
-	var row := HBoxContainer.new()
-	var lbl := Label.new()
-	lbl.text = s.name
-	lbl.custom_minimum_size = Vector2(64, 0)
-	row.add_child(lbl)
-	var up := _color_button(s.body_up if s.body_up.a > 0.0 else s.col_pos)
-	up.color_changed.connect(_on_menu_series_color.bind(i, "body_up"))
-	row.add_child(up)
-	var down := _color_button(s.body_down if s.body_down.a > 0.0 else s.col_neg)
-	down.color_changed.connect(_on_menu_series_color.bind(i, "body_down"))
-	row.add_child(down)
-	var wick := _color_button(s.wick if s.wick.a > 0.0 else s.col_pos)
-	wick.color_changed.connect(_on_menu_series_color.bind(i, "wick"))
-	row.add_child(wick)
-	var reset := Button.new()
-	reset.text = "r"
-	reset.tooltip_text = "reset colors"
-	reset.pressed.connect(_on_menu_series_reset.bind(i))
-	row.add_child(reset)
-	var save := Button.new()
-	save.text = "bin"
-	save.tooltip_text = "save series as binary (.rbin): candles + books + levels"
-	save.pressed.connect(_on_menu_series_save.bind(i))
-	row.add_child(save)
-	var tf_opt := OptionButton.new()
-	for tname in QuoteStore.TFS:
-		tf_opt.add_item(tname)
-	tf_opt.selected = maxi(0, QuoteStore.TFS.find(s.tf))
-	tf_opt.item_selected.connect(_on_menu_series_tf.bind(i))
-	row.add_child(tf_opt)
-	for k in indicator_widget.indicators.size():
-		var icb := _color_button(indicator_widget.color_for(s, k))
-		icb.color_changed.connect(_on_menu_ind_color.bind(i, k))
-		row.add_child(icb)
-	_menu_box.add_child(row)
-
-func _color_button(c: Color) -> ColorPickerButton:
-	var b := ColorPickerButton.new()
-	b.edit_alpha = false
-	b.custom_minimum_size = Vector2(32, 20)
-	b.color = c
-	return b
 
 func _on_menu_mode(idx: int) -> void:
 	series_widget.mode = idx as SeriesWidget.Mode
@@ -1459,6 +1422,7 @@ func add_timeline(tl_name: String, path: String) -> int:
 	_update_book()
 	_set_load_status("")
 	_refresh()
+	series_panel.refresh()
 	return idx
 
 func _reload_series(i: int, path: String) -> int:
@@ -1497,6 +1461,7 @@ func _reload_series(i: int, path: String) -> int:
 			s.levels_path = ""
 	_update_book()
 	_refresh()
+	series_panel.refresh()
 	return i
 
 func remove_timeline(idx: int) -> void:
@@ -1512,6 +1477,7 @@ func remove_timeline(idx: int) -> void:
 	data.head = head
 	_update_book()
 	_refresh()
+	series_panel.refresh()
 
 func set_timeline_visible(idx: int, vis: bool) -> void:
 	data.series[idx].visible = vis
@@ -1575,14 +1541,21 @@ func _update_book() -> void:
 		book_widget.set_ladder(s.candle_at(i).close, step)
 		return
 
-func _on_timeline_added(tl_name: String, path: String) -> void:
-	add_timeline(tl_name, path)
+func _on_sim_generated(tl_name: String, path: String) -> void:
+	await add_timeline(tl_name, path)
+	series_panel.refresh()
 
-func _on_timeline_removed(idx: int) -> void:
+func _on_series_loaded(tl_name: String, path: String) -> void:
+	await add_timeline(tl_name, path)
+	series_panel.refresh()
+
+func _on_series_removed(idx: int) -> void:
 	remove_timeline(idx)
+	series_panel.refresh()
 
-func _on_timeline_toggled(idx: int, vis: bool) -> void:
-	set_timeline_visible(idx, vis)
+func _on_series_reset(i: int) -> void:
+	_on_menu_series_reset(i)
+	series_panel.refresh()
 
 func _load_candles(path: String) -> Array[Candle]:
 	var loaded: Array[Candle] = []

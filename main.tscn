@@ -5,25 +5,32 @@
 [ext_resource type="PackedScene" uid="uid://c8mlp2yav4tju" path="res://ml_page.tscn" id="3_ml"]
 [ext_resource type="PackedScene" uid="uid://dq7brieyyri78" path="res://strat_page.tscn" id="4_strat"]
 
-[node name="Main" type="TabContainer"]
+[node name="Main" type="VBoxContainer"]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-current_tab = 0
 script = ExtResource("1_main")
 
-[node name="Chart" parent="." instance=ExtResource("2_chart")]
+[node name="MenuBar" type="HBoxContainer" parent="."]
+layout_mode = 2
+
+[node name="Tabs" type="TabContainer" parent="."]
+layout_mode = 2
+size_flags_vertical = 3
+current_tab = 0
+
+[node name="Chart" parent="Tabs" instance=ExtResource("2_chart")]
 layout_mode = 2
 metadata/_tab_index = 0
 
-[node name="ML Trainer" parent="." instance=ExtResource("3_ml")]
+[node name="ML Trainer" parent="Tabs" instance=ExtResource("3_ml")]
 visible = false
 layout_mode = 2
 metadata/_tab_index = 1
 
-[node name="Strategy" parent="." instance=ExtResource("4_strat")]
+[node name="Strategy" parent="Tabs" instance=ExtResource("4_strat")]
 visible = false
 layout_mode = 2
 metadata/_tab_index = 2
