@@ -42,6 +42,7 @@ var _load_dialog: FileDialog
 var _picking_for := ""
 var _thread: Thread
 var _run_name := ""
+var _table_dir := ""   # dir the results table rows resolve artifacts against
 var _poll_ms := -1
 var _cancel_requested := false
 # last scan's data paths for drill-downs (file mode: the two pickers;
@@ -230,10 +231,28 @@ func _on_results_picked(path: String) -> void:
 	if not parsed is Dictionary:
 		_update_status("bad json: %s" % path)
 		return
-	# remember the run so chart/plot buttons resolve against it
-	var rel := dir.trim_prefix(ProjectSettings.globalize_path(DATA_DIR) + "/")
-	_run_name = rel if not rel.is_empty() else _run_name
+	# the table now resolves against the loaded dir; populate rows from
+	# every session json found there (same buttons as a live scan)
+	_table_dir = dir
 	_last_grid = false
+	var entries: Array = []
+	var d := DirAccess.open(dir)
+	if d != null:
+		for f in d.get_files():
+			if f.begins_with("dtw_") and f.ends_with(".json"):
+				var pj: Variant = JSON.parse_string(FileAccess.get_file_as_string("%s/%s" % [dir, f]))
+				if pj is Dictionary:
+					var best: Dictionary = (pj as Dictionary).get("best", {})
+					entries.append({
+						"tfA": (pj as Dictionary).get("tfA", ""),
+						"tfB": (pj as Dictionary).get("tfB", ""),
+						"win": (pj as Dictionary).get("win", 0),
+						"windows": (pj as Dictionary).get("windows", 0),
+						"done": (pj as Dictionary).get("windows", 0),
+						"best": best.get("dist", 0.0),
+						"status": "done",
+					})
+	_refresh_table(entries)
 	plot_requested.emit(dir, base, parsed)
 
 func _grid_mode() -> bool:
@@ -403,6 +422,7 @@ func _run_scan() -> void:
 		_run_name = "run%d" % (Time.get_ticks_msec() % 100000)
 		_last_grid = false
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(_run_dir()))
+	_table_dir = ProjectSettings.globalize_path(_run_dir())
 	_update_status("starting scan %s…" % _run_name)
 	_scan_btn.text = "Cancel"
 	_thread = Thread.new()
@@ -502,7 +522,7 @@ func _refresh_table(live: Array) -> void:
 		chart_btn.text = "chart"
 		chart_btn.tooltip_text = "load the match-offset line as a chart timeline"
 		var base := "dtw_%s_%s_%d" % [s.get("tfA", ""), s.get("tfB", ""), s["win"]]
-		var json_path := "%s/%s.json" % [ProjectSettings.globalize_path(_run_dir()), base]
+		var json_path := "%s/%s.json" % [_table_dir, base]
 		chart_btn.disabled = not FileAccess.file_exists(json_path)
 		chart_btn.pressed.connect(_on_chart_pressed.bind(base))
 		row.add_child(chart_btn)
@@ -521,22 +541,20 @@ func _refresh_table(live: Array) -> void:
 		_table.add_child(row)
 
 func _on_overlay_pressed(base: String) -> void:
-	var dir := ProjectSettings.globalize_path(_run_dir())
-	var jp := "%s/%s.json" % [dir, base]
+	var jp := "%s/%s.json" % [_table_dir, base]
 	if not FileAccess.file_exists(jp):
 		return
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(jp))
 	if parsed is Dictionary:
-		overlay_requested.emit(dir, base, parsed)
+		overlay_requested.emit(_table_dir, base, parsed)
 
 func _on_plot_pressed(base: String) -> void:
-	var dir := ProjectSettings.globalize_path(_run_dir())
-	var jp := "%s/%s.json" % [dir, base]
+	var jp := "%s/%s.json" % [_table_dir, base]
 	if not FileAccess.file_exists(jp):
 		return
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(jp))
 	if parsed is Dictionary:
-		plot_requested.emit(dir, base, parsed)
+		plot_requested.emit(_table_dir, base, parsed)
 
 # drill-down for one matched window: FFI returns the warping path plus the
 # two z-normalized windows; runs on a thread (first call pays the load)
@@ -578,7 +596,7 @@ func _drill_async(params: String, i: int, j: int) -> void:
 		drill_done.emit({"error": "bad drill json"})
 
 func _on_chart_pressed(base: String) -> void:
-	var dir := ProjectSettings.globalize_path(_run_dir())
+	var dir := _table_dir
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("%s/%s.json" % [dir, base]))
 	if not parsed is Dictionary:
 		_update_status("bad result json for %s" % base)
