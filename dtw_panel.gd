@@ -424,14 +424,18 @@ func _on_chart_pressed(base: String) -> void:
 	if not FileAccess.file_exists(matches_path):
 		_update_status("no matches csv for %s" % base)
 		return
-	# convert (i,j,dist) into a candles csv with close=j so the chart can
-	# plot the match-position line directly
+	# convert (i,j,dist) into a candles csv charting the LEAD/LAG OFFSET
+	# j-i per A window (constant offset = stable correlation; slope =
+	# relative speed). One row per stepped A window so the x-axis stays
+	# aligned with A; unmatched windows carry the previous offset (the
+	# matches csv omits j=-1 rows, which would otherwise compress the axis)
 	var pos_path := "%s/posline_%s.csv" % [dir, base]
 	var out := FileAccess.open(pos_path, FileAccess.WRITE)
 	if out == null:
 		_update_status("cannot write %s" % pos_path)
 		return
 	out.store_line("open,high,low,close,vol")
+	var by_i := {}
 	var f := FileAccess.open(matches_path, FileAccess.READ)
 	f.get_line()
 	while not f.eof_reached():
@@ -441,15 +445,41 @@ func _on_chart_pressed(base: String) -> void:
 		var parts := line.split(",")
 		if parts.size() < 2:
 			continue
-		var j := parts[1].to_float()
-		out.store_line("%.5f,%.5f,%.5f,%.5f,0" % [j, j, j, j])
+		by_i[parts[0].to_int()] = parts[1].to_float()
+	# step: smallest positive gap between consecutive sorted i (windows
+	# are stepped regularly, so the min gap recovers the step even with
+	# unmatched windows missing from the csv)
+	var keys := by_i.keys()
+	keys.sort()
+	var step := 0
+	for k in range(1, keys.size()):
+		var d: int = keys[k] - keys[k - 1]
+		if d > 0 and (step == 0 or d < step):
+			step = d
+	if step == 0:
+		step = 1
+	# one row per stepped A window starting at 0: the x-axis aligns with
+	# A's candle indices; unmatched windows carry the previous offset
+	var last := 0.0
+	var n_win: int = int((parsed as Dictionary).get("windows", 0))
+	var buf := PackedStringArray()
+	for k in n_win:
+		var i: int = k * step
+		if by_i.has(i):
+			last = by_i[i] - i
+		buf.append("%.5f,%.5f,%.5f,%.5f,0" % [last, last, last, last])
+		if buf.size() >= 4096:
+			out.store_string("\n".join(buf) + "\n")
+			buf.clear()
+	if not buf.is_empty():
+		out.store_string("\n".join(buf) + "\n")
 	out.close()
 	var chart: Variant = _chart()
 	if chart == null:
 		_update_status("chart tab not found")
 		return
 	var best: Dictionary = (parsed as Dictionary).get("best", {})
-	var label := "%s dist %.6f" % [base, best.get("dist", 0.0)]
+	var label := "%s offset dist %.6f" % [base, best.get("dist", 0.0)]
 	if chart.has_method("add_timeline"):
 		chart.add_timeline(label, pos_path)
 		_update_status("chart: loaded %s" % label)
