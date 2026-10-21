@@ -35,6 +35,9 @@ extern "C" int sim_macd(const double *closes, int count, int fast, int slow, int
 extern "C" int sim_rsi(const double *closes, int count, int period, double *out);
 extern "C" int sim_bb(const double *closes, int count, int period, double mult, double *out);
 extern "C" void hs_init(int *argc, char **argv[]);
+// hs_init ignores most RTS options (-N included); the _with_rtsopts
+// variant honors them — requires the foreign library built with -rtsopts
+extern "C" void hs_init_with_rtsopts(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
 __attribute__((constructor)) static void simffi_init(void) {
@@ -45,7 +48,7 @@ __attribute__((constructor)) static void simffi_init(void) {
 	int argc = 5;
 	char *argv[] = { (char *)"rel-sim", (char *)"+RTS", (char *)"-N", (char *)"-I0", (char *)"-RTS", nullptr };
 	char **argv_ptr = argv;
-	hs_init(&argc, &argv_ptr);
+	hs_init_with_rtsopts(&argc, &argv_ptr);
 }
 
 __attribute__((destructor)) static void simffi_exit(void) {

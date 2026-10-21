@@ -86,7 +86,7 @@ foreign-library simffi
                       rel-sim,
                       vector
     default-language: Haskell2010
-    ghc-options:      -Wall -Wcompat -O2 -fPIC -threaded
+    ghc-options:      -Wall -Wcompat -O2 -fPIC -threaded -rtsopts
     if os(linux)
         ghc-options:  -optl-Wl,-z,origin
 

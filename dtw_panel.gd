@@ -213,7 +213,7 @@ func _on_load_results() -> void:
 	_load_dialog.popup_centered(Vector2i(700, 500))
 
 func _on_clear_overlay() -> void:
-	var chart := _chart()
+	var chart: Variant = _chart()
 	if chart != null and chart.has_method("clear_dtw_overlay"):
 		chart.clear_dtw_overlay()
 		_update_status("chart overlay cleared")
