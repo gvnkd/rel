@@ -317,9 +317,23 @@ func clear_dtw_overlay() -> void:
 func _on_dtw_overlay_clicked(i: int) -> void:
 	dtw_overlay.sel_i = i
 	dtw_overlay.queue_redraw()
-	var page := get_tree().root.find_child("DtwPage", true, false)
+	var page := get_tree().root.find_child("DTW", true, false)
+	if page == null:
+		page = get_tree().root.find_child("DtwPage", true, false)
 	if page != null and page.has_method("show_drill"):
 		page.show_drill(i, dtw_overlay.j_for(i))
+
+# center the view on an index range (DTW drill "show on chart"): fits the
+# range to ~70% of the plot width around its center
+func focus_index_range(i0: int, i1: int) -> void:
+	var n := maxf(i1 - i0, 2.0)
+	var w := view.plot_rect.size.x
+	if w < 10.0:
+		return
+	view.px_per_index = clampf(w * 0.7 / n, 1.0, 400.0)
+	view.base_index = i0 - (w / view.px_per_index - n) * 0.5
+	view.follow = false
+	_refresh()
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not is_visible_in_tree():

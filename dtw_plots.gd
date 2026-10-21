@@ -11,6 +11,7 @@ extends Control
 # endpoint (two RMB clicks switch to the pairs view).
 
 signal drill_requested(i: int, j: int)
+signal locate_requested(i0: int, i1: int)
 
 const MARGIN_L := 56.0
 const MARGIN_R := 12.0
@@ -30,6 +31,7 @@ var _sel_i := -1        # drilled A index (drawn marker)
 var _mode_btns := {}
 var _status: Label
 var _hint: Label
+var _locate_btn: Button
 # drill zoom: visible fractions of the x (index) and y (z-value) ranges;
 # RMB drag scales like the chart (right = zoom in x, up = zoom in y,
 # anchored at the cursor), RMB click resets
@@ -51,6 +53,12 @@ func _ready() -> void:
 		b.disabled = m == "drill" or m == "pairs"
 		bar.add_child(b)
 		_mode_btns[m] = b
+	_locate_btn = Button.new()
+	_locate_btn.text = "show on chart"
+	_locate_btn.tooltip_text = "open this window's price range on the Chart tab"
+	_locate_btn.disabled = true
+	_locate_btn.pressed.connect(_on_locate)
+	bar.add_child(_locate_btn)
 	_status = Label.new()
 	_status.size_flags_horizontal = SIZE_EXPAND_FILL
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -152,6 +160,12 @@ func _load_csv(matches_path: String) -> Array:
 func session_meta() -> Dictionary:
 	return _meta
 
+func _on_locate() -> void:
+	if not _drill.has("i"):
+		return
+	var i0 := int(_drill["i"])
+	locate_requested.emit(i0, i0 + int(_meta.get("win", 0)))
+
 func set_drill(d: Dictionary) -> void:
 	if d.has("error"):
 		_status.text = "drill-down: " + str(d["error"])
@@ -160,6 +174,7 @@ func set_drill(d: Dictionary) -> void:
 	_range = [-1, -1]
 	_zx = [0.0, 1.0]
 	_zy = [0.0, 1.0]
+	_locate_btn.disabled = false
 	(_mode_btns["drill"] as Button).disabled = false
 	_set_mode("drill")
 	_status.text = "drill: dist %.6f, path %d steps — RMB drag zooms, RMB click resets" % [d.get("dist", 0.0), (d.get("path", []) as Array).size()]

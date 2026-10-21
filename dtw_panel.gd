@@ -545,9 +545,9 @@ func _on_drill(i: int, j: int, meta: Dictionary) -> void:
 		return
 	_drill_async("dataa=%s;datab=%s;i=%d;j=%d;win=%d;band=%d" % [
 		data_a, data_b, i, j,
-		int(meta.get("win", 128)), int(meta.get("band", 32))])
+		int(meta.get("win", 128)), int(meta.get("band", 32))], i, j)
 
-func _drill_async(params: String) -> void:
+func _drill_async(params: String, i: int, j: int) -> void:
 	_update_status("drill-down…")
 	var t := Thread.new()
 	t.start(Callable(_sim, "dtw_path").bind(params))
@@ -556,6 +556,8 @@ func _drill_async(params: String) -> void:
 	var res: String = t.wait_to_finish()
 	var parsed: Variant = JSON.parse_string(res)
 	if parsed is Dictionary:
+		(parsed as Dictionary)["i"] = i
+		(parsed as Dictionary)["j"] = j
 		drill_done.emit(parsed)
 		_update_status("")
 	else:

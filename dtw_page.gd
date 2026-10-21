@@ -8,6 +8,7 @@ func _ready() -> void:
 	_panel.plot_requested.connect(_plots.show_run)
 	_panel.overlay_requested.connect(_on_overlay_request)
 	_plots.drill_requested.connect(_on_drill)
+	_plots.locate_requested.connect(_on_locate)
 	_panel.drill_done.connect(_plots.set_drill)
 
 func _on_drill(i: int, j: int) -> void:
@@ -31,3 +32,14 @@ func show_drill(i: int, j: int) -> void:
 		tabs.current_tab = get_index()
 	if j >= 0:
 		_panel._on_drill(i, j, _plots.session_meta())
+
+# inverse: from the drill view, open the window's price range on the Chart tab
+func _on_locate(i0: int, i1: int) -> void:
+	var tabs := get_parent() as TabContainer
+	if tabs == null:
+		return
+	var chart_tab := tabs.get_node_or_null("Chart")
+	if chart_tab == null:
+		return
+	tabs.current_tab = chart_tab.get_index()
+	chart_tab.focus_index_range(i0, i1)
