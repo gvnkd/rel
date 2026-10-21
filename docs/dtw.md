@@ -131,8 +131,26 @@ Per session (`<out>/dtw_<tfA>_<tfB>_<win>.{json,csv}`):
   stretches of it are stable correlations, jumps are noise or regime
   changes.
 
-The panel's "chart" button converts the position line into a candles csv
-(`close = j`) and loads it as a regular chart timeline.
+The panel's "chart" button converts the matches into a candles csv of the
+**lead/lag offset `j − i`** (one row per stepped A window, gaps carried)
+and loads it as a regular chart timeline: a flat line = stable correlation
+at a constant offset, drift = relative speed change, jumps = regime
+switches.
+
+## Visualization (DTW page plots)
+
+Each session row's "plot" button loads the matches into the page's
+`dtw_plots.gd` widget with four modes:
+
+| mode | view | reading |
+|---|---|---|
+| scatter | (i, j) points colored by dist, diagonal reference | diagonal clusters = stable sync; arcs = lead/lag change; clouds = noise |
+| dist | per-step distance per A window (min/max envelope per pixel) | where in A the correlation is strong; ~2 = none, <0.1 = strong |
+| drill | two z-normalized windows overlaid + warping-path connectors | what a match looks like and where it stretches; LMB-click scatter/dist to open (FFI `sim_dtw_path` recomputes the exact path, ~ms) |
+| pairs | correspondence wiring: A index range on top, B on bottom, connector per matched window | the "wiring diagram" of the warp over a range; RMB-click twice to select |
+
+Dense sessions downsample to ≤60k points (scatter) / one min-max envelope
+column per pixel (dist), so 300k-window scans stay interactive.
 
 ## CLI
 

@@ -19,6 +19,7 @@ extern "C" int sim_dtw_scan(const char *params);
 extern "C" double sim_dtw_progress(void);
 extern "C" char *sim_dtw_sessions(void);
 extern "C" void sim_dtw_cancel(void);
+extern "C" char *sim_dtw_path(const char *params);
 extern "C" int sim_strat_optimize(const char *params);
 extern "C" double sim_strat_progress(void);
 extern "C" char *sim_strat_sessions(void);
@@ -80,6 +81,7 @@ protected:
 		godot::ClassDB::bind_method(godot::D_METHOD("dtw_progress"), &SimNative::dtw_progress);
 		godot::ClassDB::bind_method(godot::D_METHOD("dtw_sessions"), &SimNative::dtw_sessions);
 		godot::ClassDB::bind_method(godot::D_METHOD("dtw_cancel"), &SimNative::dtw_cancel);
+		godot::ClassDB::bind_method(godot::D_METHOD("dtw_path", "params"), &SimNative::dtw_path);
 	}
 
 public:
@@ -148,6 +150,16 @@ public:
 
 	void dtw_cancel() {
 		sim_dtw_cancel();
+	}
+
+	// single-window drill-down: warping path + z-normalized windows as JSON;
+	// the C string is copied then freed
+	godot::String dtw_path(const godot::String &params) {
+		godot::CharString ps = params.utf8();
+		char *s = sim_dtw_path(ps.ptr());
+		godot::String r(s);
+		::free(s);
+		return r;
 	}
 
 	// strategy optimizer: starts a batch of parallel sessions, blocks until

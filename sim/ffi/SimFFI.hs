@@ -15,7 +15,7 @@ import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import qualified Sim.DtwIndex as DTW
-import Sim.Dtw (Prefix, mkPrefix, pfLen)
+import Sim.Dtw (Prefix, dtwPathFree, mkPrefix, pfLen, stepCost, zslice, zwin)
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..))
@@ -392,6 +392,14 @@ foreign export ccall "sim_dtw_progress" simDtwProgress :: IO CDouble
 foreign export ccall "sim_dtw_sessions" simDtwSessions :: IO CString
 
 foreign export ccall "sim_dtw_cancel" simDtwCancel :: IO ()
+
+-- drill-down for one A window: banded free-end DTW against the B segment
+-- starting at j (pass the j from the matches csv). Returns a JSON string:
+-- {"dist":D,"win":W,"seg":S,"a":[z-normalized query],
+--  "b":[z-normalized segment],"path":[[q,r],...]} — b/path indices are
+-- relative to j; "error" set on failure. Loaded closes are cached
+-- per-process, so repeat drill-downs on the same files are cheap.
+foreign export ccall "sim_dtw_path" simDtwPath :: CString -> IO CString
 
 -- --- strategy optimizer FFI ------------------------------------------------
 
@@ -843,6 +851,71 @@ runDtwScanBatch p = do
             let v = mkPrefix cls
             modifyIORef' cacheRef (Map.insert path v)
             pure (Just v)
+
+-- --- DTW drill-down ----------------------------------------------------------
+
+{-# NOINLINE dtwPathCacheRef #-}
+dtwPathCacheRef :: IORef (Map.Map FilePath Prefix)
+dtwPathCacheRef = unsafePerformIO (newIORef Map.empty)
+
+simDtwPath :: CString -> IO CString
+simDtwPath paramsPtr = do
+  paramsStr <- peekCString paramsPtr
+  out <- try (computeDtwPath paramsStr) :: IO (Either SomeException String)
+  newCString (either (const "{\"error\":\"exception\"}") id out)
+
+computeDtwPath :: String -> IO String
+computeDtwPath s = do
+  let kv = kvPairs s
+      look k = lookup k kv
+      readI k d = fromMaybe d (look k >>= readV)
+      readV v = case reads v of
+        [(x, "")] -> Just (x :: Int)
+        _         -> Nothing
+  case (look "dataa", look "datab", look "i", look "j") of
+    (Just pa, Just pb, Just iStr, Just jStr) -> do
+      let mI = readV iStr
+          mJ = readV jStr
+          win = readI "win" 128
+          band = max 1 (readI "band" (max 1 (win `div` 4)))
+      case (mI, mJ) of
+        (Just i, Just j) | j >= 0, win > 0 -> do
+          mpa <- cachedPrefix pa
+          mpb <- cachedPrefix pb
+          case (mpa, mpb) of
+            (Just pfa, Just pfb)
+              | i >= 0, i + win <= pfLen pfa, j + win + 2 * band <= pfLen pfb -> do
+                  let q = zslice pfa i win
+                      seg = zwin pfb j win (win + 2 * band)
+                      (cost, path) = dtwPathFree q seg band
+                      dist = stepCost (cost, path)
+                  pure $ jsonPath win (win + 2 * band) dist q seg path
+            _ -> pure "{\"error\":\"bad params or data\"}"
+        _ -> pure "{\"error\":\"bad params\"}"
+    _ -> pure "{\"error\":\"missing params\"}"
+  where
+  cachedPrefix path = do
+    cached <- readIORef dtwPathCacheRef
+    case Map.lookup path cached of
+      Just v  -> pure (Just v)
+      Nothing -> do
+        parsed <- MLD.loadCloses path
+        case parsed of
+          Left _    -> pure Nothing
+          Right cls -> do
+            let v = mkPrefix cls
+            modifyIORef' dtwPathCacheRef (Map.insert path v)
+            pure (Just v)
+  jsonPath win segLen dist q seg path =
+    let dbls v = "[" ++ intercalate "," (map show (VU.toList v)) ++ "]"
+        pairs = "[" ++ intercalate "," [ "[" ++ show a ++ "," ++ show b ++ "]" | (a, b) <- path ] ++ "]"
+    in "{\"dist\":" ++ show dist
+       ++ ",\"win\":" ++ show win
+       ++ ",\"seg\":" ++ show segLen
+       ++ ",\"a\":" ++ dbls q
+       ++ ",\"b\":" ++ dbls seg
+       ++ ",\"path\":" ++ pairs
+       ++ "}"
 
 parseDtwParams :: String -> Either String DtwParams
 parseDtwParams s = do

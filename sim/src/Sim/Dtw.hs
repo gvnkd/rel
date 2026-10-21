@@ -18,6 +18,7 @@ module Sim.Dtw
   , dtwPathFree
   , stepCost
   , subseqAt
+  , zwin
   ) where
 
 import Control.Monad (forM_)

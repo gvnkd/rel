@@ -1,6 +1,9 @@
 class_name DtwPanel
 extends Control
 
+signal plot_requested(dir: String, base: String, meta: Dictionary)
+signal drill_done(d: Dictionary)
+
 # DTW correlation scan panel. File mode: scan the two picked files as one
 # (tfA, tfB) pair. Grid mode: pick two series loaded in the chart — every
 # timeframe of A is scanned against every timeframe of B in one batch
@@ -39,6 +42,11 @@ var _thread: Thread
 var _run_name := ""
 var _poll_ms := -1
 var _cancel_requested := false
+# last scan's data paths for drill-downs (file mode: the two pickers;
+# grid mode: per-TF materialized paths)
+var _last_grid := false
+var _paths_a := {}
+var _paths_b := {}
 
 func _ready() -> void:
 	sim_available = ClassDB.class_exists("SimNative")
@@ -330,6 +338,9 @@ func _run_scan() -> void:
 		paths_a = await _materialize_series(s_a, tmp)
 		_update_status("materializing %s…" % s_b.name)
 		paths_b = await _materialize_series(s_b, tmp)
+		_last_grid = true
+		_paths_a = paths_a
+		_paths_b = paths_b
 		if paths_a.is_empty() or paths_b.is_empty():
 			_update_status("could not materialize chart series")
 			return
@@ -341,6 +352,7 @@ func _run_scan() -> void:
 			_update_status("pick an existing series B file first")
 			return
 		_run_name = "run%d" % (Time.get_ticks_msec() % 100000)
+		_last_grid = false
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(_run_dir()))
 	_update_status("starting scan %s…" % _run_name)
 	_scan_btn.text = "Cancel"
@@ -406,13 +418,64 @@ func _refresh_table(live: Array) -> void:
 		row.add_child(info)
 		var chart_btn := Button.new()
 		chart_btn.text = "chart"
-		chart_btn.tooltip_text = "load the match-position line as a chart timeline"
+		chart_btn.tooltip_text = "load the match-offset line as a chart timeline"
 		var base := "dtw_%s_%s_%d" % [s.get("tfA", ""), s.get("tfB", ""), s["win"]]
 		var json_path := "%s/%s.json" % [ProjectSettings.globalize_path(_run_dir()), base]
 		chart_btn.disabled = not FileAccess.file_exists(json_path)
 		chart_btn.pressed.connect(_on_chart_pressed.bind(base))
 		row.add_child(chart_btn)
+		var plot_btn := Button.new()
+		plot_btn.text = "plot"
+		plot_btn.tooltip_text = "show the alignment scatter / dist line / drill-down in the page plots"
+		plot_btn.disabled = not FileAccess.file_exists(json_path)
+		plot_btn.pressed.connect(_on_plot_pressed.bind(base))
+		row.add_child(plot_btn)
 		_table.add_child(row)
+
+func _on_plot_pressed(base: String) -> void:
+	var dir := ProjectSettings.globalize_path(_run_dir())
+	var jp := "%s/%s.json" % [dir, base]
+	if not FileAccess.file_exists(jp):
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(jp))
+	if parsed is Dictionary:
+		plot_requested.emit(dir, base, parsed)
+
+# drill-down for one matched window: FFI returns the warping path plus the
+# two z-normalized windows; runs on a thread (first call pays the load)
+func _on_drill(i: int, j: int, meta: Dictionary) -> void:
+	if not sim_available:
+		return
+	var tfA := str(meta.get("tfA", ""))
+	var tfB := str(meta.get("tfB", ""))
+	var data_a := ""
+	var data_b := ""
+	if _last_grid:
+		data_a = str(_paths_a.get(tfA, ""))
+		data_b = str(_paths_b.get(tfB, ""))
+	else:
+		data_a = _data_a.text.strip_edges()
+		data_b = _data_b.text.strip_edges()
+	if data_a.is_empty() or data_b.is_empty():
+		_update_status("drill-down: data paths unavailable for %s/%s" % [tfA, tfB])
+		return
+	_drill_async("dataa=%s;datab=%s;i=%d;j=%d;win=%d;band=%d" % [
+		data_a, data_b, i, j,
+		int(meta.get("win", 128)), int(meta.get("band", 32))])
+
+func _drill_async(params: String) -> void:
+	_update_status("drill-down…")
+	var t := Thread.new()
+	t.start(Callable(_sim, "dtw_path").bind(params))
+	while t.is_alive():
+		await get_tree().process_frame
+	var res: String = t.wait_to_finish()
+	var parsed: Variant = JSON.parse_string(res)
+	if parsed is Dictionary:
+		drill_done.emit(parsed)
+		_update_status("")
+	else:
+		drill_done.emit({"error": "bad drill json"})
 
 func _on_chart_pressed(base: String) -> void:
 	var dir := ProjectSettings.globalize_path(_run_dir())
