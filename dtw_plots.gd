@@ -27,6 +27,13 @@ var _drill: Dictionary = {}
 var _range := [-1, -1]  # correspondence range endpoints (A indices)
 var _mode_btns := {}
 var _status: Label
+# drill zoom: visible fractions of the x (index) and y (z-value) ranges;
+# RMB drag scales like the chart (right = zoom in x, up = zoom in y,
+# anchored at the cursor), RMB click resets
+var _zx := [0.0, 1.0]
+var _zy := [0.0, 1.0]
+var _rmb_down := false
+var _rmb_down_pos := Vector2.ZERO
 
 func _ready() -> void:
 	var bar := HBoxContainer.new()
@@ -133,9 +140,11 @@ func set_drill(d: Dictionary) -> void:
 		return
 	_drill = d
 	_range = [-1, -1]
+	_zx = [0.0, 1.0]
+	_zy = [0.0, 1.0]
 	(_mode_btns["drill"] as Button).disabled = false
 	_set_mode("drill")
-	_status.text = "drill: dist %.6f, path %d steps" % [d.get("dist", 0.0), (d.get("path", []) as Array).size()]
+	_status.text = "drill: dist %.6f, path %d steps — RMB drag zooms, RMB click resets" % [d.get("dist", 0.0), (d.get("path", []) as Array).size()]
 
 func _plot_rect() -> Rect2:
 	return Rect2(MARGIN_L, MARGIN_T, size.x - MARGIN_L - MARGIN_R, size.y - MARGIN_T - MARGIN_B)
@@ -255,8 +264,14 @@ func _draw_drill(r: Rect2) -> void:
 	var pad := maxf(0.5, (hi - lo) * 0.08)
 	lo -= pad
 	hi += pad
-	var px := func(x: float) -> float: return r.position.x + r.size.x * x / maxf(1.0, n - 1)
-	var py := func(v: float) -> float: return r.end.y - r.size.y * (v - lo) / maxf(1e-9, hi - lo)
+	# zoom windows: fractions of the index range and of the value range
+	var x_lo: float = _zx[0] * (n - 1)
+	var x_hi := maxf(_zx[1] * (n - 1), x_lo + 1.0)
+	var v_span := maxf(1e-9, hi - lo)
+	var y_lo: float = lo + _zy[0] * v_span
+	var y_hi := maxf(lo + _zy[1] * v_span, y_lo + 1e-6)
+	var px := func(x: float) -> float: return r.position.x + r.size.x * (x - x_lo) / (x_hi - x_lo)
+	var py := func(v: float) -> float: return r.end.y - r.size.y * (v - y_lo) / (y_hi - y_lo)
 	# warping connectors (thin, dim)
 	var stride := maxi(1, path.size() / 96)
 	for k in range(0, path.size(), stride):
@@ -331,29 +346,70 @@ func _draw_axes(r: Rect2, xlabel: String, ylabel: String) -> void:
 # --- input -----------------------------------------------------------------
 
 func _gui_input(ev: InputEvent) -> void:
-	if not (ev is InputEventMouseButton and ev.pressed):
-		return
-	if _matches.is_empty() or _mode == "drill" or _mode == "pairs":
-		return
+	if ev is InputEventMouseButton:
+		var button := ev as InputEventMouseButton
+		if button.pressed:
+			if button.button_index == MOUSE_BUTTON_RIGHT and _mode == "drill":
+				_rmb_down = true
+				_rmb_down_pos = button.position
+				return
+			if _matches.is_empty() or _mode == "drill" or _mode == "pairs":
+				return
+			var r := _plot_rect()
+			if not r.has_point(button.position):
+				return
+			var i_max: float = _n_win * _step
+			if i_max <= 0:
+				return
+			var k := int((button.position.x - r.position.x) / r.size.x * i_max)
+			var i := clampi(k, 0, int(i_max))
+			if button.button_index == MOUSE_BUTTON_LEFT:
+				if _matches.has(i):
+					drill_requested.emit(i, int(_matches[i][0]))
+				else:
+					_status.text = "no match at i=%d" % i
+			elif button.button_index == MOUSE_BUTTON_RIGHT:
+				# two RMB clicks select the correspondence range
+				if _range[0] < 0 or _range[1] >= 0:
+					_range = [i, -1]
+					_status.text = "range start i=%d (RMB again to end)" % i
+				else:
+					_range = [mini(_range[0], i), maxi(_range[0], i)]
+					(_mode_btns["pairs"] as Button).disabled = false
+					_set_mode("pairs")
+		else:
+			if button.button_index == MOUSE_BUTTON_RIGHT and _rmb_down:
+				# RMB click (no drag) in drill resets the zoom
+				if _mode == "drill" and button.position.distance_to(_rmb_down_pos) < 4.0:
+					_zx = [0.0, 1.0]
+					_zy = [0.0, 1.0]
+					queue_redraw()
+				_rmb_down = false
+	elif ev is InputEventMouseMotion:
+		var motion := ev as InputEventMouseMotion
+		if _rmb_down and _mode == "drill" \
+				and motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
+			_drill_scale_by(motion.relative, motion.position)
+
+# chart-like zoom: drag right zooms in x, drag up zooms in y, cursor-anchored
+func _drill_scale_by(delta: Vector2, pos: Vector2) -> void:
 	var r := _plot_rect()
-	if not r.has_point(ev.position):
+	if not r.has_point(pos):
 		return
-	var i_max: float = _n_win * _step
-	if i_max <= 0:
-		return
-	var k := int((ev.position.x - r.position.x) / r.size.x * i_max)
-	var i := clampi(k, 0, int(i_max))
-	if ev.button_index == MOUSE_BUTTON_LEFT:
-		if _matches.has(i):
-			drill_requested.emit(i, int(_matches[i][0]))
-		else:
-			_status.text = "no match at i=%d" % i
-	elif ev.button_index == MOUSE_BUTTON_RIGHT:
-		# two RMB clicks select the correspondence range
-		if _range[0] < 0 or _range[1] >= 0:
-			_range = [i, -1]
-			_status.text = "range start i=%d (RMB again to end)" % i
-		else:
-			_range = [mini(_range[0], i), maxi(_range[0], i)]
-			(_mode_btns["pairs"] as Button).disabled = false
-			_set_mode("pairs")
+	var cx := clampf((pos.x - r.position.x) / r.size.x, 0.0, 1.0)
+	var cy := clampf((pos.y - r.position.y) / r.size.y, 0.0, 1.0)
+	_zoom_axis(_zx, cx, pow(1.01, -delta.x), 1.0 / 4096.0)
+	_zoom_axis(_zy, cy, pow(1.01, delta.y), 1.0 / 4096.0)
+	queue_redraw()
+
+# shrink/expand the [lo,hi] fraction window by factor around the anchored
+# fraction c (c measured within the old window, so the cursor point stays)
+func _zoom_axis(win: Array, c: float, factor: float, min_span: float) -> void:
+	var lo: float = win[0]
+	var hi: float = win[1]
+	var span := maxf(hi - lo, min_span)
+	var anchor := lo + c * span
+	var new_span := clampf(span * factor, min_span, 1.0)
+	var new_lo := clampf(anchor - c * new_span, 0.0, 1.0 - new_span)
+	win[0] = new_lo
+	win[1] = new_lo + new_span
