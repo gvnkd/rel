@@ -156,6 +156,32 @@ Each session row's "plot" button loads the matches into the page's
 Dense sessions downsample to ≤60k points (scatter) / one min-max envelope
 column per pixel (dist), so 300k-window scans stay interactive.
 
+Interactions: LMB clicks snap to the **nearest** matched window (marker
+shown); drill view zooms chart-style (RMB drag right/up = zoom in x/y at the
+cursor, RMB click resets); the drill toolbar's **"show on chart"** jumps to
+the Chart tab and centers the window's candle range (inverse of the overlay
+click below). Two RMB clicks in scatter/dist select the pairs range.
+
+## Chart overlay
+
+The session row's **"overlay"** button marks matched windows directly on the
+Chart tab's price graph: semi-opaque rectangles over each window's candle
+range, colored by dist (green = good), the selected window bordered. A
+**"dtw max dist" slider** (top-right on the chart) filters which windows are
+drawn and clickable; its **x** button (or the panel's "Clear chart overlay")
+removes the overlay. **Clicking a rectangle** switches to the DTW tab and
+opens that window's drill view. The rectangles align with the chart series
+that corresponds to the scan's series A (same file, or the chart series used
+by grid mode).
+
+## Loading results
+
+Scans save under `user://dtwdata/<run>/` (auto). **"Load results…"** (panel
+button, defaults to that folder) picks any `dtw_*.json` and repopulates the
+whole results table from that folder — same chart/plot/overlay buttons as a
+live scan — plus the plots view. Drill-downs keep working because each json
+is stamped with its `dataa`/`datab` paths.
+
 ## CLI
 
 ```
@@ -176,6 +202,11 @@ to override. Progress prints per session as `tfA/tfB w<win> <pct>%`.
 table above as `key=value;...`; grid mode via `tfs=...` with comma-aligned
 `dataa=`/`datab=` lists (empty entry skips the timeframe). Return codes:
 0 ok, 1 bad params, 2 data/IO failure, 3 cancelled.
+
+`sim_dtw_path(params)` — drill-down for one window: `dataa=,datab=,i=,j=,
+win=,band=` → JSON `{dist, win, seg, a[], b[], path[[q,r],...]}` (z-normalized
+query/segment and the exact warping path, b/path indices relative to j).
+Closes are cached per process, so repeat drill-downs are ~ms.
 
 ## Performance
 
@@ -202,5 +233,13 @@ word-lookup stage; only plausible matches pay for DTW (≤ 64 verifications
 - `B.spanEnd` leaks under stream loops (bytestring internals, ~45MB per 8MB
   chunk) — the loader uses `elemIndexEnd`; do not reintroduce spanEnd in
   chunked readers.
-- The GHC RTS must be started with `-N` for any forkIO batch to use more
-  than one core (the shim passes `+RTS -N -RTS` to `hs_init`).
+- RTS flags must go through `hs_init_with_rtsopts()` (plain `hs_init`
+  silently rejects `-N`/`-I0`) and the foreign library needs `-rtsopts` —
+  otherwise everything runs single-core with no warning. Current flags:
+  `+RTS -N -I0 -RTS` (all capabilities; `-I0` disables the idle GC, which
+  otherwise pins a core at 100% after multi-GB scans).
+- The chart's `_input`/`_unhandled_key_input` fire on every tab — guard with
+  `is_visible_in_tree()` or the chart RMB menu/playback keys leak into other
+  pages (the DTW tab got the chart context menu until 2026-10-20).
+- GDScript: `var x := fn_returning_Variant()` is a warning-as-error —
+  annotate `var x: Variant = ...`. This has bitten ~5 times in the DTW UI.

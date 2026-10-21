@@ -358,7 +358,15 @@ fractional-cycle recovery on quantized sinus sums.
 
 ## Building / running
 
-- `nix build .#sim` — CLI (`result/bin/sim`)
+- `nix build .#sim` — CLI (`result/bin/sim`, plus `result/bin/dtw` — the
+  DTW correlation scanner)
 - `nix build .#sim` + `nix flake check` — QuickCheck suite runs in the build
 - `nix run .#link-sim-extension` — copy the FFI library into the Redot
   project (required after rebuilds; then restart the editor fully)
+
+## Further docs
+
+- `docs/dtw.md` — DTW correlation scanner: subsequence search, timeframe
+  grids, CLI/FFI, visualization (page plots + chart overlay), performance
+- `docs/ml_train.md` — offline tabular MLP trainer (next-candle direction)
+- `docs/strat_dsl.md` — hand-authored strategy DSL and the slot optimizer
