@@ -11,6 +11,7 @@
 [ext_resource type="Script" uid="uid://chcgg54nkl8hh" path="res://cross_widget.gd" id="8_cross"]
 [ext_resource type="Script" uid="uid://bckq6f6x652w" path="res://cursor_widget.gd" id="9_cursor"]
 [ext_resource type="Script" path="res://trades_widget.gd" id="11_trades"]
+[ext_resource type="Script" path="res://dtw_overlay_widget.gd" id="13_dtw"]
 
 [node name="Chart" type="Control"]
 layout_mode = 3
@@ -68,6 +69,16 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("11_trades")
+
+[node name="DtwOverlay" type="Control" parent="."]
+clip_contents = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("13_dtw")
 
 [node name="Cross" type="Control" parent="."]
 layout_mode = 1

@@ -59,6 +59,7 @@ const PALETTE: Array[Color] = [
 @onready var series_window: ToolWindow = $SeriesWindow
 @onready var series_panel: SeriesPanel = $SeriesWindow/Box/SeriesPanel
 @onready var trades_widget: TradesWidget = $Trades
+@onready var dtw_overlay: DtwOverlayWidget = $DtwOverlay
 
 # backtest trades overlays: shared with trades_widget by array identity.
 # Each set: {name, enabled, trades: Array of Dicts, color}
@@ -72,6 +73,8 @@ func _ready() -> void:
 	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
 		w.view = view
 		w.data = data
+	dtw_overlay.view = view
+	dtw_overlay.data = data
 	trades_widget.trades_sets = _trades_sets
 	cross_widget.panes = _panes
 	_chart_pane = _make_pane("chart", null)
@@ -243,6 +246,11 @@ func _input(event: InputEvent) -> void:
 			# (view rects, pane rects) is chart-local — the chart sits
 			# below the main tab bar, so convert before hit tests
 			var pos: Vector2 = button.position - get_screen_position()
+			if button.button_index == MOUSE_BUTTON_LEFT and dtw_overlay.visible:
+				var hit_i := dtw_overlay.window_at(pos)
+				if hit_i >= 0:
+					_on_dtw_overlay_clicked(hit_i)
+					return
 			if button.button_index == MOUSE_BUTTON_WHEEL_UP:
 				view.zoom_x_at(pos, ZOOM_FACTOR)
 				_refresh()
@@ -296,6 +304,22 @@ func _input(event: InputEvent) -> void:
 func _over_ui(pos: Vector2) -> bool:
 	return (sim_window.visible and sim_window.get_global_rect().has_point(pos)) \
 		or (series_window.visible and series_window.get_global_rect().has_point(pos))
+
+# --- DTW matched-window overlay (data comes from the DTW page) --------------
+
+func set_dtw_overlay(matches: Dictionary, win: int) -> void:
+	dtw_overlay.set_data(matches, win)
+	_refresh()
+
+func clear_dtw_overlay() -> void:
+	dtw_overlay.clear()
+
+func _on_dtw_overlay_clicked(i: int) -> void:
+	dtw_overlay.sel_i = i
+	dtw_overlay.queue_redraw()
+	var page := get_tree().root.find_child("DtwPage", true, false)
+	if page != null and page.has_method("show_drill"):
+		page.show_drill(i, dtw_overlay.j_for(i))
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not is_visible_in_tree():
@@ -1045,7 +1069,7 @@ func _refresh() -> void:
 	if grid == null:
 		return
 	_ensure_windows()
-	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget, trades_widget]:
+	for w in [grid, series_widget, indicator_widget, book_widget, cross_widget, cursor_widget, trades_widget, dtw_overlay]:
 		w.queue_redraw()
 	for p in _panes:
 		p.queue_redraw()

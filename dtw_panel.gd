@@ -2,6 +2,7 @@ class_name DtwPanel
 extends Control
 
 signal plot_requested(dir: String, base: String, meta: Dictionary)
+signal overlay_requested(dir: String, base: String, meta: Dictionary)
 signal drill_done(d: Dictionary)
 
 # DTW correlation scan panel. File mode: scan the two picked files as one
@@ -497,7 +498,22 @@ func _refresh_table(live: Array) -> void:
 		plot_btn.disabled = not FileAccess.file_exists(json_path)
 		plot_btn.pressed.connect(_on_plot_pressed.bind(base))
 		row.add_child(plot_btn)
+		var ov_btn := Button.new()
+		ov_btn.text = "overlay"
+		ov_btn.tooltip_text = "mark matched windows on the Chart tab's price graph (click a rect to drill)"
+		ov_btn.disabled = not FileAccess.file_exists(json_path)
+		ov_btn.pressed.connect(_on_overlay_pressed.bind(base))
+		row.add_child(ov_btn)
 		_table.add_child(row)
+
+func _on_overlay_pressed(base: String) -> void:
+	var dir := ProjectSettings.globalize_path(_run_dir())
+	var jp := "%s/%s.json" % [dir, base]
+	if not FileAccess.file_exists(jp):
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(jp))
+	if parsed is Dictionary:
+		overlay_requested.emit(dir, base, parsed)
 
 func _on_plot_pressed(base: String) -> void:
 	var dir := ProjectSettings.globalize_path(_run_dir())
