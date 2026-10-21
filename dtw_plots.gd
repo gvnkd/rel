@@ -25,8 +25,11 @@ var _meta := {}         # session json {tfA, tfB, win, band, best, ...}
 var _mode := "scatter"  # scatter | dist | drill
 var _drill: Dictionary = {}
 var _range := [-1, -1]  # correspondence range endpoints (A indices)
+var _keys: Array = []   # sorted matched A indices (for nearest snapping)
+var _sel_i := -1        # drilled A index (drawn marker)
 var _mode_btns := {}
 var _status: Label
+var _hint: Label
 # drill zoom: visible fractions of the x (index) and y (z-value) ranges;
 # RMB drag scales like the chart (right = zoom in x, up = zoom in y,
 # anchored at the cursor), RMB click resets
@@ -52,12 +55,25 @@ func _ready() -> void:
 	_status.size_flags_horizontal = SIZE_EXPAND_FILL
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	bar.add_child(_status)
+	_hint = Label.new()
+	_hint.text = "LMB: drill into nearest match · RMB twice: select correspondence range"
+	_hint.add_theme_font_size_override("font_size", 11)
+	_hint.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	add_child(_hint)
 	custom_minimum_size = Vector2(420, 300)
 
 func _set_mode(m: String) -> void:
 	_mode = m
 	for k in _mode_btns:
 		(_mode_btns[k] as Button).button_pressed = k == m
+	match m:
+		"drill":
+			_hint.text = "drill: RMB drag zooms (right = x, up = y), RMB click resets · mode buttons switch views"
+		"pairs":
+			_hint.text = "pairs: A index rail on top, B match rail on bottom · RMB twice in scatter/dist selects a new range"
+		_:
+			_hint.text = "LMB: drill into nearest match · RMB twice: select correspondence range"
 	queue_redraw()
 
 # load a session's matches; meta = the session json. Prefers the RELM
@@ -81,6 +97,8 @@ func show_run(dir: String, base: String, meta: Dictionary) -> int:
 		_status.text = "no matches data"
 		return 0
 	keys.sort()
+	_keys = keys
+	_sel_i = -1
 	for k in range(1, keys.size()):
 		var d: int = keys[k] - keys[k - 1]
 		if d > 0 and (_step == 1 or d < _step):
@@ -162,6 +180,21 @@ func _draw() -> void:
 			_draw_drill(r)
 		"pairs":
 			_draw_pairs(r)
+	_draw_markers(r)
+
+# selection + pending-range markers shared by scatter/dist
+func _draw_markers(r: Rect2) -> void:
+	if _mode != "scatter" and _mode != "dist":
+		return
+	var i_max: float = _n_win * _step
+	if i_max <= 0:
+		return
+	var px: float = r.position.x + r.size.x * _sel_i / i_max
+	if _sel_i >= 0:
+		draw_line(Vector2(px, r.position.y), Vector2(px, r.end.y), Color(0.9, 0.9, 1.0, 0.7), 1.0, true)
+	if _range[0] >= 0 and _range[1] < 0:
+		var pr: float = r.position.x + r.size.x * _range[0] / i_max
+		draw_line(Vector2(pr, r.position.y), Vector2(pr, r.end.y), Color(1.0, 0.7, 0.3, 0.8), 1.0, true)
 
 # --- scatter ---------------------------------------------------------------
 
@@ -364,10 +397,14 @@ func _gui_input(ev: InputEvent) -> void:
 			var k := int((button.position.x - r.position.x) / r.size.x * i_max)
 			var i := clampi(k, 0, int(i_max))
 			if button.button_index == MOUSE_BUTTON_LEFT:
-				if _matches.has(i):
-					drill_requested.emit(i, int(_matches[i][0]))
-				else:
-					_status.text = "no match at i=%d" % i
+				# always drill the NEAREST matched window — an exact-grid
+				# lookup made most clicks dead ends
+				var ni := _nearest_key(i)
+				if ni >= 0:
+					_sel_i = ni
+					drill_requested.emit(ni, int(_matches[ni][0]))
+					_status.text = "drill at i=%d (j=%d)" % [ni, int(_matches[ni][0])]
+					queue_redraw()
 			elif button.button_index == MOUSE_BUTTON_RIGHT:
 				# two RMB clicks select the correspondence range
 				if _range[0] < 0 or _range[1] >= 0:
@@ -390,6 +427,22 @@ func _gui_input(ev: InputEvent) -> void:
 		if _rmb_down and _mode == "drill" \
 				and motion.button_mask & MOUSE_BUTTON_MASK_RIGHT != 0:
 			_drill_scale_by(motion.relative, motion.position)
+
+# binary search: nearest matched A index to i (-1 when empty)
+func _nearest_key(i: int) -> int:
+	if _keys.is_empty():
+		return -1
+	var lo := 0
+	var hi := _keys.size() - 1
+	while lo < hi:
+		var mid := (lo + hi) / 2
+		if int(_keys[mid]) < i:
+			lo = mid + 1
+		else:
+			hi = mid
+	if lo > 0 and i - int(_keys[lo - 1]) < int(_keys[lo]) - i:
+		return int(_keys[lo - 1])
+	return int(_keys[lo])
 
 # chart-like zoom: drag right zooms in x, drag up zooms in y, cursor-anchored
 func _drill_scale_by(delta: Vector2, pos: Vector2) -> void:

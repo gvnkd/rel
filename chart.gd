@@ -221,6 +221,11 @@ func _notification(what: int) -> void:
 		_refresh()
 
 func _input(event: InputEvent) -> void:
+	# Node._input fires even while this tab is hidden — without the guard
+	# every RMB click on other tabs (e.g. the DTW page) opens this chart's
+	# context menu, and space/keys drive playback from anywhere
+	if not is_visible_in_tree():
+		return
 	if event.is_action_pressed("pause"):
 		paused = not paused
 	elif event.is_action_pressed("speed_up"):
@@ -293,6 +298,8 @@ func _over_ui(pos: Vector2) -> bool:
 		or (series_window.visible and series_window.get_global_rect().has_point(pos))
 
 func _unhandled_key_input(event: InputEvent) -> void:
+	if not is_visible_in_tree():
+		return
 	var key := event as InputEventKey
 	if key == null or not key.pressed or key.echo:
 		return
