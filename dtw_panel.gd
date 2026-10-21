@@ -202,6 +202,9 @@ func _on_data_picked(path: String) -> void:
 		_data_b.text = path
 
 func _on_load_results() -> void:
+	# always start from the results dir, not wherever the last dialog went
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(DATA_DIR))
+	_load_dialog.current_dir = ProjectSettings.globalize_path(DATA_DIR)
 	_load_dialog.popup_centered(Vector2i(700, 500))
 
 func _on_results_picked(path: String) -> void:
