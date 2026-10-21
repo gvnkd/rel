@@ -21,7 +21,7 @@ import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, ramp
 import Sim.Gen
 import Sim.GenH (runSimH)
 import qualified Sim.Ind as IND
-import Sim.Csv (csvText, parseTradesBin, tickRow, tradesBin)
+import Sim.Csv (csvText, matchesBin, parseMatchesBin, parseTradesBin, tickRow, tradesBin)
 import Sim.Dtw (dtwPath, mkPrefix, stepCost, subseqAt, zslice)
 import Sim.DtwIndex (ScanParams (..), ScanResult (..), neighborWords, scanWindows, wordAt, wordOfZ)
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
@@ -1831,6 +1831,17 @@ prop_dtw_scan_finds_planted =
        [(_, j, d)] -> j >= 150 - band && j <= 150 + win && d < 0.1
        _ -> False
 
+-- RELM matches binary: byte-level roundtrip including the j=-1 sentinel
+prop_matches_bin_roundtrip :: Property
+prop_matches_bin_roundtrip =
+  forAll (chooseInt (0, 200)) $ \n ->
+  forAll (vectorOf n (chooseInt (0, 100000))) $ \is ->
+  forAll (vectorOf n (chooseInt (-1, 100000))) $ \js ->
+  forAll (vectorOf n (choose (-3.0, 3.0))) $ \ds ->
+    let ms = zip3 is js ds
+        bs = BL.toStrict (toLazyByteString (matchesBin 64 16 8 ms))
+    in parseMatchesBin bs == Right ms
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -1942,6 +1953,7 @@ props =
   , ("strat_optimize_deterministic", property prop_strat_optimize_deterministic)
   , ("strat_trades_accounting", property prop_strat_trades_accounting)
   , ("trades_bin_roundtrip", property prop_trades_bin_roundtrip)
+  , ("matches_bin_roundtrip", prop_matches_bin_roundtrip)
   , ("dsl_parse_roundtrip", property prop_dsl_parse_roundtrip)
   , ("dsl_precedence", property prop_dsl_precedence)
   , ("dsl_signal_monotone", property prop_dsl_signal_monotone)

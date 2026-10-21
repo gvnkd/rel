@@ -15,6 +15,8 @@ module Sim.Csv
   , vevPath
   , tradesBin
   , parseTradesBin
+  , matchesBin
+  , parseMatchesBin
   , metaText
   ) where
 
@@ -229,6 +231,47 @@ parseTradesBin bs
                         , STB.trExit = exit
                         , STB.trPnl = pnl
                         , STB.trVol = vol })
+
+-- --- DTW matches binary (RELM) -----------------------------------------------
+--
+-- little-endian: u32 magic 'RELM', u32 version (1), u32 win, u32 band,
+-- u32 step, u64 match count, then count x 16-byte records:
+--   i u32 (A window index), j i32 (B match start, -1 = no match),
+--   dist f64 (per-step mean squared z-distance)
+
+magicMatches :: Word32
+magicMatches = 0x4D4C4552
+
+matchesBin :: Int -> Int -> Int -> [(Int, Int, Double)] -> Builder
+matchesBin win band step ms =
+  word32LE magicMatches
+    <> word32LE 1
+    <> word32LE (fromIntegral win)
+    <> word32LE (fromIntegral band)
+    <> word32LE (fromIntegral step)
+    <> word64LE (fromIntegral (length ms))
+    <> mconcat (map recB ms)
+  where
+  recB (i, j, d) =
+    word32LE (fromIntegral i)
+      <> word32LE (fromIntegral (j :: Int))
+      <> doubleLE d
+
+parseMatchesBin :: B.ByteString -> Either String [(Int, Int, Double)]
+parseMatchesBin bs
+  | B.length bs < 28 = Left "matches binary too short"
+  | getU32 bs 0 /= magicMatches = Left "bad magic"
+  | getU32 bs 4 /= 1 = Left "unsupported matches version"
+  | B.length bs < 28 + n * recLen = Left "truncated match records"
+  | otherwise = Right (map recAt [0 .. n - 1])
+  where
+  n = fromIntegral (getU64 bs 20)
+  recLen = 16
+  recAt k =
+    let o = 28 + k * recLen
+    in ( fromIntegral (getU32 bs o)
+       , getI32 bs (o + 4)
+       , getF64 bs (o + 8) )
 
 getU32 :: B.ByteString -> Int -> Word32
 getU32 bs o = foldl' (.|.) 0 [fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 3]]

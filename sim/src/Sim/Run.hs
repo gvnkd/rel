@@ -40,7 +40,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import qualified Data.Vector.Unboxed as VU
 import Data.Word (Word64)
-import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
+import Sim.Csv (csvRowsText, csvText, lvlHeader, lvlRowB, levelsPath, matchesBin, metaText, tickHeader, tickRowB, ticksPath, tradesBin, vevHeader, vevPath, vevRecB)
 import Sim.Dtw (Prefix, pfLen)
 import Sim.DtwIndex (ScanParams (..), ScanResult (..))
 import qualified Sim.DtwIndex as DTW
@@ -401,7 +401,9 @@ chunksOf :: Int -> [a] -> [[a]]
 chunksOf _ [] = []
 chunksOf k xs = let (a, b) = splitAt k xs in a : chunksOf k b
 
--- per-session artifacts: summary json + the position-line csv
+-- per-session artifacts: summary json, the position-line csv (human
+-- readable) and a RELM binary (same records, ~2.5x smaller and parse-free
+-- for the UI)
 writeDtwResult :: FilePath -> DtwPlan -> ScanResult -> IO ()
 writeDtwResult out pl res = do
   let base = "dtw_" ++ dpTfA pl ++ "_" ++ dpTfB pl ++ "_" ++ show (dpWin pl)
@@ -426,6 +428,8 @@ writeDtwResult out pl res = do
   withFile (out ++ "/" ++ base ++ ".csv") WriteMode $ \h -> do
     hPutStr h "i,j,dist\n"
     forM_ entries $ \(i, j, d) -> hPutStr h (show i ++ "," ++ show j ++ "," ++ show d ++ "\n")
+  withFile (out ++ "/" ++ base ++ ".bin") WriteMode $ \h ->
+    hPutBuilder h (matchesBin (dpWin pl) (dpBand pl) (dpStep pl) entries)
 
 -- --- strategy optimizer -----------------------------------------------------
 

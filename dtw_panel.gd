@@ -37,6 +37,7 @@ var _tf_b: OptionButton
 var _series_a: OptionButton
 var _series_b: OptionButton
 var _dialog: FileDialog
+var _load_dialog: FileDialog
 var _picking_for := ""
 var _thread: Thread
 var _run_name := ""
@@ -117,6 +118,18 @@ func _build_ui() -> void:
 	_scan_btn.pressed.connect(_on_scan)
 	box.add_child(_scan_btn)
 
+	var load_btn := Button.new()
+	load_btn.text = "Load results…"
+	load_btn.tooltip_text = "open a previous run's dtw_*.json into the plots"
+	load_btn.pressed.connect(_on_load_results)
+	box.add_child(load_btn)
+	_load_dialog = FileDialog.new()
+	_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_load_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_load_dialog.filters = PackedStringArray(["*.json ; DTW session summary"])
+	_load_dialog.file_selected.connect(_on_results_picked)
+	add_child(_load_dialog)
+
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size.y = 160
 	scroll.size_flags_vertical = SIZE_EXPAND_FILL
@@ -186,6 +199,27 @@ func _on_data_picked(path: String) -> void:
 		_data_a.text = path
 	else:
 		_data_b.text = path
+
+func _on_load_results() -> void:
+	_load_dialog.popup_centered(Vector2i(700, 500))
+
+func _on_results_picked(path: String) -> void:
+	# a picked dtw_<tfA>_<tfB>_<win>.json identifies the run dir + session
+	var file := path.get_file()
+	if not file.begins_with("dtw_") or not file.ends_with(".json"):
+		_update_status("pick a dtw_*.json file")
+		return
+	var dir := path.get_base_dir()
+	var base := file.substr(0, file.length() - 5)
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if not parsed is Dictionary:
+		_update_status("bad json: %s" % path)
+		return
+	# remember the run so chart/plot buttons resolve against it
+	var rel := dir.trim_prefix(ProjectSettings.globalize_path(DATA_DIR) + "/")
+	_run_name = rel if not rel.is_empty() else _run_name
+	_last_grid = false
+	plot_requested.emit(dir, base, parsed)
 
 func _grid_mode() -> bool:
 	return _series_a.selected > 0 and _series_b.selected > 0
@@ -396,6 +430,39 @@ func _process(_delta: float) -> void:
 	else:
 		_update_status("done (no session produced a result)")
 	_cancel_requested = false
+	_annotate_run_paths()
+
+# stamp each session json with the data paths used, so drill-downs work
+# when the run is reloaded later (grid runs especially)
+func _annotate_run_paths() -> void:
+	var dir := ProjectSettings.globalize_path(_run_dir())
+	var fa := _data_a.text.strip_edges()
+	var fb := _data_b.text.strip_edges()
+	var d := DirAccess.open(dir)
+	if d == null:
+		return
+	for file in d.get_files():
+		if not file.begins_with("dtw_") or not file.ends_with(".json"):
+			continue
+		var p := "%s/%s" % [dir, file]
+		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(p))
+		if not parsed is Dictionary:
+			continue
+		var data_a := fa
+		var data_b := fb
+		if _last_grid:
+			var tfA := str((parsed as Dictionary).get("tfA", ""))
+			var tfB := str((parsed as Dictionary).get("tfB", ""))
+			data_a = str(_paths_a.get(tfA, ""))
+			data_b = str(_paths_b.get(tfB, ""))
+		if data_a.is_empty() or data_b.is_empty():
+			continue
+		(parsed as Dictionary)["dataa"] = data_a
+		(parsed as Dictionary)["datab"] = data_b
+		var out := FileAccess.open(p, FileAccess.WRITE)
+		if out != null:
+			out.store_string(JSON.stringify(parsed))
+			out.close()
 
 func _refresh_table(live: Array) -> void:
 	for c in _table.get_children():
@@ -448,14 +515,15 @@ func _on_drill(i: int, j: int, meta: Dictionary) -> void:
 		return
 	var tfA := str(meta.get("tfA", ""))
 	var tfB := str(meta.get("tfB", ""))
-	var data_a := ""
-	var data_b := ""
-	if _last_grid:
-		data_a = str(_paths_a.get(tfA, ""))
-		data_b = str(_paths_b.get(tfB, ""))
-	else:
-		data_a = _data_a.text.strip_edges()
-		data_b = _data_b.text.strip_edges()
+	var data_a := str(meta.get("dataa", ""))
+	var data_b := str(meta.get("datab", ""))
+	if data_a.is_empty() or data_b.is_empty():
+		if _last_grid:
+			data_a = str(_paths_a.get(tfA, ""))
+			data_b = str(_paths_b.get(tfB, ""))
+		else:
+			data_a = _data_a.text.strip_edges()
+			data_b = _data_b.text.strip_edges()
 	if data_a.is_empty() or data_b.is_empty():
 		_update_status("drill-down: data paths unavailable for %s/%s" % [tfA, tfB])
 		return

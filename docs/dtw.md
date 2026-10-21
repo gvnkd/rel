@@ -122,14 +122,18 @@ TF labels follow the chart's `QuoteStore.TFS`: `1m, 5m, 1h, 2h, D, W`.
 
 ## Outputs
 
-Per session (`<out>/dtw_<tfA>_<tfB>_<win>.{json,csv}`):
+Per session (`<out>/dtw_<tfA>_<tfB>_<win>.{json,csv,bin}`):
 
-- **json**: `{tfA, tfB, win, band, windows, found, best: {i, j, dist}, csv}`
+- **json**: `{tfA, tfB, win, band, windows, found, best: {i, j, dist}, csv,
+  dataa, datab}` — the data paths are stamped in after the scan so
+  drill-downs work when a run is reloaded later.
 - **csv** (position line): `i,j,dist` per stepped A window that matched
-  (`j = −1` rows are omitted). Plotting `j` against row index gives the
-  "which part of B does this part of A correlate with" curve; monotone
-  stretches of it are stable correlations, jumps are noise or regime
-  changes.
+  (`j = −1` rows are omitted).
+- **bin** (RELM v1): `u32 magic, u32 version, u32 win, u32 band, u32 step,
+  u64 count`, then `count × 16B` records `(i u32, j i32, dist f64)` —
+  ~2.5× smaller than the csv and parse-free; the UI prefers it and falls
+  back to the csv. A past run reopens via the panel's "Load results…"
+  (pick any `dtw_*.json`).
 
 The panel's "chart" button converts the matches into a candles csv of the
 **lead/lag offset `j − i`** (one row per stepped A window, gaps carried)

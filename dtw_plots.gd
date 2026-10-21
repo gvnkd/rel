@@ -53,30 +53,26 @@ func _set_mode(m: String) -> void:
 		(_mode_btns[k] as Button).button_pressed = k == m
 	queue_redraw()
 
-# load a session's matches csv; meta = the session json. Returns match count.
+# load a session's matches; meta = the session json. Prefers the RELM
+# binary (parse-free), falls back to the csv. Returns match count.
 func show_run(dir: String, base: String, meta: Dictionary) -> int:
-	var matches_path := "%s/%s.csv" % [dir, base]
 	_matches.clear()
 	_drill = {}
+	_range = [-1, -1]
 	_meta = meta
 	_n_win = int(meta.get("windows", 0))
 	_step = 1
-	var f := FileAccess.open(matches_path, FileAccess.READ)
-	if f == null:
-		_status.text = "no matches csv"
-		return 0
-	f.get_line()
+	var bin_path := "%s/%s.bin" % [dir, base]
 	var keys: Array = []
-	while not f.eof_reached():
-		var line := f.get_line().strip_edges()
-		if line.is_empty():
-			continue
-		var parts := line.split(",")
-		if parts.size() < 3:
-			continue
-		var i := parts[0].to_int()
-		_matches[i] = [parts[1].to_float(), parts[2].to_float()]
-		keys.append(i)
+	if FileAccess.file_exists(bin_path):
+		var bf := FileAccess.open(bin_path, FileAccess.READ)
+		if bf != null:
+			keys = _load_bin(bf)
+	if keys.is_empty():
+		keys = _load_csv("%s/%s.csv" % [dir, base])
+	if keys.is_empty():
+		_status.text = "no matches data"
+		return 0
 	keys.sort()
 	for k in range(1, keys.size()):
 		var d: int = keys[k] - keys[k - 1]
@@ -88,6 +84,44 @@ func show_run(dir: String, base: String, meta: Dictionary) -> int:
 		(meta.get("best", {}) as Dictionary).get("dist", 0.0)]
 	queue_redraw()
 	return _matches.size()
+
+# RELM: u32 magic, u32 ver, u32 win, u32 band, u32 step, u64 count, then
+# count x 16B (i u32, j i32, dist f64). FileAccess lacks decode helpers —
+# raw little-endian byte math (verified against the Haskell writer).
+func _load_bin(bf: FileAccess) -> Array:
+	var head := bf.get_buffer(28)
+	if head.size() < 28:
+		return []
+	if head.decode_u32(0) != 0x4D4C4552 or head.decode_u32(4) != 1:
+		return []
+	var n := head.decode_u64(20)
+	var keys: Array = []
+	for k in n:
+		var rec := bf.get_buffer(16)
+		if rec.size() < 16:
+			break
+		var i := rec.decode_u32(0)
+		_matches[i] = [float(rec.decode_s32(4)), rec.decode_double(8)]
+		keys.append(i)
+	return keys
+
+func _load_csv(matches_path: String) -> Array:
+	var keys: Array = []
+	var f := FileAccess.open(matches_path, FileAccess.READ)
+	if f == null:
+		return keys
+	f.get_line()
+	while not f.eof_reached():
+		var line := f.get_line().strip_edges()
+		if line.is_empty():
+			continue
+		var parts := line.split(",")
+		if parts.size() < 3:
+			continue
+		var i := parts[0].to_int()
+		_matches[i] = [parts[1].to_float(), parts[2].to_float()]
+		keys.append(i)
+	return keys
 
 # meta of the session currently shown (session json); used for drill params
 func session_meta() -> Dictionary:
