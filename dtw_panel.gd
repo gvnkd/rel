@@ -124,6 +124,11 @@ func _build_ui() -> void:
 	load_btn.tooltip_text = "open a previous run's dtw_*.json into the plots"
 	load_btn.pressed.connect(_on_load_results)
 	box.add_child(load_btn)
+	var clear_ov_btn := Button.new()
+	clear_ov_btn.text = "Clear chart overlay"
+	clear_ov_btn.tooltip_text = "remove the matched-window overlay from the Chart tab (same as the x on the chart)"
+	clear_ov_btn.pressed.connect(_on_clear_overlay)
+	box.add_child(clear_ov_btn)
 	_load_dialog = FileDialog.new()
 	_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	_load_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -206,6 +211,12 @@ func _on_load_results() -> void:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(DATA_DIR))
 	_load_dialog.current_dir = ProjectSettings.globalize_path(DATA_DIR)
 	_load_dialog.popup_centered(Vector2i(700, 500))
+
+func _on_clear_overlay() -> void:
+	var chart := _chart()
+	if chart != null and chart.has_method("clear_dtw_overlay"):
+		chart.clear_dtw_overlay()
+		_update_status("chart overlay cleared")
 
 func _on_results_picked(path: String) -> void:
 	# a picked dtw_<tfA>_<tfB>_<win>.json identifies the run dir + session

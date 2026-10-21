@@ -38,11 +38,12 @@ extern "C" void hs_init(int *argc, char **argv[]);
 extern "C" void hs_exit(void);
 
 __attribute__((constructor)) static void simffi_init(void) {
-	// "+RTS -N -RTS": enable all CPU capabilities — otherwise the RTS
-	// starts with one capability and every forkIO batch (ML trainer,
-	// strat optimizer, DTW scan) runs single-core
-	int argc = 4;
-	char *argv[] = { (char *)"rel-sim", (char *)"+RTS", (char *)"-N", (char *)"-RTS", nullptr };
+	// "+RTS -N -I0 -RTS": all CPU capabilities (otherwise every forkIO
+	// batch runs single-core) and NO idle GC — after a multi-GB scan the
+	// idle collector would major-GC the retained heap continuously,
+	// pinning a core at 100% while the editor sits idle
+	int argc = 5;
+	char *argv[] = { (char *)"rel-sim", (char *)"+RTS", (char *)"-N", (char *)"-I0", (char *)"-RTS", nullptr };
 	char **argv_ptr = argv;
 	hs_init(&argc, &argv_ptr);
 }
