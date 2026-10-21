@@ -9,6 +9,7 @@ extends Control
 # asks window_at(); filter UI lives in a top-right row owned here.
 
 var view: ChartView
+var data: PlotData
 var matches := {}      # i -> [j, dist] (shared by identity with the DTW page)
 var win := 0
 var max_dist := 1.5
