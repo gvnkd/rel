@@ -20,6 +20,8 @@ const PARAM_FIELDS := [
 	["maxcand", "max cand", "64"],
 	["paa", "paa segs", "8"],
 	["card", "cardinality", "8"],
+	["gap", "rebuild gap (0=win)", "0"],
+	["tol", "rebuild tol x", "1.5"],
 ]
 
 const DATA_DIR := "user://dtwdata"
@@ -538,6 +540,12 @@ func _refresh_table(live: Array) -> void:
 		ov_btn.disabled = not FileAccess.file_exists(json_path)
 		ov_btn.pressed.connect(_on_overlay_pressed.bind(base))
 		row.add_child(ov_btn)
+		var build_btn := Button.new()
+		build_btn.text = "build"
+		build_btn.tooltip_text = "reconstruct A from the best set of B chunks (second pass); loads the result as a chart timeline"
+		build_btn.disabled = not FileAccess.file_exists("%s/%s.bin" % [_table_dir, base])
+		build_btn.pressed.connect(_on_build_pressed.bind(base))
+		row.add_child(build_btn)
 		_table.add_child(row)
 
 func _on_overlay_pressed(base: String) -> void:
@@ -555,6 +563,57 @@ func _on_plot_pressed(base: String) -> void:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(jp))
 	if parsed is Dictionary:
 		plot_requested.emit(_table_dir, base, parsed)
+
+# second pass over one finished session: enrich the recorded matches, pick
+# the best chain of B chunks, stitch, validate, rebuild A, write
+# <base>_rebuild.rbin + .json and load the rbin as a chart timeline
+func _on_build_pressed(base: String) -> void:
+	if not sim_available:
+		return
+	var jp := "%s/%s.json" % [_table_dir, base]
+	if not FileAccess.file_exists(jp):
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(jp))
+	if not parsed is Dictionary:
+		_update_status("bad result json for %s" % base)
+		return
+	var data_a := str((parsed as Dictionary).get("dataa", ""))
+	var data_b := str((parsed as Dictionary).get("datab", ""))
+	if data_a.is_empty() or data_b.is_empty():
+		_update_status("build: data paths unavailable for %s (rescan or reload)" % base)
+		return
+	var matches_path := "%s/%s.bin" % [_table_dir, base]
+	if not FileAccess.file_exists(matches_path):
+		_update_status("no matches binary for %s" % base)
+		return
+	var out := "%s/%s_rebuild" % [_table_dir, base]
+	var params := "matches=%s;dataa=%s;datab=%s;out=%s;gap=%d;tol=%s" % [
+		matches_path, data_a, data_b, out,
+		int(fields["gap"].text.strip_edges()),
+		fields["tol"].text.strip_edges(),
+	]
+	_update_status("building reconstruction for %s…" % base)
+	var t := Thread.new()
+	t.start(Callable(_sim, "dtw_build").bind(params))
+	while t.is_alive():
+		await get_tree().process_frame
+	var res: String = t.wait_to_finish()
+	var summary: Variant = JSON.parse_string(res)
+	if summary is Dictionary and (summary as Dictionary).get("error", null) == null:
+		var covered: int = (summary as Dictionary).get("covered", 0)
+		var total: int = (summary as Dictionary).get("total", 0)
+		var chart: Variant = _chart()
+		if chart != null and chart.has_method("add_timeline"):
+			var label := "%s rebuild" % base
+			chart.add_timeline(label, out + ".rbin")
+			_update_status("chart: loaded %s (covered %d/%d)" % [label, covered, total])
+		else:
+			_update_status("build done: %s.rbin (covered %d/%d)" % [out, covered, total])
+	else:
+		var err := "unknown"
+		if summary is Dictionary:
+			err = str((summary as Dictionary).get("error", "unknown"))
+		_update_status("build failed for %s: %s" % [base, err])
 
 # drill-down for one matched window: FFI returns the warping path plus the
 # two z-normalized windows; runs on a thread (first call pays the load)

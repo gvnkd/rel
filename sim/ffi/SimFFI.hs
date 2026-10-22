@@ -2,6 +2,9 @@ module SimFFI where
 
 import Control.Exception (SomeException, catch, fromException, ioError, try)
 import Control.Monad (forM, when)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
+import Data.ByteString.Builder (toLazyByteString)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -15,7 +18,9 @@ import Foreign.Ptr (Ptr)
 import GHC.IO (unsafePerformIO)
 import Sim.Cli (applyArgs)
 import qualified Sim.DtwIndex as DTW
+import Sim.Csv (parseMatchesHdr, relsBin)
 import Sim.Dtw (Prefix, dtwPathFree, mkPrefix, pfLen, stepCost, zslice, zwin)
+import qualified Sim.DtwSelect as SEL
 import Sim.Entropy (rollingCECP, rollingPermEntropy)
 import Sim.Fft (fftApprox, fftBest)
 import Sim.Gen (GenState (..))
@@ -400,6 +405,31 @@ foreign export ccall "sim_dtw_cancel" simDtwCancel :: IO ()
 -- relative to j; "error" set on failure. Loaded closes are cached
 -- per-process, so repeat drill-downs on the same files are cheap.
 foreign export ccall "sim_dtw_path" simDtwPath :: CString -> IO CString
+
+-- rebuild signal A from the best set of matched B chunks of a FINISHED
+-- scan (second pass after scan/load). Writes <out>.rbin — a candle-only
+-- RELS binary the chart page loads like any saved series — and <out>.json
+-- with the segment table: for every stitched segment its A/B ranges and
+-- the list of selected signal-B chunk indices ([42] single, [42,44,50]
+-- stitched).
+--
+-- params (key=value pairs separated by ';'):
+--   matches=<path>   RELM .bin of a scan session — required
+--   dataa=<path>     series A closes (csv or RELQ/RELS rbin) — required
+--   datab=<path>     series B closes — required
+--   out=<path>       output prefix — required (gets .rbin + .json)
+--   gap=N            max A gap (samples) that still chains chunks into one
+--                    segment (default: the scan window)
+--   tol=D            stitch re-validation tolerance, multiple of the
+--                    median match distance (default 1.5)
+--   wy=D             Y-deformation cost weight (default 1.0)
+--   wp=D             periodic scaleX-deviation cost weight (default 0.5)
+--   dec=N            RELS decimals header field (default 5)
+--
+-- returns a JSON summary: {"error":...,"covered":N,"total":N,
+-- "segments":K} — the full per-segment table (with the selected B chunk
+-- indices) is in the <out>.json artifact, not the summary
+foreign export ccall "sim_dtw_build" simDtwBuild :: CString -> IO CString
 
 -- --- strategy optimizer FFI ------------------------------------------------
 
@@ -916,6 +946,89 @@ computeDtwPath s = do
        ++ ",\"b\":" ++ dbls seg
        ++ ",\"path\":" ++ pairs
        ++ "}"
+
+-- --- DTW reconstruction (second pass) ---------------------------------------
+
+simDtwBuild :: CString -> IO CString
+simDtwBuild paramsPtr = do
+  paramsStr <- peekCString paramsPtr
+  out <- try (computeDtwBuild paramsStr) :: IO (Either SomeException String)
+  newCString (either (const "{\"error\":\"exception\"}") id out)
+
+computeDtwBuild :: String -> IO String
+computeDtwBuild s = do
+  let kv = kvPairs s
+      look k = lookup k kv
+      readI k d = fromMaybe d (look k >>= readV)
+      readD k d = fromMaybe d (look k >>= readVD)
+      readV v = case reads v of
+        [(x, "")] -> Just (x :: Int)
+        _         -> Nothing
+      readVD v = case reads v of
+        [(x, "")] -> Just (x :: Double)
+        _         -> Nothing
+  case (look "matches", look "dataa", look "datab", look "out") of
+    (Just mPath, Just pa, Just pb, Just out) -> do
+      eHdr <- parseMatchesHdr <$> B.readFile mPath
+      case eHdr of
+        Left err -> pure ("{\"error\":\"" ++ err ++ "\"}")
+        Right (win, band, _, ms) -> do
+          mpa <- cachedPrefix pa
+          mpb <- cachedPrefix pb
+          case (mpa, mpb) of
+            (Just pfa, Just pfb) -> do
+              let se0 = SEL.defaultSelParams
+                  se = se0 { SEL.seGap = let g = readI "gap" 0 in if g <= 0 then win else g
+                           , SEL.seTol = readD "tol" (SEL.seTol se0)
+                           , SEL.seWy = readD "wy" (SEL.seWy se0)
+                           , SEL.seWp = readD "wp" (SEL.seWp se0) }
+                  dec = readI "dec" 5
+                  rb = SEL.selectRebuild se pfa pfb win band ms
+              if VU.null (SEL.rbCloses rb)
+                then pure "{\"error\":\"no usable matches\"}"
+                else do
+                  BL.writeFile (out ++ ".rbin") (toLazyByteString (relsBin dec (SEL.rbCloses rb)))
+                  let meta = buildMeta pa pb win band se rb
+                  writeFile (out ++ ".json") meta
+                  pure (buildSummary rb)
+            _ -> pure "{\"error\":\"bad params or data\"}"
+    _ -> pure "{\"error\":\"missing params\"}"
+  where
+  cachedPrefix path = do
+    cached <- readIORef dtwPathCacheRef
+    case Map.lookup path cached of
+      Just v  -> pure (Just v)
+      Nothing -> do
+        parsed <- MLD.loadCloses path
+        case parsed of
+          Left _    -> pure Nothing
+          Right cls -> do
+            let v = mkPrefix cls
+            modifyIORef' dtwPathCacheRef (Map.insert path v)
+            pure (Just v)
+  segJson s =
+    "{\"a0\":" ++ show (SEL.sgA0 s)
+      ++ ",\"a1\":" ++ show (SEL.sgA1 s)
+      ++ ",\"b0\":" ++ show (SEL.sgB0 s)
+      ++ ",\"b1\":" ++ show (SEL.sgB1 s)
+      ++ ",\"dist\":" ++ show (SEL.sgDist s)
+      ++ ",\"scaleX\":" ++ show (SEL.sgScaleX s)
+      ++ ",\"chunks\":[" ++ intercalate "," (map (show . SEL.chJ) (SEL.sgChunks s)) ++ "]}"
+  segsJson rb = "[" ++ intercalate "," (map segJson (SEL.rbSegs rb)) ++ "]"
+  buildSummary rb =
+    "{\"error\":null,\"covered\":" ++ show (SEL.rbCovered rb)
+      ++ ",\"total\":" ++ show (VU.length (SEL.rbCloses rb))
+      ++ ",\"segments\":" ++ show (length (SEL.rbSegs rb)) ++ "}"
+  buildMeta pa pb win band se rb =
+    "{\"dataa\":\"" ++ esc pa ++ "\",\"datab\":\"" ++ esc pb ++ "\""
+      ++ ",\"win\":" ++ show win
+      ++ ",\"band\":" ++ show band
+      ++ ",\"gap\":" ++ show (SEL.seGap se)
+      ++ ",\"tol\":" ++ show (SEL.seTol se)
+      ++ ",\"covered\":" ++ show (SEL.rbCovered rb)
+      ++ ",\"total\":" ++ show (VU.length (SEL.rbCloses rb))
+      ++ ",\"segments\":" ++ segsJson rb ++ "}"
+  esc = concatMap (\c -> if c == '"' || c == '\\' then '\\' : [c] else [c])
 
 parseDtwParams :: String -> Either String DtwParams
 parseDtwParams s = do

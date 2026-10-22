@@ -17,6 +17,8 @@ module Sim.Csv
   , parseTradesBin
   , matchesBin
   , parseMatchesBin
+  , parseMatchesHdr
+  , relsBin
   , metaText
   ) where
 
@@ -29,6 +31,7 @@ import Data.List (foldl', intercalate, zipWith4)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word32, Word64)
 import GHC.Float (castWord64ToDouble)
+import qualified Data.Vector.Unboxed as VU
 import Sim.Lvl (LvlEv (..), LvlSeg (..))
 import qualified Sim.Strat.Backtest as STB
 import Sim.Types
@@ -258,13 +261,21 @@ matchesBin win band step ms =
       <> doubleLE d
 
 parseMatchesBin :: B.ByteString -> Either String [(Int, Int, Double)]
-parseMatchesBin bs
+parseMatchesBin bs = (\(_, _, _, ms) -> ms) <$> parseMatchesHdr bs
+
+-- full RELM parse: header (win, band, step) plus the match records —
+-- the rebuild pass needs the scan parameters, not just the matches
+parseMatchesHdr :: B.ByteString -> Either String (Int, Int, Int, [(Int, Int, Double)])
+parseMatchesHdr bs
   | B.length bs < 28 = Left "matches binary too short"
   | getU32 bs 0 /= magicMatches = Left "bad magic"
   | getU32 bs 4 /= 1 = Left "unsupported matches version"
   | B.length bs < 28 + n * recLen = Left "truncated match records"
-  | otherwise = Right (map recAt [0 .. n - 1])
+  | otherwise = Right (win, band, step, map recAt [0 .. n - 1])
   where
+  win = fromIntegral (getU32 bs 8)
+  band = fromIntegral (getU32 bs 12)
+  step = fromIntegral (getU32 bs 16)
   n = fromIntegral (getU64 bs 20)
   recLen = 16
   recAt k =
@@ -272,6 +283,37 @@ parseMatchesBin bs
     in ( fromIntegral (getU32 bs o)
        , getI32 bs (o + 4)
        , getF64 bs (o + 8) )
+
+-- --- rebuilt-signal binary (RELS) --------------------------------------------
+--
+-- candle-only RELS (quote_store.gd MAGIC_SIM layout): 64B header
+-- (magic/version/flags/decimals/count/depth/nlevels/nvev/lo/hi) + count x
+-- 48B records (index u64, o/h/l/c f64 = close, vol u64 = 0). No books,
+-- no levels, no vev — the chart's _load_binary handles depth-0 files.
+
+magicRels :: Word32
+magicRels = 0x534C4552
+
+relsBin :: Int -> VU.Vector Double -> Builder
+relsBin dec closes =
+  word32LE magicRels
+    <> word32LE 1
+    <> word32LE 0
+    <> word32LE (fromIntegral dec)
+    <> word64LE (fromIntegral (VU.length closes))
+    <> word64LE 0
+    <> word64LE 0
+    <> word64LE 0
+    <> doubleLE lo
+    <> doubleLE hi
+    <> VU.ifoldr (\k c acc -> recB k c <> acc) mempty closes
+  where
+  lo = VU.minimum closes
+  hi = VU.maximum closes
+  recB k c =
+    word64LE (fromIntegral (k :: Int))
+      <> doubleLE c <> doubleLE c <> doubleLE c <> doubleLE c
+      <> word64LE 0
 
 getU32 :: B.ByteString -> Int -> Word32
 getU32 bs o = foldl' (.|.) 0 [fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 3]]

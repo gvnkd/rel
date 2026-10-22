@@ -11,6 +11,7 @@ module Sim.Dtw
   ( Prefix
   , mkPrefix
   , pfLen
+  , pfAt
   , winMean
   , winStd
   , zslice
@@ -39,6 +40,10 @@ mkPrefix v = Prefix v (VU.scanl' (+) 0 v) (VU.scanl' (+) 0 (VU.map (\x -> x * x)
 pfLen :: Prefix -> Int
 pfLen = VU.length . pfX
 
+-- raw value at an index (reconstruction maps raw B closes onto A)
+pfAt :: Prefix -> Int -> Double
+pfAt p j = pfX p VU.! j
+
 winMean :: Prefix -> Int -> Int -> Double
 winMean p j len = (pfS p VU.! (j + len) - pfS p VU.! j) / fromIntegral len
 
@@ -65,11 +70,15 @@ dtwPath a b r0
   | abs (m - n) > r = (1 / 0, [])
   | otherwise = case dtwMatrix a b r0 of
       Nothing -> (1 / 0, [])
-      Just c -> (c VU.! ((m - 1) * n + (n - 1)), backtrack c n (m - 1) (n - 1))
+      Just c  -> (cellOf c (m - 1) (n - 1), backtrack (cellOf c) n (m - 1) (n - 1))
   where
   m = VU.length a
   n = VU.length b
   r = max 1 r0
+  w = 2 * r + 1  -- full slot width: offsets are relative to i-r and always land in [0,2r] for in-band cells, independent of n
+  cellOf c i j
+    | j < max 0 (i - r) || j > min (n - 1) (i + r) = 1 / 0
+    | otherwise = c VU.! (i * w + (j - (i - r)))
 
 -- subsequence variant: a (the query) is consumed fully but the path in b
 -- may END at any column within the band of the diagonal — the standard
@@ -83,30 +92,41 @@ dtwPathFree a b r0
       Nothing -> (1 / 0, [])
       Just c -> case ends of
         e0 : es ->
-          let jEnd = foldl' (\ja jb -> if cell c jb <= cell c ja then jb else ja) e0 es
-          in (cell c jEnd, backtrack c n (m - 1) jEnd)
+          let jEnd = foldl' (\ja jb -> if cellOf c (m - 1) jb <= cellOf c (m - 1) ja then jb else ja) e0 es
+          in (cellOf c (m - 1) jEnd, backtrack (cellOf c) n (m - 1) jEnd)
         [] -> (1 / 0, [])
   where
   m = VU.length a
   n = VU.length b
   r = max 1 r0
+  w = 2 * r + 1  -- full slot width: offsets are relative to i-r and always land in [0,2r] for in-band cells, independent of n
   ends = [j | j <- [max 0 (m - 1 - r) .. min (n - 1) (m - 1 + r)]]
-  cell c j = c VU.! ((m - 1) * n + j)
+  cellOf c i j
+    | j < max 0 (i - r) || j > min (n - 1) (i + r) = 1 / 0
+    | otherwise = c VU.! (i * w + (j - (i - r)))
 
--- full banded cost matrix (cells outside the band stay at infinity)
+-- full banded cost matrix, banded STORAGE: only cells with |i-j| <= r are
+-- kept (column j lives at offset j-(i-r) of row i), everything outside the
+-- band is infinity. The DP computes band cells only, so the dense layout
+-- wasted (m*n) allocation + memset per call — with band r the storage is
+-- m*(2r+1) and large stitched validations become feasible. Cell values
+-- are identical to the dense layout.
 dtwMatrix :: VU.Vector Double -> VU.Vector Double -> Int -> Maybe (VU.Vector Double)
 dtwMatrix a b r0
   | m == 0 || n == 0 = Nothing
   | otherwise = Just $ runST $ do
-      cost <- VUM.new (m * n)
+      cost <- VUM.new (m * w)
       VUM.set cost inf
       let d i j = let x = a VU.! i - b VU.! j in x * x
-          readC i j
-            | j < 0 || j >= n = pure inf
-            | otherwise = VUM.read cost (i * n + j)
+          readC i j = case bandIdx i j of
+            Nothing -> pure inf
+            Just k  -> VUM.read cost k
+          writeC i j v = case bandIdx i j of
+            Nothing -> pure ()
+            Just k  -> VUM.write cost k v
       forM_ [0 .. min r (n - 1)] $ \j -> do
         prev <- if j == 0 then pure 0 else readC 0 (j - 1)
-        VUM.write cost j (d 0 j + prev)
+        writeC 0 j (d 0 j + prev)
       forM_ [1 .. m - 1] $ \i -> do
         let lo = max 0 (i - r)
             hi = min (n - 1) (i + r)
@@ -114,26 +134,29 @@ dtwMatrix a b r0
           p1 <- readC (i - 1) j
           p2 <- readC i (j - 1)
           p3 <- readC (i - 1) (j - 1)
-          VUM.write cost (i * n + j) (d i j + min p1 (min p2 p3))
+          writeC i j (d i j + min p1 (min p2 p3))
       VU.unsafeFreeze cost
   where
   m = VU.length a
   n = VU.length b
   r = max 1 r0
+  w = 2 * r + 1  -- full slot width: offsets are relative to i-r and always land in [0,2r] for in-band cells, independent of n
   inf = 1 / 0
+  bandIdx i j
+    | j < max 0 (i - r) || j > min (n - 1) (i + r) = Nothing
+    | otherwise = Just (i * w + (j - (i - r)))
 
-backtrack :: VU.Vector Double -> Int -> Int -> Int -> [(Int, Int)]
-backtrack c n i j = go i j []
+backtrack :: (Int -> Int -> Double) -> Int -> Int -> Int -> [(Int, Int)]
+backtrack cell n i j = go i j []
   where
-  cell k = c VU.! k
   go 0 0 acc = (0, 0) : acc
   go ri rj acc
     | ri == 0 = go 0 (rj - 1) ((ri, rj) : acc)
     | rj == 0 = go (ri - 1) 0 ((ri, rj) : acc)
     | otherwise =
-        let diag = cell ((ri - 1) * n + (rj - 1))
-            up = cell ((ri - 1) * n + rj)
-            left = cell (ri * n + (rj - 1))
+        let diag = cell (ri - 1) (rj - 1)
+            up = cell (ri - 1) rj
+            left = cell ri (rj - 1)
         in if diag <= up && diag <= left
              then go (ri - 1) (rj - 1) ((ri, rj) : acc)
              else if up <= left

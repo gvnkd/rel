@@ -3,17 +3,18 @@ module Main (main) where
 
 import Data.Aeson (Value (..))
 import qualified Data.Aeson.KeyMap as KM
-import Data.Bits (shiftL, shiftR, xor)
+import Data.Bits (shiftL, shiftR, xor, (.|.))
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.ByteString.Builder (doubleLE, toLazyByteString, word32LE, word64LE)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (scanl', sort, sortOn)
+import Data.List (foldl', scanl', sort, sortOn)
 import Data.Maybe (fromJust, listToMaybe)
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Vector as V
+import GHC.Float (castWord64ToDouble)
 import Sim.Engine
 import Sim.Entropy (cecpOf, permEntropy, rollingCECP, rollingPermEntropy)
 import qualified Data.Vector.Unboxed as VU
@@ -21,9 +22,22 @@ import Sim.Fft (corr, corrWV, fftApprox, fftBest, fftForecast, gram, gramW, ramp
 import Sim.Gen
 import Sim.GenH (runSimH)
 import qualified Sim.Ind as IND
-import Sim.Csv (csvText, matchesBin, parseMatchesBin, parseTradesBin, tickRow, tradesBin)
+import Sim.Csv (csvText, matchesBin, parseMatchesBin, parseTradesBin, relsBin, tickRow, tradesBin)
 import Sim.Dtw (dtwPath, mkPrefix, stepCost, subseqAt, zslice)
 import Sim.DtwIndex (ScanParams (..), ScanResult (..), neighborWords, scanWindows, wordAt, wordOfZ)
+import Sim.DtwSelect
+  ( Chunk (..)
+  , Rebuild (..)
+  , Segment (..)
+  , SelParams (..)
+  , defaultSelParams
+  , enrichChunks
+  , periodicDev
+  , rebuildCloses
+  , selectRebuild
+  , selectSegments
+  , groupChunks
+  )
 import Sim.Lvl (LvlEv (..), LvlSeg (..), LvlTr, emptyTr, trCloseAll, trConsume, trFromBook, trRest)
 import qualified Sim.Markov as MKV
 import Sim.Markov (MClass (..), MarkovParams (..), defaultMarkovParams, markovSeries, markovSeriesStates, statesOf)
@@ -1842,6 +1856,109 @@ prop_matches_bin_roundtrip =
         bs = BL.toStrict (toLazyByteString (matchesBin 64 16 8 ms))
     in parseMatchesBin bs == Right ms
 
+-- --- DTW reconstruction (second pass) props ---------------------------------
+
+specU32 :: B.ByteString -> Int -> Word32
+specU32 bs o = foldl' (.|.) 0 [ fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 3] ]
+
+specU64 :: B.ByteString -> Int -> Word64
+specU64 bs o = foldl' (.|.) 0 [ fromIntegral (B.index bs (o + i)) `shiftL` (8 * i) | i <- [0 .. 7] ]
+
+specF64 :: B.ByteString -> Int -> Double
+specF64 bs o = castWord64ToDouble (specU64 bs o)
+
+-- enriching an exact self-match: B span starts at the match, X scale ~1,
+-- no residual Y deformation beyond the affine map
+prop_sel_enrich_selfmatch :: Bool
+prop_sel_enrich_selfmatch =
+  let n = 200
+      v = VU.generate n (\k -> 100 + 10 * sin (fromIntegral k * 0.15))
+      pf = mkPrefix v
+      win = 32
+      band = 8
+      cs = enrichChunks pf pf win band [(20, 20, 0.001)]
+  in case cs of
+       [c] -> chB0 c == 20 && abs (chScaleX c - 1) < 0.15 && chYDeform c < 1e-8
+       _ -> False
+
+-- contiguous exact matches over a constant series chain into ONE stitched
+-- segment and rebuild to that constant everywhere (gap forward-fill)
+prop_sel_rebuild_constant :: Bool
+prop_sel_rebuild_constant =
+  let n = 120
+      v = VU.replicate n 42.5
+      pf = mkPrefix v
+      win = 32
+      band = 8
+      ms = [ (0, 0, 0.0), (16, 16, 0.0), (32, 32, 0.0) ]
+      rb = selectRebuild defaultSelParams pf pf win band ms
+  in VU.length (rbCloses rb) == n
+     && VU.all (\x -> abs (x - 42.5) < 1e-9) (rbCloses rb)
+     && rbCovered rb == 64
+     && length (rbSegs rb) == 1
+
+-- the reconstruction must sit at A's price SCALE, not B's: B is A x1000
+-- (z-norm makes the match exact) and the rebuilt std over the covered
+-- range must match A's std, not B's
+prop_sel_rebuild_scale :: Bool
+prop_sel_rebuild_scale =
+  let n = 200
+      a = VU.generate n (\k -> 1.0 + 0.01 * sin (fromIntegral k * 0.2))
+      b = VU.map (* 1000.0) a
+      pfa = mkPrefix a
+      pfb = mkPrefix b
+      win = 32
+      band = 8
+      ms = [ (0, 0, 0.0), (16, 16, 0.0) ]
+      rb = selectRebuild defaultSelParams pfa pfb win band ms
+      stdOf xs =
+        let mu = sum xs / fromIntegral (length xs)
+        in sqrt (sum [ (x - mu) * (x - mu) | x <- xs ] / fromIntegral (length xs))
+      sa = stdOf (VU.toList (VU.slice 0 48 a))
+      sr = stdOf (VU.toList (VU.slice 0 48 (rbCloses rb)))
+  in abs (sr - sa) < 1e-9 * max 1 sa
+
+-- a stitched pair whose B spans are unrelated fails re-validation; the
+-- group's remainder re-seeds as its own singleton segment, so both
+-- matches are still used
+prop_sel_stitch_rejects_unrelated :: Bool
+prop_sel_stitch_rejects_unrelated =
+  let nB = 6000
+      walk = VU.scanl' (+) 0 (VU.fromList (take nB lcgNoise))
+      pfb = mkPrefix walk
+      na = 96
+      v = VU.generate na (\k -> 100 + 5 * sin (fromIntegral k * 0.3))
+      pfa = mkPrefix v
+      win = 32
+      band = 8
+      se = defaultSelParams { seGap = 64, seTol = 1.0 }
+      ms = [ (0, 0, 0.01), (64, 3000, 0.01) ]
+      rb = selectRebuild se pfa pfb win band ms
+  in length (rbSegs rb) == 2 && rbCovered rb == 64
+
+-- the periodic term is ~0 for a candidate on the fitted scaleX sinus and
+-- large for one far off it
+prop_sel_periodic_dev :: Bool
+prop_sel_periodic_dev =
+  let w = 2 * pi / 512
+      hist = [ (fromIntegral (k * 64), 1.0 + 0.1 * sin (fromIntegral (k * 64) * w)) | k <- [0 .. 5] ]
+      onC = periodicDev hist (fromIntegral (6 * 64)) (1.0 + 0.1 * sin (fromIntegral (6 * 64) * w))
+      offC = periodicDev hist (fromIntegral (6 * 64)) 1.5
+  in onC < 1e-6 && offC > 0.3
+
+-- candle-only RELS: header fields and every close round-trip byte-exact
+prop_rels_bin_roundtrip :: Property
+prop_rels_bin_roundtrip =
+  forAll (chooseInt (1, 200)) $ \n ->
+  forAll (vectorOf n (choose (-1000.0, 1000.0))) $ \xs ->
+    let v = VU.fromList xs
+        bs = BL.toStrict (toLazyByteString (relsBin 5 v))
+        recAt k = specF64 bs (64 + k * 48 + 32)
+    in specU32 bs 0 == 0x534C4552
+       && specU32 bs 4 == 1
+       && fromIntegral (specU64 bs 16) == n
+       && all (\k -> recAt k == xs !! k) [0 .. n - 1]
+
 main :: IO ()
 main = do
   results <- mapM runProp props
@@ -1966,6 +2083,12 @@ props =
   , ("dtw_fp_consistent", property prop_dtw_fp_consistent)
   , ("dtw_index_matches_bruteforce", prop_dtw_index_matches_bruteforce)
   , ("dtw_scan_finds_planted", property prop_dtw_scan_finds_planted)
+  , ("sel_enrich_selfmatch", property prop_sel_enrich_selfmatch)
+  , ("sel_rebuild_constant", property prop_sel_rebuild_constant)
+  , ("sel_rebuild_scale", property prop_sel_rebuild_scale)
+  , ("sel_stitch_rejects_unrelated", property prop_sel_stitch_rejects_unrelated)
+  , ("sel_periodic_dev", property prop_sel_periodic_dev)
+  , ("rels_bin_roundtrip", prop_rels_bin_roundtrip)
   , ("mcp_params_json_roundtrip", property prop_mcp_params_json_roundtrip)
   , ("mcp_params_json_bad_mode", property prop_mcp_params_json_bad_mode)
   , ("mcp_perm_entropy_length", property prop_mcp_perm_entropy_length)

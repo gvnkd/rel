@@ -1461,7 +1461,12 @@ func add_timeline(tl_name: String, path: String) -> int:
 			view.decimals = s.store.decimals
 		_fit_view(s)
 	view.follow = true
-	head = 0
+	# playback walks replay_rate candles per WALL second, so playing from 0
+	# on a multi-million-candle series burns a core in _refresh for hours.
+	# Start the head near the tail so the walk always finishes in about
+	# PLAY_IN_SECONDS; small series still play from 0 unchanged.
+	const PLAY_IN_SECONDS := 60.0
+	head = maxi(0, data.max_len() - int(PLAY_IN_SECONDS * replay_rate))
 	data.head = head
 	playing = true
 	_update_book()
